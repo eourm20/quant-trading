@@ -1,0 +1,11 @@
+# 워커 전역 설정 (종목/조건은 DB에서 관리 — quant_watchlist_* / quant_condition_* 도구 사용)
+worker:
+  interval_seconds: 60         # 시세 조회 주기 (초)
+  use_claude_api: true         # 조건 충족 시 Claude API 판단 여부
+  claude_model: "claude-sonnet-4-6"
+
+# KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)
+# 프리장(장전 시간외): 08:30~09:00  trde_tp=61  (exit/add/both 조건만)
+# 정규장:             09:00~15:30  trde_tp=0/3 (전체 조건)
+# 애프터장(장후 시간외): 15:40~16:00  trde_tp=81  (exit/add/both 조건만)
+# 시간외 단일가:       16:00~18:00  trde_tp=62  (exit/add/both 조건만)

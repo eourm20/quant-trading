@@ -1,0 +1,115 @@
+conditions:
+  - id: target_price
+    name: 목표가 도달
+    evaluator: price_gte
+    param: target_price
+    cooldown_minutes: 240
+    message: "목표가 도달 ({price:,}원 >= {threshold:,}원)"
+
+  - id: stop_loss_price
+    name: 손절가 도달
+    evaluator: price_lte
+    param: stop_loss_price
+    cooldown_minutes: 240
+    message: "손절가 도달 ({price:,}원 <= {threshold:,}원)"
+
+  - id: rsi_overbought
+    name: RSI 과매수
+    evaluator: rsi_gte
+    param: rsi_overbought
+    cooldown_minutes: 60
+    message: "RSI 과매수 ({rsi:.1f} >= {threshold})"
+
+  - id: rsi_oversold
+    name: RSI 과매도
+    evaluator: rsi_lte
+    param: rsi_oversold
+    cooldown_minutes: 60
+    message: "RSI 과매도 ({rsi:.1f} <= {threshold})"
+
+  - id: volume_surge_ratio
+    name: 거래량 급증
+    evaluator: volume_gte
+    param: volume_surge_ratio
+    cooldown_minutes: 30
+    message: "거래량 급증 ({ratio:.1f}배)"
+
+  - id: golden_cross
+    name: MA 골든크로스
+    evaluator: flag
+    param: golden_cross
+    chart_field: golden_cross
+    cooldown_minutes: 1440
+    message: "골든크로스 (MA5 {ma5:,} > MA20 {ma20:,})"
+
+  - id: death_cross
+    name: MA 데드크로스
+    evaluator: flag
+    param: death_cross
+    chart_field: death_cross
+    cooldown_minutes: 1440
+    message: "데드크로스 (MA5 {ma5:,} < MA20 {ma20:,})"
+
+  - id: new_high_20d
+    name: 20일 신고가 돌파
+    evaluator: flag
+    param: new_high_20d
+    chart_field: new_high_20d
+    cooldown_minutes: 240
+    message: "20일 신고가 돌파 ({price:,}원)"
+
+  - id: ma20_support_break
+    name: MA20 하향 이탈
+    evaluator: flag
+    param: ma20_support_break
+    chart_field: broke_below_ma20
+    cooldown_minutes: 240
+    message: "MA20 하향 이탈 ({price:,}원 < MA20 {ma20:,}원)"
+
+  - id: ma5_support_break
+    name: MA5 하향 이탈
+    evaluator: flag
+    param: ma5_support_break
+    chart_field: broke_below_ma5
+    cooldown_minutes: 120
+    message: "MA5 하향 이탈 ({price:,}원 < MA5 {ma5:,}원)"
+
+  - id: ma5_recovery
+    name: MA5 상향 돌파 (회복)
+    evaluator: flag
+    param: ma5_recovery
+    chart_field: broke_above_ma5
+    cooldown_minutes: 120
+    message: "MA5 상향 돌파 ({price:,}원 > MA5 {ma5:,}원)"
+
+  - id: macd_golden_cross
+    name: MACD 골든크로스
+    evaluator: flag
+    param: macd_golden_cross
+    chart_field: macd_golden_cross
+    cooldown_minutes: 1440
+    message: "MACD 골든크로스 (MACD {macd:.0f} > Signal {signal:.0f})"
+
+  - id: macd_death_cross
+    name: MACD 데드크로스
+    evaluator: flag
+    param: macd_death_cross
+    chart_field: macd_death_cross
+    cooldown_minutes: 1440
+    message: "MACD 데드크로스 (MACD {macd:.0f} < Signal {signal:.0f})"
+
+  - id: bollinger_upper_break
+    name: 볼린저 밴드 상단 돌파
+    evaluator: flag
+    param: bollinger_upper_break
+    chart_field: bollinger_above_upper
+    cooldown_minutes: 120
+    message: "볼린저 상단 돌파 ({price:,}원 > 상단 {upper:,}원)"
+
+  - id: bollinger_lower_break
+    name: 볼린저 밴드 하단 이탈
+    evaluator: flag
+    param: bollinger_lower_break
+    chart_field: bollinger_below_lower
+    cooldown_minutes: 120
+    message: "볼린저 하단 이탈 ({price:,}원 < 하단 {lower:,}원)"

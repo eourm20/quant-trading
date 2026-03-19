@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>시나리오별 프로세스 다이어그램 v3</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f9f8f5;
+    color: #1a1a18;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    text-align: center;
+    margin-bottom: 16px;
+    color: #1a1a18;
+  }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .stab {
+    padding: 6px 14px;
+    border: 1px solid #c8c6bc;
+    border-radius: 6px;
+    background: transparent;
+    color: #5f5e5a;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all .15s;
+    font-family: inherit;
+  }
+  .stab.on {
+    background: #e6f1fb;
+    color: #185fa5;
+    border-color: #85b7eb;
+  }
+  .sc { display: none; }
+  .sc.on { display: block; }
+
+  svg { display: block; width: 100%; }
+  svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  svg .th { font-size: 14px; font-weight: 500; fill: #1a1a18; }
+  svg .ts { font-size: 12px; font-weight: 400; fill: #5f5e5a; }
+
+  svg .c-purple rect { fill: #EEEDFE; stroke: #534AB7; }
+  svg .c-purple .th { fill: #3C3489; }
+  svg .c-purple .ts { fill: #534AB7; }
+
+  svg .c-teal rect { fill: #E1F5EE; stroke: #0F6E56; }
+  svg .c-teal .th { fill: #085041; }
+  svg .c-teal .ts { fill: #0F6E56; }
+
+  svg .c-blue rect { fill: #E6F1FB; stroke: #185FA5; }
+  svg .c-blue .th { fill: #0C447C; }
+  svg .c-blue .ts { fill: #185FA5; }
+
+  svg .c-amber rect { fill: #FAEEDA; stroke: #854F0B; }
+  svg .c-amber .th { fill: #633806; }
+  svg .c-amber .ts { fill: #854F0B; }
+
+  svg .c-coral rect { fill: #FAECE7; stroke: #993C1D; }
+  svg .c-coral .th { fill: #712B13; }
+  svg .c-coral .ts { fill: #993C1D; }
+
+  svg .c-gray rect { fill: #F1EFE8; stroke: #5F5E5A; }
+  svg .c-gray .th { fill: #444441; }
+  svg .c-gray .ts { fill: #5F5E5A; }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a18; color: #e8e6de; }
+    h1 { color: #e8e6de; }
+    .stab { border-color: #444441; color: #b4b2a9; }
+    .stab.on { background: #042C53; color: #B5D4F4; border-color: #378ADD; }
+
+    svg .th { fill: #e8e6de; }
+    svg .ts { fill: #b4b2a9; }
+
+    svg .c-purple rect { fill: #26215C; stroke: #AFA9EC; }
+    svg .c-purple .th { fill: #CECBF6; }
+    svg .c-purple .ts { fill: #AFA9EC; }
+
+    svg .c-teal rect { fill: #04342C; stroke: #5DCAA5; }
+    svg .c-teal .th { fill: #9FE1CB; }
+    svg .c-teal .ts { fill: #5DCAA5; }
+
+    svg .c-blue rect { fill: #042C53; stroke: #85B7EB; }
+    svg .c-blue .th { fill: #B5D4F4; }
+    svg .c-blue .ts { fill: #85B7EB; }
+
+    svg .c-amber rect { fill: #412402; stroke: #EF9F27; }
+    svg .c-amber .th { fill: #FAC775; }
+    svg .c-amber .ts { fill: #EF9F27; }
+
+    svg .c-coral rect { fill: #4A1B0C; stroke: #F0997B; }
+    svg .c-coral .th { fill: #F5C4B3; }
+    svg .c-coral .ts { fill: #F0997B; }
+
+    svg .c-gray rect { fill: #2C2C2A; stroke: #888780; }
+    svg .c-gray .th { fill: #D3D1C7; }
+    svg .c-gray .ts { fill: #888780; }
+  }
+</style>
+</head>
+<body>
+
+<h1>④ 시나리오별 프로세스</h1>
+
+<div class="tabs">
+  <button class="stab on" onclick="sw('a',this)">신호 발생 → 알림</button>
+  <button class="stab" onclick="sw('b',this)">미보유 entry 신호</button>
+  <button class="stab" onclick="sw('c',this)">보유 exit 신호</button>
+  <button class="stab" onclick="sw('d',this)">주문 실행</button>
+  <button class="stab" onclick="sw('e',this)">조회 명령</button>
+  <button class="stab" onclick="sw('f',this)">조건 변경</button>
+  <button class="stab" onclick="sw('g',this)">조건 추가</button>
+</div>
+
+<!-- S1: 신호 발생 → 알림 -->
+<div id="a" class="sc on">
+<svg viewBox="0 0 680 500">
+<defs><marker id="arr-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">워커 1분 체크 → signal_type 필터링 → 쿨다운 → AI 판단 → 텔레그램 알림</text>
+<g class="c-gray"><rect x="240" y="36" width="200" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">워커 1분 체크 시작</text></g>
+<line x1="340" y1="76" x2="340" y2="100" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-a)"/>
+<g class="c-blue"><rect x="180" y="100" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="120" text-anchor="middle" dominant-baseline="central">키움 API → 현재가 + 40일 일봉 조회</text></g>
+<line x1="340" y1="140" x2="340" y2="164" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr-a)"/>
+<g class="c-blue"><rect x="180" y="164" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="184" text-anchor="middle" dominant-baseline="central">지표 계산 · RSI / MA / MACD / 볼린저</text></g>
+<line x1="340" y1="204" x2="340" y2="228" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr-a)"/>
+<g class="c-blue"><rect x="140" y="228" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="248" text-anchor="middle" dominant-baseline="central">signal_type 필터링 + 조건 평가</text>
+<text class="ts" x="340" y="267" text-anchor="middle" dominant-baseline="central">보유 → exit/both 조건만 · 미보유 → entry/both 조건만</text></g>
+<line x1="340" y1="280" x2="340" y2="304" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr-a)"/>
+<g class="c-gray"><rect x="180" y="304" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="324" text-anchor="middle" dominant-baseline="central">쿨다운 확인 → 조건별 중복 방지</text></g>
+<line x1="340" y1="344" x2="340" y2="368" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-a)"/>
+<g class="c-amber"><rect x="180" y="368" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="388" text-anchor="middle" dominant-baseline="central">AI 판단 · ANTHROPIC → Claude / OPENAI → GPT</text></g>
+<line x1="340" y1="408" x2="340" y2="432" stroke="#BA7517" stroke-width="1.5" marker-end="url(#arr-a)"/>
+<g class="c-teal"><rect x="140" y="432" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="452" text-anchor="middle" dominant-baseline="central">텔레그램 발송 → 사용자</text>
+<text class="ts" x="340" y="471" text-anchor="middle" dominant-baseline="central">메시지1: 신호 요약 · 메시지2: AI 의견 · signals DB 저장</text></g>
+</svg>
+</div>
+
+<!-- S2: 미보유 entry 신호 → 매수 검토 -->
+<div id="b" class="sc">
+<svg viewBox="0 0 680 410">
+<defs><marker id="arr-b" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">미보유 종목 entry 신호 수신 → 매수 검토 → 주문 or 홀드</text>
+<g class="c-teal"><rect x="160" y="36" width="360" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">텔레그램 수신 · 미보유 종목 entry 신호</text>
+<text class="ts" x="340" y="71" text-anchor="middle" dominant-baseline="central">골든크로스 / RSI 과매도 / MACD 골든크로스 등</text></g>
+<line x1="340" y1="88" x2="340" y2="112" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arr-b)"/>
+<g class="c-purple"><rect x="200" y="112" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="132" text-anchor="middle" dominant-baseline="central">사용자 → Claude: "이 종목 살까?"</text></g>
+<line x1="340" y1="152" x2="340" y2="176" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-b)"/>
+<g class="c-amber"><rect x="140" y="176" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="196" text-anchor="middle" dominant-baseline="central">quant_report(signals) + quant_watchlist_read()</text>
+<text class="ts" x="340" y="211" text-anchor="middle" dominant-baseline="central">최근 신호 확인 · 목표가 / 손절가 / 조건값 확인</text></g>
+<line x1="340" y1="228" x2="340" y2="252" stroke="#BA7517" stroke-width="1.5" marker-end="url(#arr-b)"/>
+<g class="c-blue"><rect x="180" y="252" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="272" text-anchor="middle" dominant-baseline="central">매수 검토 · 지표 + AI 의견 종합</text></g>
+<line x1="280" y1="292" x2="172" y2="336" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arr-b)"/>
+<line x1="400" y1="292" x2="508" y2="336" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-b)"/>
+<text class="ts" x="196" y="322" text-anchor="middle" fill="#712B13">매수 결정</text>
+<text class="ts" x="484" y="322" text-anchor="middle" fill="#444441">홀드</text>
+<g class="c-coral"><rect x="48" y="336" width="240" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="168" y="356" text-anchor="middle" dominant-baseline="central">주문 실행 시나리오</text>
+<text class="ts" x="168" y="371" text-anchor="middle" dominant-baseline="central">kiwoom_execute_api → 매수 주문</text></g>
+<g class="c-gray"><rect x="392" y="336" width="240" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="512" y="356" text-anchor="middle" dominant-baseline="central">Claude 홀드 의견 답변</text>
+<text class="ts" x="512" y="371" text-anchor="middle" dominant-baseline="central">재진입 기준 / 다음 신호 대기 안내</text></g>
+</svg>
+</div>
+
+<!-- S3: 보유 exit 신호 → 매도 검토 -->
+<div id="c" class="sc">
+<svg viewBox="0 0 680 410">
+<defs><marker id="arr-c" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">보유 종목 exit 신호 수신 → 매도 검토 → 주문 or 홀드</text>
+<g class="c-teal"><rect x="160" y="36" width="360" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">텔레그램 수신 · 보유 종목 exit 신호</text>
+<text class="ts" x="340" y="71" text-anchor="middle" dominant-baseline="central">목표가 도달 / 손절가 도달 / 데드크로스 / MA 이탈 등</text></g>
+<line x1="340" y1="88" x2="340" y2="112" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arr-c)"/>
+<g class="c-purple"><rect x="200" y="112" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="132" text-anchor="middle" dominant-baseline="central">사용자 → Claude: "팔아야 해?"</text></g>
+<line x1="340" y1="152" x2="340" y2="176" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-c)"/>
+<g class="c-amber"><rect x="140" y="176" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="196" text-anchor="middle" dominant-baseline="central">quant_report(portfolio) + quant_watchlist_read()</text>
+<text class="ts" x="340" y="211" text-anchor="middle" dominant-baseline="central">보유 수량 · 수익률 · 목표가 / 손절가 확인</text></g>
+<line x1="340" y1="228" x2="340" y2="252" stroke="#BA7517" stroke-width="1.5" marker-end="url(#arr-c)"/>
+<g class="c-blue"><rect x="180" y="252" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="272" text-anchor="middle" dominant-baseline="central">매도 검토 · 신호 + 수익률 + AI 의견 종합</text></g>
+<line x1="280" y1="292" x2="172" y2="336" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arr-c)"/>
+<line x1="400" y1="292" x2="508" y2="336" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-c)"/>
+<text class="ts" x="196" y="322" text-anchor="middle" fill="#712B13">매도 결정</text>
+<text class="ts" x="484" y="322" text-anchor="middle" fill="#444441">홀드</text>
+<g class="c-coral"><rect x="48" y="336" width="240" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="168" y="356" text-anchor="middle" dominant-baseline="central">주문 실행 시나리오</text>
+<text class="ts" x="168" y="371" text-anchor="middle" dominant-baseline="central">kiwoom_execute_api → 매도 주문</text></g>
+<g class="c-gray"><rect x="392" y="336" width="240" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="512" y="356" text-anchor="middle" dominant-baseline="central">Claude 홀드 의견 답변</text>
+<text class="ts" x="512" y="371" text-anchor="middle" dominant-baseline="central">추가 하락 시 손절 기준 / 홀드 근거</text></g>
+</svg>
+</div>
+
+<!-- S4: 주문 실행 -->
+<div id="d" class="sc">
+<svg viewBox="0 0 680 540">
+<defs><marker id="arr-d" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">"삼성전자 200주 매수" → kiwoom-mcp → 키움 API → 체결 → 자동 기록</text>
+<g class="c-purple"><rect x="200" y="36" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">"삼성전자 200주 매수"</text></g>
+<line x1="340" y1="76" x2="340" y2="100" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<g class="c-blue"><rect x="200" y="100" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="120" text-anchor="middle" dominant-baseline="central">Claude Desktop 의도 파악</text></g>
+<line x1="340" y1="140" x2="340" y2="164" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<g class="c-teal"><rect x="180" y="164" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="184" text-anchor="middle" dominant-baseline="central">kiwoom-mcp: kiwoom_execute_api</text></g>
+<line x1="340" y1="204" x2="340" y2="228" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<g class="c-coral"><rect x="140" y="228" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="248" text-anchor="middle" dominant-baseline="central">키움 REST API 주문 전송</text>
+<text class="ts" x="340" y="267" text-anchor="middle" dominant-baseline="central">005930 · 매수 · 200주 · 시장가</text></g>
+<line x1="340" y1="280" x2="340" y2="304" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<g class="c-coral"><rect x="200" y="304" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="324" text-anchor="middle" dominant-baseline="central">체결 결과 반환</text></g>
+<line x1="340" y1="344" x2="340" y2="368" stroke="#BA7517" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<g class="c-amber"><rect x="140" y="368" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="388" text-anchor="middle" dominant-baseline="central">Claude 자동 처리</text>
+<text class="ts" x="340" y="407" text-anchor="middle" dominant-baseline="central">quant_strategy_log + quant_portfolio_sync 자동 호출</text></g>
+<line x1="280" y1="420" x2="172" y2="464" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<line x1="400" y1="420" x2="508" y2="464" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arr-d)"/>
+<text class="ts" x="200" y="450" text-anchor="middle" fill="#3C3489">답변</text>
+<text class="ts" x="480" y="450" text-anchor="middle" fill="#085041">알림 + 동기화</text>
+<g class="c-purple"><rect x="48" y="464" width="248" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="172" y="484" text-anchor="middle" dominant-baseline="central">Claude 체결 답변</text>
+<text class="ts" x="172" y="499" text-anchor="middle" dominant-baseline="central">"200주 체결 완료 (₩73,400)"</text></g>
+<g class="c-teal"><rect x="384" y="464" width="248" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="508" y="484" text-anchor="middle" dominant-baseline="central">텔레그램 매매 알림</text>
+<text class="ts" x="508" y="499" text-anchor="middle" dominant-baseline="central">전략 노트 기록 + DB 동기화 완료</text></g>
+</svg>
+</div>
+
+<!-- S5: 조회 명령 -->
+<div id="e" class="sc">
+<svg viewBox="0 0 680 390">
+<defs><marker id="arr-e" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">"오늘 신호 뭐 왔어?" → quant-mcp → DB 조회 → Claude 요약 답변</text>
+<g class="c-purple"><rect x="220" y="36" width="240" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">"오늘 신호 뭐 왔어?"</text></g>
+<line x1="340" y1="76" x2="340" y2="100" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-e)"/>
+<g class="c-blue"><rect x="200" y="100" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="120" text-anchor="middle" dominant-baseline="central">Claude Desktop 의도 파악</text></g>
+<line x1="340" y1="140" x2="340" y2="164" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr-e)"/>
+<g class="c-amber"><rect x="180" y="164" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="184" text-anchor="middle" dominant-baseline="central">quant-mcp: quant_report(signals, days=1)</text></g>
+<line x1="340" y1="204" x2="340" y2="228" stroke="#BA7517" stroke-width="1.5" marker-end="url(#arr-e)"/>
+<g class="c-gray"><rect x="200" y="228" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="248" text-anchor="middle" dominant-baseline="central">SQLite signals 테이블 조회</text></g>
+<line x1="340" y1="268" x2="340" y2="292" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-e)"/>
+<g class="c-purple"><rect x="140" y="292" width="400" height="56" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="314" text-anchor="middle" dominant-baseline="central">Claude 요약 답변</text>
+<text class="ts" x="340" y="334" text-anchor="middle" dominant-baseline="central">"오늘 3건 — 삼성전자 RSI 과매도, 한화에어로 골든크로스..."</text></g>
+</svg>
+</div>
+
+<!-- S6: 조건 변경 -->
+<div id="f" class="sc">
+<svg viewBox="0 0 680 460">
+<defs><marker id="arr-f" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">"SK하이닉스 손절가 83만원으로 낮춰" → DB 반영 → 변경 요약 텔레그램</text>
+<g class="c-purple"><rect x="180" y="36" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">"SK하이닉스 손절가 83만원으로 낮춰"</text></g>
+<line x1="340" y1="76" x2="340" y2="100" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-f)"/>
+<g class="c-blue"><rect x="200" y="100" width="280" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="120" text-anchor="middle" dominant-baseline="central">Claude Desktop 의도 파악</text></g>
+<line x1="340" y1="140" x2="340" y2="164" stroke="#378ADD" stroke-width="1.5" marker-end="url(#arr-f)"/>
+<g class="c-gray"><rect x="140" y="164" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="184" text-anchor="middle" dominant-baseline="central">quant_watchlist_update × N건</text>
+<text class="ts" x="340" y="199" text-anchor="middle" dominant-baseline="central">DB 즉시 반영 · 텔레그램 없음 · 변경 건수만큼 반복</text></g>
+<line x1="340" y1="216" x2="340" y2="240" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-f)"/>
+<g class="c-amber"><rect x="160" y="240" width="360" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="260" text-anchor="middle" dominant-baseline="central">quant_strategy_log 1회 요약 발송</text>
+<text class="ts" x="340" y="275" text-anchor="middle" dominant-baseline="central">category: watchlist · 전체 변경 내용 한 줄 요약</text></g>
+<line x1="280" y1="292" x2="172" y2="336" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-f)"/>
+<line x1="400" y1="292" x2="508" y2="336" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arr-f)"/>
+<text class="ts" x="200" y="322" text-anchor="middle" fill="#3C3489">답변</text>
+<text class="ts" x="480" y="322" text-anchor="middle" fill="#085041">알림</text>
+<g class="c-purple"><rect x="48" y="336" width="248" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="172" y="356" text-anchor="middle" dominant-baseline="central">Claude 변경 확인 답변</text>
+<text class="ts" x="172" y="371" text-anchor="middle" dominant-baseline="central">이전 값 → 새 값 명시</text></g>
+<g class="c-teal"><rect x="384" y="336" width="248" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="508" y="356" text-anchor="middle" dominant-baseline="central">텔레그램 요약 발송</text>
+<text class="ts" x="508" y="371" text-anchor="middle" dominant-baseline="central">손절가 / 목표가 / RSI 변경 요약</text></g>
+<rect x="220" y="406" width="240" height="36" rx="6" fill="none" stroke="#c8c6bc" stroke-width="0.5"/>
+<text class="ts" x="340" y="424" text-anchor="middle" fill="#5f5e5a">워커 다음 체크 시 자동 반영 (최대 60초)</text>
+</svg>
+</div>
+
+<!-- S7: 조건 추가 -->
+<div id="g" class="sc">
+<svg viewBox="0 0 680 450">
+<defs><marker id="arr-g" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text class="ts" x="340" y="20" text-anchor="middle">"볼린저 하단 이탈 조건 추가해줘" → DB 저장 + 텔레그램 자동 발송 → 종목 활성화 → 워커 반영</text>
+<g class="c-purple"><rect x="160" y="36" width="360" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="56" text-anchor="middle" dominant-baseline="central">"볼린저 하단 이탈 조건 추가해줘"</text></g>
+<line x1="340" y1="76" x2="340" y2="100" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-g)"/>
+<g class="c-amber"><rect x="180" y="100" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="120" text-anchor="middle" dominant-baseline="central">quant_condition_add</text></g>
+<!-- 텔레그램 사이드 박스 -->
+<g class="c-teal"><rect x="556" y="100" width="108" height="40" rx="6" stroke-width="0.5"/>
+<text class="th" x="610" y="114" text-anchor="middle" dominant-baseline="central" style="font-size:11px">텔레그램</text>
+<text class="ts" x="610" y="130" text-anchor="middle" dominant-baseline="central" style="font-size:10px">자동 발송</text></g>
+<line x1="500" y1="120" x2="556" y2="120" stroke="#1D9E75" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-g)"/>
+<line x1="340" y1="140" x2="340" y2="164" stroke="#BA7517" stroke-width="1.5" marker-end="url(#arr-g)"/>
+<g class="c-gray"><rect x="180" y="164" width="320" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="184" text-anchor="middle" dominant-baseline="central">conditions_def 테이블 저장</text></g>
+<line x1="340" y1="204" x2="340" y2="228" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-g)"/>
+<g class="c-gray"><rect x="140" y="228" width="400" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="248" text-anchor="middle" dominant-baseline="central">quant_watchlist_update × 종목 수</text>
+<text class="ts" x="340" y="263" text-anchor="middle" dominant-baseline="central">각 종목에 param 값 설정 → 조건 활성화</text></g>
+<line x1="340" y1="280" x2="340" y2="304" stroke="#888780" stroke-width="1.5" marker-end="url(#arr-g)"/>
+<g class="c-teal"><rect x="160" y="304" width="360" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="324" text-anchor="middle" dominant-baseline="central">워커 다음 1분 체크 시 즉시 반영</text>
+<text class="ts" x="340" y="339" text-anchor="middle" dominant-baseline="central">코드 수정 없이 DB만으로 조건 추가 완료</text></g>
+<line x1="340" y1="356" x2="340" y2="380" stroke="#7F77DD" stroke-width="1.5" marker-end="url(#arr-g)"/>
+<g class="c-purple"><rect x="180" y="380" width="320" height="52" rx="8" stroke-width="0.5"/>
+<text class="th" x="340" y="400" text-anchor="middle" dominant-baseline="central">Claude 완료 답변</text>
+<text class="ts" x="340" y="415" text-anchor="middle" dominant-baseline="central">"조건 추가 완료 · 종목별 param 설정 안내"</text></g>
+</svg>
+</div>
+
+<script>
+function sw(id, btn) {
+  document.querySelectorAll('.sc').forEach(s => s.classList.remove('on'));
+  document.querySelectorAll('.stab').forEach(b => b.classList.remove('on'));
+  document.getElementById(id).classList.add('on');
+  btn.classList.add('on');
+}
+</script>
+</body>
+</html>
