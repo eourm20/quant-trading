@@ -14,10 +14,10 @@
 
 1. https://cloud.oracle.com 접속
 2. **Start for Free** 클릭
-3. **Home Region**: `South Korea Central (Seoul)` 선택 (가입 후 변경 불가!)
+3. **Home Region**: `South Korea North (Chuncheon)` 선택 (가입 후 변경 불가!)
 4. 가입 완료 (신용카드 필요하지만 Always Free는 과금 안 됨)
 
-> ⚠️ Home Region을 서울로 반드시 선택. 키움 API가 한국 IP를 요구할 수 있음.
+> ⚠️ Home Region을 한국(Chuncheon)으로 반드시 선택. 키움 API가 한국 IP를 요구할 수 있음.
 
 ---
 
