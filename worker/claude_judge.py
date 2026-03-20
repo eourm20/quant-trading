@@ -611,9 +611,9 @@ def get_trade_opinion(
     # ── DART 공시 조회 ──
     dart_text = "공시 조회 불가"
     try:
-        from worker.clients.dart_client import format_disclosures_for_ai, DART_API_KEY
+        from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
         if DART_API_KEY:
-            dart_text = format_disclosures_for_ai(signal.stock_code, max_items=10)
+            dart_text = format_full_context_for_ai(signal.stock_code)
     except Exception as e:
         logger.debug(f"DART 공시 조회 실패: {e}")
 

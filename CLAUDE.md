@@ -246,6 +246,7 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 - 종목/조건 설정: DB (`data/trading.db`, SQLite) — MCP 도구로 실시간 반영
 - 포트폴리오 동기화: `worker/portfolio_sync.py`
 - 리포트 조회: `worker/report.py`
+- 외부 API 클라이언트: `worker/clients/` (키움 경량, DART 경량) / `kiwoom_mcp/kiwoom_mcp/` (키움 풀, DART 풀)
 - 신호 로그: `data/db.py`
 - 텔레그램 알림: `notifications/telegram.py` (인라인 버튼 포함)
 - 텔레그램 봇 주문: `notifications/telegram_bot.py`
@@ -438,6 +439,27 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 - 모든 변경은 전략 로그에 근거 기록 필수
 - 감정적 판단(공포·욕심)으로 인한 변경은 하루 숙려 후 결정 권고
 - 3단계 의사결정 원칙: 1차 워커(신호) → 2차 AI(판단) → 3차 사람(최종결정)
+
+---
+
+## signals 테이블 (RAG/학습용 확장)
+
+신호 발생 시 전체 컨텍스트를 저장하여 향후 RAG 검색 및 AI 학습에 활용.
+
+| 컬럼 | 타입 | 용도 |
+|------|------|------|
+| `verdict` | TEXT | 구조화된 판정 (매수/매도/홀드, claude_opinion에서 자동 추출) |
+| `indicator_snapshot` | TEXT (JSON) | 신호 시점 전체 지표 스냅샷 (RSI, MA, 스토캐스틱, CCI, 일목균형표, 다이버전스 등) |
+| `dart_summary` | TEXT | 신호 시점 DART 공시 + 재무지표 요약 |
+| `chart_patterns` | TEXT (JSON) | 감지된 캔들 패턴 + 차트 패턴 |
+| `result_1d` | REAL | 1일 후 수익률 (%) |
+| `result_pct` | REAL | 3일 후 수익률 (%) (기존) |
+| `result_5d` | REAL | 5일 후 수익률 (%) |
+| `result_10d` | REAL | 10일 후 수익률 (%) |
+
+- 결과 수익률은 스케줄러가 자동 업데이트 (30분마다, 장 시간)
+- `indicator_snapshot`은 None 값 제거 후 JSON 저장 (용량 절감)
+- RAG 검색: "비슷한 지표 상태에서 AI가 어떤 판단을 했고 결과가 어땠는지" 조회 가능
 
 ---
 

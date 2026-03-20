@@ -129,30 +129,40 @@ def _maybe_save_hold_conditions(signal, opinion: str):
 
 
 def update_signal_results():
-    """3일 전 신호들의 결과 수익률을 현재가 기준으로 업데이트."""
+    """신호 발생 후 1일/3일/5일/10일 결과 수익률을 현재가 기준으로 업데이트."""
     from datetime import timedelta
     from data.db import get_conn
-    cutoff_from = (datetime.now() - timedelta(days=4)).strftime("%Y-%m-%d")
-    cutoff_to   = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, stock_code, stock_name, current_price FROM signals "
-            "WHERE result_pct IS NULL AND created_at >= ? AND created_at < ?",
-            (cutoff_from, cutoff_to),
-        ).fetchall()
-    for row in rows:
-        try:
-            pd = kiwoom.get_current_price(row["stock_code"])
-            now_price = abs(int(str(
-                pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
-            ).replace(",", "")))
-            if now_price and row["current_price"]:
-                pct = (now_price - row["current_price"]) / row["current_price"] * 100
-                update_signal_result(row["id"], round(pct, 2))
-                logger.debug(f"[결과 업데이트] {row['stock_name']} 신호#{row['id']}: {pct:+.2f}%")
-            time.sleep(0.5)
-        except Exception as e:
-            logger.warning(f"[결과 업데이트 실패] {row['stock_name']}: {e}")
+
+    periods = [
+        ("1d", 1, 2, "result_1d"),
+        ("3d", 3, 4, "result_pct"),
+        ("5d", 5, 6, "result_5d"),
+        ("10d", 10, 11, "result_10d"),
+    ]
+
+    for period_name, days_after, days_before, col_name in periods:
+        cutoff_from = (datetime.now() - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (datetime.now() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, stock_code, stock_name, current_price FROM signals "
+                f"WHERE {col_name} IS NULL AND created_at >= ? AND created_at < ?",
+                (cutoff_from, cutoff_to),
+            ).fetchall()
+
+        for row in rows:
+            try:
+                pd = kiwoom.get_current_price(row["stock_code"])
+                now_price = abs(int(str(
+                    pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
+                ).replace(",", "")))
+                if now_price and row["current_price"]:
+                    pct = (now_price - row["current_price"]) / row["current_price"] * 100
+                    update_signal_result(row["id"], round(pct, 2), period=period_name)
+                    logger.debug(f"[결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[결과 {period_name} 실패] {row['stock_name']}: {e}")
 
 
 def check_trailing_stops():
@@ -389,8 +399,17 @@ def run_check():
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
+            # DART 공시 요약 (AI에게 전달된 것과 동일한 내용 저장)
+            dart_summary = None
+            try:
+                from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
+                if DART_API_KEY:
+                    dart_summary = format_full_context_for_ai(signal.stock_code)
+            except Exception:
+                pass
+
             mark_sent(signal.stock_code, new_ids)
-            signal_id = save_signal(signal, claude_opinion, in_portfolio=signal.in_portfolio)
+            signal_id = save_signal(signal, claude_opinion, in_portfolio=signal.in_portfolio, dart_summary=dart_summary)
             send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
 
             if claude_opinion:

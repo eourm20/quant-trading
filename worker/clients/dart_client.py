@@ -225,3 +225,57 @@ def format_disclosures_for_ai(stock_code: str, max_items: int = 10) -> str:
         lines.append(line)
 
     return "\n".join(lines)
+
+
+def get_financial_summary_for_ai(stock_code: str) -> str:
+    """AI 판단용 재무지표 요약 (매출, 영업이익, PER, PBR, ROE 등)."""
+    if not DART_API_KEY:
+        return ""
+
+    corp_code = get_corp_code(stock_code)
+    if not corp_code:
+        return ""
+
+    from datetime import datetime
+    year = str(datetime.now().year - 1)
+
+    # 주요계정 조회
+    try:
+        resp = requests.get(
+            f"{DART_BASE_URL}/fnlttSinglAcnt.json",
+            params={"crtfc_key": DART_API_KEY, "corp_code": corp_code,
+                    "bsns_year": year, "reprt_code": "11011"},
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get("status") != "000":
+            return ""
+
+        lines = []
+        for item in data.get("list", []):
+            acnt = item.get("account_nm", "")
+            amount = item.get("thstrm_amount", "")
+            if acnt and amount and item.get("fs_div") == "CFS":  # 연결재무제표
+                lines.append(f"  - {acnt}: {amount}")
+
+        if not lines:
+            return ""
+        return f"  [{year}년 사업보고서 주요계정]\n" + "\n".join(lines[:8])
+
+    except Exception:
+        return ""
+
+
+def format_full_context_for_ai(stock_code: str) -> str:
+    """AI 판단용 DART 전체 컨텍스트 (공시 + 재무지표)."""
+    parts = []
+
+    disclosures = format_disclosures_for_ai(stock_code, max_items=8)
+    if disclosures and disclosures != "최근 공시 없음":
+        parts.append(disclosures)
+
+    financial = get_financial_summary_for_ai(stock_code)
+    if financial:
+        parts.append(financial)
+
+    return "\n".join(parts) if parts else "최근 공시/재무 데이터 없음"

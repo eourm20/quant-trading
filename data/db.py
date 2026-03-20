@@ -103,6 +103,35 @@ def init_db():
             conn.execute("ALTER TABLE signals ADD COLUMN signal_type TEXT DEFAULT NULL")
         except Exception:
             pass
+        # RAG/학습용 확장 컬럼
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN verdict TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN indicator_snapshot TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN dart_summary TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN chart_patterns TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN result_1d REAL DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN result_5d REAL DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN result_10d REAL DEFAULT NULL")
+        except Exception:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cooldowns (
                 key TEXT PRIMARY KEY,
@@ -715,15 +744,80 @@ def shorten_cooldowns_for_stock(stock_code: str, ratio: float = 0.25, min_minute
     return count
 
 
-def save_signal(signal, claude_opinion: str | None = None, in_portfolio: bool = False) -> int:
-    """신호 저장 후 signal_id 반환."""
+def _extract_verdict(claude_opinion: str | None) -> str | None:
+    """AI 판단 텍스트에서 [매수]/[매도]/[홀드] 추출."""
+    if not claude_opinion:
+        return None
+    first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
+    for v in ["매수", "매도", "홀드"]:
+        if f"[{v}]" in first_line:
+            return v
+    return None
+
+
+def _build_indicator_snapshot(signal) -> str | None:
+    """신호 시점의 전체 지표 스냅샷을 JSON으로 생성."""
+    chart = getattr(signal, "chart", None)
+    if not chart:
+        return json.dumps({"rsi": signal.rsi, "volume_ratio": signal.volume_ratio})
+
+    snapshot = {
+        "rsi": signal.rsi,
+        "volume_ratio": signal.volume_ratio,
+        "ma5": chart.ma5,
+        "ma20": chart.ma20,
+        "trend": chart.trend,
+        "above_ma5": chart.above_ma5,
+        "above_ma20": chart.above_ma20,
+        "price_change_5d": chart.price_change_5d,
+        "macd_line": chart.macd_line,
+        "macd_signal": chart.macd_signal,
+        "bollinger_upper": chart.bollinger_upper,
+        "bollinger_lower": chart.bollinger_lower,
+        "stochastic_k": chart.stochastic_k,
+        "stochastic_d": chart.stochastic_d,
+        "cci": chart.cci,
+        "ichimoku_tenkan": chart.ichimoku_tenkan,
+        "ichimoku_kijun": chart.ichimoku_kijun,
+        "ichimoku_above_cloud": chart.ichimoku_above_cloud,
+        "ichimoku_cloud_thickness": chart.ichimoku_cloud_thickness,
+        "obv_trend": chart.obv_trend,
+        "rsi_divergence": chart.rsi_divergence,
+        "macd_divergence": chart.macd_divergence,
+        "volume_spread": chart.volume_spread,
+        "volume_price_trend": chart.volume_price_trend,
+        "support_level": chart.support_level,
+        "resistance_level": chart.resistance_level,
+    }
+    # None 값 제거 (용량 절감)
+    return json.dumps({k: v for k, v in snapshot.items() if v is not None}, ensure_ascii=False)
+
+
+def save_signal(
+    signal,
+    claude_opinion: str | None = None,
+    in_portfolio: bool = False,
+    dart_summary: str | None = None,
+) -> int:
+    """신호 저장 후 signal_id 반환. 지표 스냅샷 + verdict 자동 추출."""
+    verdict = _extract_verdict(claude_opinion)
+    indicator_snapshot = _build_indicator_snapshot(signal)
+
+    chart = getattr(signal, "chart", None)
+    chart_patterns = None
+    if chart:
+        patterns = (chart.candle_patterns or []) + (chart.chart_patterns or [])
+        if patterns:
+            chart_patterns = json.dumps(patterns, ensure_ascii=False)
+
     with get_conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO signals
                 (created_at, stock_code, stock_name, current_price,
-                 triggered_conditions, rsi, volume_ratio, claude_opinion, in_portfolio, signal_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 triggered_conditions, rsi, volume_ratio, claude_opinion, in_portfolio, signal_type,
+                 verdict, indicator_snapshot, dart_summary, chart_patterns)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -736,17 +830,25 @@ def save_signal(signal, claude_opinion: str | None = None, in_portfolio: bool = 
                 claude_opinion,
                 int(in_portfolio),
                 getattr(signal, "signal_type", None) or None,
+                verdict,
+                indicator_snapshot,
+                dart_summary,
+                chart_patterns,
             ),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def update_signal_result(signal_id: int, result_pct: float) -> bool:
-    """신호 발생 후 N일 결과 수익률 업데이트."""
+def update_signal_result(signal_id: int, result_pct: float, period: str = "3d") -> bool:
+    """신호 발생 후 N일 결과 수익률 업데이트.
+    period: '1d', '3d', '5d', '10d'
+    """
+    col_map = {"1d": "result_1d", "3d": "result_pct", "5d": "result_5d", "10d": "result_10d"}
+    col = col_map.get(period, "result_pct")
     with get_conn() as conn:
         cur = conn.execute(
-            "UPDATE signals SET result_pct = ? WHERE id = ?", (result_pct, signal_id)
+            f"UPDATE signals SET {col} = ? WHERE id = ?", (result_pct, signal_id)
         )
         conn.commit()
     return cur.rowcount > 0
