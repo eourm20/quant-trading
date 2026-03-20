@@ -617,6 +617,15 @@ def get_trade_opinion(
     except Exception as e:
         logger.debug(f"DART 공시 조회 실패: {e}")
 
+    # ── 뉴스 조회 ──
+    news_text = "뉴스 조회 불가"
+    try:
+        from worker.clients.naver_news import format_news_for_ai, NAVER_CLIENT_ID
+        if NAVER_CLIENT_ID:
+            news_text = format_news_for_ai(signal.stock_name, max_items=5)
+    except Exception as e:
+        logger.debug(f"뉴스 조회 실패: {e}")
+
     # ── 동적 유저 프롬프트 (신호별 데이터) ──
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
@@ -638,6 +647,9 @@ def get_trade_opinion(
 
 ## 최근 공시 (DART)
 {dart_text}
+
+## 최근 뉴스
+{news_text}
 
 ## 차트 분석
 {_fmt_chart(signal)}
