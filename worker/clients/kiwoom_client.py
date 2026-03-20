@@ -365,23 +365,47 @@ class KiwoomClient:
     def get_volume_surge(self) -> list[dict]:
         """거래량 급증 종목 (ka10023)"""
         payload = self._post(
-            "/api/dostk/rank", "ka10023",
-            {"mrkt_tp": "0"},
+            "/api/dostk/rkinfo", "ka10023",
+            {
+                "mrkt_tp": "000",
+                "sort_tp": "1",
+                "tm_tp": "2",
+                "trde_qty_tp": "5",
+                "tm": "",
+                "stk_cnd": "0",
+                "pric_tp": "0",
+                "stex_tp": "3",
+            },
         )
-        return payload.get("output") or payload.get("output1") or []
+        return payload.get("trde_qty_sdnin") or payload.get("output") or []
 
     def get_decline_rank(self) -> list[dict]:
-        """등락률 하위 종목 (ka10027)"""
+        """등락률 하위 종목 — 하락 상위 (ka10027)"""
         payload = self._post(
-            "/api/dostk/rank", "ka10027",
-            {"mrkt_tp": "0", "flu_tp": "2"},
+            "/api/dostk/rkinfo", "ka10027",
+            {
+                "mrkt_tp": "000",
+                "sort_tp": "1",
+                "trde_qty_cnd": "0000",
+                "stk_cnd": "0",
+                "crd_cnd": "0",
+                "updown_incls": "1",
+                "pric_cnd": "0",
+                "trde_prica_cnd": "0",
+                "stex_tp": "3",
+            },
         )
-        return payload.get("output") or payload.get("output1") or []
+        return payload.get("pred_pre_flu_rt_upper") or payload.get("output") or []
 
     def get_foreign_net_buy(self) -> list[dict]:
         """외인 순매수 상위 (ka10035)"""
         payload = self._post(
-            "/api/dostk/rank", "ka10035",
-            {"mrkt_tp": "0"},
+            "/api/dostk/rkinfo", "ka10035",
+            {
+                "mrkt_tp": "000",
+                "trde_tp": "2",
+                "base_dt_tp": "1",
+                "stex_tp": "1",
+            },
         )
-        return payload.get("output") or payload.get("output1") or []
+        return payload.get("for_cont_nettrde_upper") or payload.get("output") or []
