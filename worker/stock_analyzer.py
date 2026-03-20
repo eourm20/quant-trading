@@ -148,9 +148,26 @@ def _screen_candidates() -> list[dict]:
     # 4. HTS 조건검색 (ka10171 → ka10172, WebSocket)
     try:
         logger.info("[추천스캔][HTS] 조건검색 호출 시작 (ka10171 -> ka10172)")
+        condition_list = kiwoom.get_condition_list()
+        quant_conditions = [c for c in condition_list if str(c.get("name", "")).startswith("퀀트_")]
+        logger.info(
+            f"[HTS-TRACE] ka10171_total={len(condition_list)} quant_prefix={len(quant_conditions)}"
+        )
+        condition_list = kiwoom.get_condition_list()
+        quant_conditions = [c for c in condition_list if str(c.get("name", "")).startswith("퀀트_")]
+        logger.info(
+            f"[HTS-TRACE] ka10171_total={len(condition_list)} quant_prefix={len(quant_conditions)}"
+        )
         cond_stocks = kiwoom.run_all_quant_conditions()
         logger.info(f"[추천스캔][HTS] 조건검색 반환 종목 수: {len(cond_stocks)}")
         if cond_stocks:
+            source_count = {}
+            for item in cond_stocks:
+                source = str(item.get("source", ""))
+                source_name = source.replace("조건검색:", "").strip() if source else ""
+                if source_name:
+                    source_count[source_name] = source_count.get(source_name, 0) + 1
+            logger.info(f"[HTS-TRACE] ka10172_by_condition={source_count}")
             source_names = sorted(
                 {
                     str(item.get("source", "")).replace("조건검색:", "").strip()
@@ -303,6 +320,13 @@ def run_intraday_scan():
         cond_stocks = kiwoom.run_all_quant_conditions()
         logger.info(f"[장중스캔][HTS] 조건검색 반환 종목 수: {len(cond_stocks)}")
         if cond_stocks:
+            source_count = {}
+            for item in cond_stocks:
+                source = str(item.get("source", ""))
+                source_name = source.replace("조건검색:", "").strip() if source else ""
+                if source_name:
+                    source_count[source_name] = source_count.get(source_name, 0) + 1
+            logger.info(f"[HTS-TRACE] ka10172_by_condition={source_count}")
             source_names = sorted(
                 {
                     str(item.get("source", "")).replace("조건검색:", "").strip()
