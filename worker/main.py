@@ -554,7 +554,7 @@ def main():
                       day_of_week="mon-fri", hour="10,13", minute=0,
                       id="intraday_scan")
     scheduler.add_job(run_daily_screening, "cron",
-                      day_of_week="mon-fri", hour=22, minute=30,
+                      day_of_week="mon-fri", hour=15, minute=40,
                       id="daily_screening")
     run_check()
 
