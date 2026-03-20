@@ -242,7 +242,7 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 ## 주요 구성
 
 - DART 공시 조회: `data/dart_client.py` — 신호 발생 시 자동 공시 조회, AI 판단에 포함
-  - MCP 도구: `dart_disclosures` / `dart_company_info` / `dart_financial_summary` / `dart_major_shareholders`
+  - MCP 도구: `dart_disclosures` / `dart_company_info` / `dart_financial` / `dart_shareholders` / `dart_periodic_report` / `dart_major_event`
 - 종목/조건 설정: DB (`data/trading.db`, SQLite) — MCP 도구로 실시간 반영
 - 포트폴리오 동기화: `worker/portfolio_sync.py`
 - 리포트 조회: `worker/report.py`
