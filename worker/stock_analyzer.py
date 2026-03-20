@@ -156,7 +156,91 @@ def _screen_candidates() -> list[dict]:
         logger.warning(f"HTS 조건검색 실패: {e}")
 
     logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견")
-    return candidates[:30]
+    return candidates[:50]
+
+
+# ═══════════════════════════ 프리필터 (AI 분석 전) ═══════════════════════════
+
+def _prefilter_candidates(candidates: list[dict], kiwoom) -> list[dict]:
+    """AI 분석 전에 명백히 부적합한 종목을 숫자 기반으로 제거.
+
+    제거 조건 (1개라도 해당 시 제외):
+    - 시가총액 500억 미만
+    - RSI > 70 (이미 과매수)
+    - MA5 < MA20 + MA20 기울기 하락 (데드크로스 진행 중)
+    - 당일 등락률 +15% 초과 (상한가 근접)
+    - 당일 등락률 -15% 미만 (급락 중)
+    """
+    from worker.indicators import calculate_rsi, calculate_chart_summary
+
+    passed = []
+    for cand in candidates:
+        code = cand["stock_code"]
+        try:
+            # 현재가 조회
+            price_data = kiwoom.get_current_price(code)
+            cur_prc = abs(int(str(
+                price_data.get("cur_prc") or price_data.get("stk_prpr") or "0"
+            ).replace(",", "")))
+            if not cur_prc:
+                continue
+
+            # 시가총액 (억 원)
+            mkt_cap_raw = str(price_data.get("stk_amt") or price_data.get("hts_avls") or "0").replace(",", "")
+            try:
+                mkt_cap = abs(int(float(mkt_cap_raw)))
+            except Exception:
+                mkt_cap = 0
+            if mkt_cap > 0 and mkt_cap < 500:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 시총 {mkt_cap}억 < 500억 → 제외")
+                continue
+
+            # 등락률
+            change_str = str(price_data.get("flu_rt") or price_data.get("prdy_ctrt") or "0").replace(",", "")
+            try:
+                change_pct = float(change_str)
+            except Exception:
+                change_pct = 0
+            if change_pct > 15:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +15% → 제외")
+                continue
+            if change_pct < -15:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -15% → 제외")
+                continue
+
+            # 일봉 데이터로 RSI + MA 체크
+            daily = kiwoom.get_daily_ohlcv(code, period=25)
+            closes = []
+            for d in daily:
+                cp = abs(int(str(d.get("cur_prc", "0")).replace(",", "") or "0"))
+                if cp:
+                    closes.append(cp)
+
+            if len(closes) >= 15:
+                rsi = calculate_rsi(closes)
+                if rsi and rsi > 70:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 70 → 제외")
+                    continue
+
+            if len(closes) >= 20:
+                ma5 = sum(closes[:5]) / 5
+                ma20 = sum(closes[:20]) / 20
+                # 이전 MA20 (1일 전)
+                ma20_prev = sum(closes[1:21]) / 20 if len(closes) >= 21 else ma20
+                # 데드크로스 진행 중: MA5 < MA20 + MA20 기울기 하락
+                if ma5 < ma20 and ma20 < ma20_prev:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 데드크로스 진행 중 → 제외")
+                    continue
+
+            passed.append(cand)
+            time.sleep(0.3)  # API rate limit
+
+        except Exception as e:
+            logger.debug(f"[프리필터] {cand['stock_name']}: 조회 실패 ({e}) → 유지")
+            passed.append(cand)  # 조회 실패 시 제외하지 않음
+
+    logger.info(f"[프리필터] {len(candidates)}개 → {len(passed)}개 통과")
+    return passed[:15]
 
 
 # ═══════════════════════════ 장중 스캔 ═══════════════════════════
@@ -220,6 +304,12 @@ def run_intraday_scan():
 
     if not filtered:
         logger.info("[장중 스캔] 후보 전부 쿨다운 중")
+        return
+
+    # 프리필터: AI 분석 전 명백히 부적합 종목 제거
+    filtered = _prefilter_candidates(filtered, kiwoom)
+    if not filtered:
+        logger.info("[장중 스캔] 프리필터 후 후보 없음")
         return
 
     logger.info(f"[장중 스캔] 후보 {len(filtered)}개 → AI 분석 시작")
@@ -918,6 +1008,12 @@ def run_daily_screening():
     candidates = _screen_candidates()
     if not candidates:
         logger.info("[스크리닝] 후보 없음")
+        return
+
+    # 프리필터: AI 분석 전 명백히 부적합 종목 제거
+    candidates = _prefilter_candidates(candidates, kiwoom)
+    if not candidates:
+        logger.info("[스크리닝] 프리필터 후 후보 없음")
         return
 
     added = []
