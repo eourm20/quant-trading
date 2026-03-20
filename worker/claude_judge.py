@@ -620,7 +620,7 @@ def get_trade_opinion(
     # ── 뉴스 조회 ──
     news_text = "뉴스 조회 불가"
     try:
-        from worker.clients.naver_news import format_news_for_ai, NAVER_CLIENT_ID
+        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
         if NAVER_CLIENT_ID:
             news_text = format_news_for_ai(signal.stock_name, max_items=5)
     except Exception as e:
