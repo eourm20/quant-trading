@@ -30,6 +30,10 @@ class KiwoomClient:
         # 종목명→코드 캐시 (당일 유지)
         self._stock_map: dict[str, str] = {}   # name → code
         self._stock_map_date: str = ""
+        # 모의투자 여부에 따라 거래소 구분 자동 설정
+        self._is_mock = "mockapi" in BASE_URL
+        self._dmst_stex_tp = "KRX" if self._is_mock else "%"
+        self._stex_tp = "1" if self._is_mock else "3"
 
     def _get_token(self) -> str:
         now = datetime.now(tz=timezone.utc)
@@ -135,7 +139,7 @@ class KiwoomClient:
         payload = self._post(
             "/api/dostk/acnt",
             "kt00018",
-            {"qry_tp": "1", "dmst_stex_tp": "KRX"},
+            {"qry_tp": "1", "dmst_stex_tp": self._dmst_stex_tp},
         )
         return payload.get("acnt_evlt_remn_indv_tot", [])
 
@@ -193,7 +197,7 @@ class KiwoomClient:
                         "stk_cd": "",
                         "crnc_cd": "KRW",
                         "gds_tp": "1",
-                        "dmst_stex_tp": "%",
+                        "dmst_stex_tp": self._dmst_stex_tp,
                         "frgn_stex_code": "",
                     },
                 )
@@ -335,7 +339,7 @@ class KiwoomClient:
             "/api/dostk/ordr",
             api_id,
             {
-                "dmst_stex_tp": "KRX",
+                "dmst_stex_tp": self._dmst_stex_tp,
                 "stk_cd": stock_code,
                 "ord_qty": str(qty),
                 "ord_uv": ord_uv,
@@ -364,6 +368,7 @@ class KiwoomClient:
 
     def get_volume_surge(self) -> list[dict]:
         """거래량 급증 종목 (ka10023)"""
+        stex = self._stex_tp
         payload = self._post(
             "/api/dostk/rkinfo", "ka10023",
             {
@@ -374,13 +379,14 @@ class KiwoomClient:
                 "tm": "",
                 "stk_cnd": "0",
                 "pric_tp": "0",
-                "stex_tp": "3",
+                "stex_tp": stex,
             },
         )
         return payload.get("trde_qty_sdnin") or payload.get("output") or []
 
     def get_decline_rank(self) -> list[dict]:
         """등락률 하위 종목 — 하락 상위 (ka10027)"""
+        stex = self._stex_tp
         payload = self._post(
             "/api/dostk/rkinfo", "ka10027",
             {
@@ -392,20 +398,21 @@ class KiwoomClient:
                 "updown_incls": "1",
                 "pric_cnd": "0",
                 "trde_prica_cnd": "0",
-                "stex_tp": "3",
+                "stex_tp": stex,
             },
         )
         return payload.get("pred_pre_flu_rt_upper") or payload.get("output") or []
 
     def get_foreign_net_buy(self) -> list[dict]:
         """외인 순매수 상위 (ka10035)"""
+        stex = self._stex_tp
         payload = self._post(
             "/api/dostk/rkinfo", "ka10035",
             {
                 "mrkt_tp": "000",
                 "trde_tp": "2",
                 "base_dt_tp": "1",
-                "stex_tp": "1",
+                "stex_tp": stex,
             },
         )
         return payload.get("for_cont_nettrde_upper") or payload.get("output") or []
