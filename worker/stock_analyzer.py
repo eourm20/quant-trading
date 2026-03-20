@@ -269,7 +269,7 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 
 {_SCREENING_KNOWLEDGE}
 
-## 편입 조건 4가지 (2가지 이상 충족 필요)
+## 편입 조건 5가지 (2가지 이상 충족 필요)
 1. **눌림목**: 상승 추세 중 조정 구간에 진입한 종목
    - MA20 지지선 근처 (현재가가 MA20 ± 3% 이내)
    - RSI 38~50 구간 (과매도 진입 또는 진입 직전)
@@ -292,6 +292,15 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
    - 최근 2~3분기 매출 또는 영업이익 연속 증가
    - 적자→흑자 전환 또는 흑자 폭 확대
    → 재무제표 데이터로 판단. 데이터 없으면 이 조건 평가 불가로 처리
+
+5. **잠재 성장**: 아직 주가에 반영되지 않았으나 상승 잠재력이 있는 종목
+   - 외인/기관 순매수 지속 중 (스마트머니 유입 징후)
+   - 거래량 서서히 증가하나 주가는 아직 횡보 (축적 단계)
+   - 실적 개선 추세인데 주가 반응 없음 (시장 무관심)
+   - 구름대 내부에서 전환선 골든크로스 직전 또는 MA 정배열 전환 초기
+   - RSI 45~55 중립 구간에서 바닥 다지는 중
+   → 급등 종목 제외 (당일 등락률 +5% 초과 시 이 조건으로 평가 금지)
+   → 이 조건은 "향후 1~2주 내 움직임 가능성"을 판단하는 것. 이미 오른 종목의 추격 매수와 구별할 것.
 
 ## 부적합 필터 (1개라도 해당 시 즉시 부적합)
 - 데드크로스 발생 중 (MA5 < MA20 + 하향 진행)
@@ -808,7 +817,7 @@ def run_daily_screening():
     pending = []
     for cand in candidates:
         try:
-            logger.info(f"[스크리닝] 분석 중: {cand['stock_name']} ({cand['stock_code']})")
+            logger.debug(f"[스크리닝] 분석 중: {cand['stock_name']} ({cand['stock_code']})")
             analysis = _analyze_candidate(
                 cand["stock_code"],
                 cand["stock_name"],
@@ -818,10 +827,32 @@ def run_daily_screening():
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")
             reason = str(analysis.get("reason", "") or "").replace("\n", " ").strip()
-            logger.info(
+            logger.debug(
                 f"[스크리닝] 분석 결과: {cand['stock_name']} ({cand['stock_code']}) "
                 f"→ {rec} (R/R={rr}) 사유: {reason[:140]}"
             )
+
+            # RAG용: 모든 스크리닝 결과 저장 (관심종목 등록/보류/부적합 모두)
+            try:
+                from data.db import save_screening_log
+                log_id = save_screening_log(
+                    stock_code=cand["stock_code"],
+                    stock_name=cand["stock_name"],
+                    source=cand["source"],
+                    recommendation=rec,
+                    reason=reason,
+                    met_conditions=analysis.get("met_conditions"),
+                    rr_ratio=float(rr) if rr and rr != "N/A" else None,
+                    indicator_snapshot=json.dumps(
+                        {k: v for k, v in analysis.get("enabled_conditions", {}).items()
+                         if isinstance(v, dict) and v.get("enabled")},
+                        ensure_ascii=False,
+                    ) if analysis.get("enabled_conditions") else None,
+                    market_snapshot=market_text,
+                )
+            except Exception as e:
+                logger.warning(f"[스크리닝] screening_log 저장 실패: {e}")
+                log_id = None
 
             if analysis.get("recommendation") != "관심종목 등록":
                 time.sleep(2)
@@ -836,6 +867,12 @@ def run_daily_screening():
                 add_to_watchlist(cand["stock_code"], cand["stock_name"], analysis)
                 send_message(f"{alert_text}\n\n✅ *자동 관심종목 등록 완료*")
                 added.append(cand["stock_name"])
+                if log_id:
+                    try:
+                        from data.db import update_screening_action
+                        update_screening_action(log_id, "auto_accepted")
+                    except Exception:
+                        pass
             else:
                 # 수동 모드: 근거 포함 알림 + 승인 버튼
                 buttons = [
@@ -848,6 +885,7 @@ def run_daily_screening():
                 _pending_screenings[cand["stock_code"]] = {
                     "stock_name": cand["stock_name"],
                     "analysis": analysis,
+                    "log_id": log_id,
                 }
                 send_message_with_inline_buttons(alert_text, buttons)
                 pending.append(cand["stock_name"])
@@ -881,6 +919,8 @@ def handle_screening_callback(stock_code: str, action: str) -> str:
     if not pending:
         return "⚠️ 만료된 요청입니다."
 
+    log_id = pending.get("log_id")
+
     if action == "add":
         add_to_watchlist(stock_code, pending["stock_name"], pending["analysis"])
         from data.db import save_strategy_note
@@ -889,6 +929,18 @@ def handle_screening_callback(stock_code: str, action: str) -> str:
             f"수동 스크리닝: {pending['stock_name']} 관심종목 등록",
             f"사용자 승인으로 등록. {pending['analysis'].get('reason', '')}",
         )
+        if log_id:
+            try:
+                from data.db import update_screening_action
+                update_screening_action(log_id, "accepted")
+            except Exception:
+                pass
         return f"✅ {pending['stock_name']} 관심종목 등록 완료"
     else:
+        if log_id:
+            try:
+                from data.db import update_screening_action
+                update_screening_action(log_id, "rejected")
+            except Exception:
+                pass
         return f"❌ {pending['stock_name']} 패스"

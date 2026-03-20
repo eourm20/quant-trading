@@ -166,6 +166,49 @@ def update_signal_results():
                 logger.warning(f"[결과 {period_name} 실패] {row['stock_name']}: {e}")
 
 
+def update_screening_results():
+    """스크리닝 종목의 7일/30일 후 수익률 자동 업데이트."""
+    from datetime import timedelta
+    from data.db import get_conn, update_screening_result
+
+    periods = [
+        ("7d", 7, 8),
+        ("30d", 30, 31),
+    ]
+
+    for period_name, days_after, days_before in periods:
+        cutoff_from = (datetime.now() - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (datetime.now() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        col = "result_7d" if period_name == "7d" else "result_30d"
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, stock_code, stock_name, "
+                f"(SELECT current_price FROM signals WHERE stock_code = screening_log.stock_code "
+                f" ORDER BY created_at DESC LIMIT 1) as base_price "
+                f"FROM screening_log "
+                f"WHERE {col} IS NULL AND created_at >= ? AND created_at < ?",
+                (cutoff_from, cutoff_to),
+            ).fetchall()
+
+        for row in rows:
+            try:
+                pd = kiwoom.get_current_price(row["stock_code"])
+                now_price = abs(int(str(
+                    pd.get("cur_prc") or pd.get("stk_prpr") or "0"
+                ).replace(",", "")))
+                # base_price: 스크리닝 시점 현재가 (signals에서 가져오거나 직접 조회)
+                base = row["base_price"]
+                if not base:
+                    continue
+                if now_price and base:
+                    pct = (now_price - base) / base * 100
+                    update_screening_result(row["id"], round(pct, 2), period=period_name)
+                    logger.debug(f"[스크리닝 결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[스크리닝 결과 {period_name} 실패] {row['stock_name']}: {e}")
+
+
 def check_trailing_stops():
     """보유 종목 수익률 구간별 손절가 자동 상향 (트레일링 스탑).
     +5%  → 손절가를 평단가(본전)로 상향
@@ -419,8 +462,41 @@ def run_check():
             except Exception:
                 pass
 
+            # RAG용: 뉴스 요약
+            news_summary = None
+            try:
+                from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+                if NAVER_CLIENT_ID:
+                    news_summary = format_news_for_ai(signal.stock_name, max_items=5)
+            except Exception:
+                pass
+
+            # RAG용: 시장 스냅샷
+            market_snapshot = None
+            try:
+                parts = []
+                if kospi:
+                    parts.append(f"KOSPI {kospi.get('cur_prc','?')} ({kospi.get('flu_rt','?')}%)")
+                if kosdaq:
+                    parts.append(f"KOSDAQ {kosdaq.get('cur_prc','?')} ({kosdaq.get('flu_rt','?')}%)")
+                if parts:
+                    market_snapshot = " / ".join(parts)
+            except Exception:
+                pass
+
+            # RAG용: 포트폴리오 스냅샷
+            portfolio_snapshot = None
+            try:
+                portfolio_snapshot = f"보유 {len(holdings)}종목"
+            except Exception:
+                pass
+
             mark_sent(signal.stock_code, new_ids)
-            signal_id = save_signal(signal, claude_opinion, in_portfolio=signal.in_portfolio, dart_summary=dart_summary)
+            signal_id = save_signal(
+                signal, claude_opinion, in_portfolio=signal.in_portfolio,
+                dart_summary=dart_summary, news_summary=news_summary,
+                market_snapshot=market_snapshot, portfolio_snapshot=portfolio_snapshot,
+            )
             send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
 
             if claude_opinion:
@@ -465,6 +541,9 @@ def main():
     scheduler.add_job(update_signal_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="result_update")
+    scheduler.add_job(update_screening_results, "cron",
+                      day_of_week="mon-fri", hour="9-18", minute="*/30",
+                      id="screening_result_update")
     scheduler.add_job(check_trailing_stops, "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="trailing_stops")

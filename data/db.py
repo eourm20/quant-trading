@@ -132,6 +132,38 @@ def init_db():
             conn.execute("ALTER TABLE signals ADD COLUMN result_10d REAL DEFAULT NULL")
         except Exception:
             pass
+        # RAG 확장: 신호 시점 컨텍스트
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN news_summary TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN market_snapshot TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN portfolio_snapshot TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        # 스크리닝 AI 판단 이력 (RAG용)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS screening_log (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at         TEXT NOT NULL,
+                stock_code         TEXT NOT NULL,
+                stock_name         TEXT NOT NULL,
+                source             TEXT,
+                recommendation     TEXT,
+                reason             TEXT,
+                met_conditions     TEXT,
+                rr_ratio           REAL,
+                indicator_snapshot TEXT,
+                market_snapshot    TEXT,
+                user_action        TEXT DEFAULT NULL,
+                result_7d          REAL DEFAULT NULL,
+                result_30d         REAL DEFAULT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cooldowns (
                 key TEXT PRIMARY KEY,
@@ -682,6 +714,9 @@ def save_signal(
     claude_opinion: str | None = None,
     in_portfolio: bool = False,
     dart_summary: str | None = None,
+    news_summary: str | None = None,
+    market_snapshot: str | None = None,
+    portfolio_snapshot: str | None = None,
 ) -> int:
     """신호 저장 후 signal_id 반환. 지표 스냅샷 + verdict 자동 추출."""
     verdict = _extract_verdict(claude_opinion)
@@ -700,8 +735,9 @@ def save_signal(
             INSERT INTO signals
                 (created_at, stock_code, stock_name, current_price,
                  triggered_conditions, rsi, volume_ratio, claude_opinion, in_portfolio, signal_type,
-                 verdict, indicator_snapshot, dart_summary, chart_patterns)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 verdict, indicator_snapshot, dart_summary, chart_patterns,
+                 news_summary, market_snapshot, portfolio_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -718,6 +754,9 @@ def save_signal(
                 indicator_snapshot,
                 dart_summary,
                 chart_patterns,
+                news_summary,
+                market_snapshot,
+                portfolio_snapshot,
             ),
         )
         conn.commit()
@@ -766,6 +805,56 @@ def update_signal_action(signal_id: int, action: str) -> bool:
     with get_conn() as conn:
         cur = conn.execute(
             "UPDATE signals SET action = ? WHERE id = ?", (action, signal_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def save_screening_log(
+    stock_code: str,
+    stock_name: str,
+    source: str,
+    recommendation: str,
+    reason: str,
+    met_conditions: list | None = None,
+    rr_ratio: float | None = None,
+    indicator_snapshot: str | None = None,
+    market_snapshot: str | None = None,
+) -> int:
+    """스크리닝 AI 판단 이력 저장. screening_log_id 반환."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO screening_log
+                (created_at, stock_code, stock_name, source, recommendation, reason,
+                 met_conditions, rr_ratio, indicator_snapshot, market_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                stock_code, stock_name, source, recommendation, reason,
+                json.dumps(met_conditions or [], ensure_ascii=False),
+                rr_ratio, indicator_snapshot, market_snapshot,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_screening_action(log_id: int, action: str) -> bool:
+    """스크리닝 결과에 대한 사용자 행동 기록 (accepted/rejected)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE screening_log SET user_action = ? WHERE id = ?", (action, log_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def update_screening_result(log_id: int, result_pct: float, period: str = "7d") -> bool:
+    """스크리닝 종목의 사후 수익률 업데이트."""
+    col = "result_7d" if period == "7d" else "result_30d"
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE screening_log SET {col} = ? WHERE id = ?", (result_pct, log_id)
         )
         conn.commit()
     return cur.rowcount > 0

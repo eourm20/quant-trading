@@ -53,7 +53,7 @@ def _load_corp_code_map() -> dict[str, str]:
             with open(cache_file, "r", encoding="utf-8") as f:
                 _corp_code_map = json.load(f)
             _corp_code_loaded = True
-            logger.info(f"DART corp_code 캐시 로드: {len(_corp_code_map)}개")
+            logger.debug(f"DART corp_code 캐시 로드: {len(_corp_code_map)}개")
             return _corp_code_map
 
     if not DART_API_KEY:
@@ -89,7 +89,7 @@ def _load_corp_code_map() -> dict[str, str]:
 
         _corp_code_map = result
         _corp_code_loaded = True
-        logger.info(f"DART corp_code 다운로드 완료: {len(result)}개")
+        logger.debug(f"DART corp_code 다운로드 완료: {len(result)}개")
         return result
 
     except Exception as e:
@@ -268,7 +268,7 @@ def get_financial_summary_for_ai(stock_code: str) -> str:
 
 def format_full_context_for_ai(stock_code: str) -> str:
     """AI 판단용 DART 전체 컨텍스트 (공시 + 재무지표)."""
-    logger.info(f"[DART] 호출 시작: stock_code={stock_code}")
+    logger.debug(f"[DART] 호출 시작: stock_code={stock_code}")
     parts = []
 
     disclosures = format_disclosures_for_ai(stock_code, max_items=8)
@@ -280,5 +280,5 @@ def format_full_context_for_ai(stock_code: str) -> str:
         parts.append(financial)
 
     result = "\n".join(parts) if parts else "최근 공시/재무 데이터 없음"
-    logger.info(f"[DART] 호출 완료: stock_code={stock_code}, has_context={'예' if bool(parts) else '아니오'}")
+    logger.debug(f"[DART] 호출 완료: stock_code={stock_code}, has_context={'예' if bool(parts) else '아니오'}")
     return result
