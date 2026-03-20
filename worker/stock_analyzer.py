@@ -1,15 +1,14 @@
 """
-종목 분석 + 전략 설계 자동화
-- Level 1: 종목 편입 검토 (종목코드 → 지표+공시+뉴스 분석 → 전략 제안)
-- Level 2: Claude Desktop 종목 추천 지원 (CLAUDE.md 행동 지침)
-- Level 3: 자동 스크리닝 (장 마감 후 유망 종목 발굴 → watchlist 자동 추가)
+자동 종목 스크리닝 (워커 전용)
+- 장 마감 후(15:40) 유망 종목 자동 발굴 → AI 분석 → watchlist 자동 추가
+- 수동 종목 분석은 Claude Desktop에서 MCP 도구로 직접 수행
 """
 
 import json
 import logging
 import os
+import re
 import time
-from datetime import datetime
 
 from dotenv import load_dotenv
 
@@ -36,22 +35,72 @@ else:
     _AI_BACKEND = ""
 
 
-# ═══════════════════════════ Level 1: 종목 편입 검토 ═══════════════════════════
+# ═══════════════════════════ 후보 수집 ═══════════════════════════
 
-def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
-    """종목 편입 검토: 차트+공시+뉴스+재무 분석 → 전략 제안.
+def _screen_candidates() -> list[dict]:
+    """키움 API로 유망 종목 후보 수집. 기존 watchlist 종목은 제외.
 
     Returns:
-        {
-            "recommendation": "편입" / "보류" / "부적합",
-            "target_price": int,
-            "stop_loss_price": int,
-            "horizon": "단기" / "중기" / "장기",
-            "rsi_oversold": int,
-            "rsi_overbought": int,
-            "analysis": str (AI 분석 텍스트),
-            "indicators": dict (지표 스냅샷),
-        }
+        [{stock_code, stock_name, source}, ...]  최대 30개
+    """
+    from worker.clients.kiwoom_client import KiwoomClient
+    from data.db import get_watchlist
+
+    kiwoom = KiwoomClient()
+    existing_codes = {s["code"] for s in get_watchlist()}
+
+    candidates = []
+
+    # 1. 거래량 급증 종목 (ka10023)
+    try:
+        vol_surge = kiwoom._call_api("ka10023", {})
+        for item in (vol_surge.get("output") or vol_surge.get("output1") or [])[:20]:
+            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
+            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
+            if code and code not in existing_codes and len(code) == 6:
+                candidates.append({"stock_code": code, "stock_name": name, "source": "거래량 급증"})
+    except Exception as e:
+        logger.warning(f"거래량 급증 조회 실패: {e}")
+
+    time.sleep(1)
+
+    # 2. 전일대비 등락률 하위 — 눌림목 후보 (ka10027)
+    try:
+        dip_stocks = kiwoom._call_api("ka10027", {"flu_tp": "2"})
+        for item in (dip_stocks.get("output") or dip_stocks.get("output1") or [])[:20]:
+            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
+            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
+            if code and code not in existing_codes and len(code) == 6:
+                if not any(c["stock_code"] == code for c in candidates):
+                    candidates.append({"stock_code": code, "stock_name": name, "source": "눌림목 후보"})
+    except Exception as e:
+        logger.warning(f"등락률 하위 조회 실패: {e}")
+
+    time.sleep(1)
+
+    # 3. 외인 연속 순매수 상위 (ka10035)
+    try:
+        foreign_buy = kiwoom._call_api("ka10035", {})
+        for item in (foreign_buy.get("output") or foreign_buy.get("output1") or [])[:10]:
+            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
+            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
+            if code and code not in existing_codes and len(code) == 6:
+                if not any(c["stock_code"] == code for c in candidates):
+                    candidates.append({"stock_code": code, "stock_name": name, "source": "외인 순매수"})
+    except Exception as e:
+        logger.warning(f"외인 순매수 조회 실패: {e}")
+
+    logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견")
+    return candidates[:30]
+
+
+# ═══════════════════════════ AI 편입 분석 ═══════════════════════════
+
+def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
+    """후보 종목 1개를 차트+공시+뉴스로 분석하여 편입 적합성 판단.
+
+    Returns:
+        {recommendation, reason, target_price, stop_loss_price, horizon, rsi_oversold, rsi_overbought}
     """
     from worker.clients.kiwoom_client import KiwoomClient
     from worker.indicators import calculate_rsi, calculate_volume_ratio, calculate_chart_summary
@@ -88,6 +137,9 @@ def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
         low_prices=low_prices, open_prices=open_prices, volumes=volumes,
     ) if len(close_prices) >= 5 else None
 
+    if not chart or not _ai_client:
+        return {"recommendation": "분석 불가"}
+
     # 2. DART 공시 + 재무
     dart_text = ""
     try:
@@ -106,37 +158,16 @@ def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
     except Exception:
         pass
 
-    # 4. 지표 요약 텍스트
-    indicators = {}
-    if chart:
-        indicators = {
-            "current_price": current_price,
-            "rsi": rsi,
-            "volume_ratio": volume_ratio,
-            "trend": chart.trend,
-            "ma5": chart.ma5, "ma20": chart.ma20,
-            "above_ma5": chart.above_ma5, "above_ma20": chart.above_ma20,
-            "stochastic_k": chart.stochastic_k, "stochastic_d": chart.stochastic_d,
-            "cci": chart.cci,
-            "macd_line": chart.macd_line, "macd_signal": chart.macd_signal,
-            "ichimoku_above_cloud": chart.ichimoku_above_cloud,
-            "bollinger_upper": chart.bollinger_upper, "bollinger_lower": chart.bollinger_lower,
-            "rsi_divergence": chart.rsi_divergence,
-            "support_level": chart.support_level, "resistance_level": chart.resistance_level,
-            "candle_patterns": chart.candle_patterns,
-            "chart_patterns": chart.chart_patterns,
-            "obv_trend": chart.obv_trend,
-        }
-
+    # 4. 피보나치 텍스트
     fib_text = ""
-    if chart and chart.fibonacci:
+    if chart.fibonacci:
         f = chart.fibonacci
         fib_text = (f"피보나치: 고점 {f['swing_high']:,} / 저점 {f['swing_low']:,} | "
                     f"38.2%={f['fib_382']:,} | 61.8%={f['fib_618']:,} | "
                     f"확장 161.8%={f.get('ext_1618', 0):,}")
 
     # 5. AI 분석 요청
-    prompt = f"""당신은 퀀트 트레이딩 시스템의 종목 편입 분석 AI입니다.
+    prompt = f"""당신은 퀀트 트레이딩 시스템의 종목 스크리닝 AI입니다.
 다음 종목의 편입 적합성을 분석하고, 편입 시 초기 전략을 제안하세요.
 
 ## 종목 정보
@@ -146,7 +177,7 @@ def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
 ## 기술적 지표
 - RSI(14): {rsi}
 - 거래량 배율: {volume_ratio}배
-- 추세: {chart.trend if chart else 'N/A'}
+- 추세: {chart.trend}
 - MA5: {int(chart.ma5):,} / MA20: {int(chart.ma20):,} (현재가 MA5 {'위' if chart.above_ma5 else '아래'} / MA20 {'위' if chart.above_ma20 else '아래'})
 - 스토캐스틱: %K={chart.stochastic_k} / %D={chart.stochastic_d}
 - CCI: {chart.cci}
@@ -173,11 +204,11 @@ def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
 3. 테마 미반영: 호재 공시/뉴스 있으나 주가 미반영
 4. 실적 개선: 매출/영업이익 증가 추세
 
-## 출력 형식 (JSON)
+## 출력 형식 (JSON만 출력)
 ```json
 {{
     "recommendation": "편입" 또는 "보류" 또는 "부적합",
-    "reason": "편입/보류/부적합 판단 근거 2~3문장",
+    "reason": "판단 근거 2~3문장",
     "met_conditions": ["눌림목", "저평가"],
     "target_price": 목표가(정수),
     "stop_loss_price": 손절가(정수),
@@ -186,10 +217,7 @@ def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
     "rsi_overbought": RSI 과매수 기준값(정수, 60~75)
 }}
 ```
-""" if chart else "차트 데이터 부족으로 분석 불가"
-
-    if not _ai_client or not chart:
-        return {"recommendation": "분석 불가", "analysis": "AI 또는 차트 데이터 없음", "indicators": indicators}
+"""
 
     try:
         if _AI_BACKEND == "anthropic":
@@ -205,23 +233,20 @@ def analyze_stock(stock_code: str, stock_name: str = "") -> dict:
             )
             ai_text = response.choices[0].message.content
 
-        # JSON 추출
-        import re
         json_match = re.search(r'\{[^{}]*"recommendation"[^{}]*\}', ai_text, re.DOTALL)
         if json_match:
-            result = json.loads(json_match.group())
-            result["analysis"] = ai_text
-            result["indicators"] = indicators
-            return result
+            return json.loads(json_match.group())
 
-        return {"recommendation": "분석 완료", "analysis": ai_text, "indicators": indicators}
+        return {"recommendation": "분석 실패"}
 
     except Exception as e:
-        logger.error(f"종목 분석 AI 오류: {e}")
-        return {"recommendation": "분석 실패", "analysis": str(e), "indicators": indicators}
+        logger.error(f"스크리닝 AI 분석 오류 ({stock_name}): {e}")
+        return {"recommendation": "분석 실패"}
 
 
-def auto_add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
+# ═══════════════════════════ watchlist 자동 추가 ═══════════════════════════
+
+def _auto_add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
     """분석 결과가 '편입'이면 watchlist에 자동 추가."""
     if analysis.get("recommendation") != "편입":
         return False
@@ -248,76 +273,19 @@ def auto_add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> b
         )
         conn.commit()
 
-    logger.info(f"[자동 편입] {stock_name}({stock_code}) horizon={horizon} 목표={analysis.get('target_price')} 손절={analysis.get('stop_loss_price')}")
+    logger.info(f"[자동 편입] {stock_name}({stock_code}) horizon={horizon} "
+                f"목표={analysis.get('target_price')} 손절={analysis.get('stop_loss_price')}")
     return True
 
 
-# ═══════════════════════════ Level 3: 자동 스크리닝 ═══════════════════════════
-
-def screen_stocks() -> list[dict]:
-    """장 마감 후 유망 종목 스크리닝. 거래량 급증 + 눌림목 후보 탐색.
-
-    Returns:
-        list[dict]: [{stock_code, stock_name, reason, analysis}, ...]
-    """
-    from worker.clients.kiwoom_client import KiwoomClient
-    from data.db import get_watchlist
-
-    kiwoom = KiwoomClient()
-    existing_codes = {s["code"] for s in get_watchlist()}
-
-    candidates = []
-
-    # 1. 거래량 급증 종목 (ka10023)
-    try:
-        vol_surge = kiwoom._call_api("ka10023", {})
-        for item in (vol_surge.get("output") or vol_surge.get("output1") or [])[:20]:
-            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
-            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if code and code not in existing_codes and len(code) == 6:
-                candidates.append({"stock_code": code, "stock_name": name, "source": "거래량 급증"})
-    except Exception as e:
-        logger.warning(f"거래량 급증 조회 실패: {e}")
-
-    time.sleep(1)
-
-    # 2. 전일대비 등락률 하위 (눌림목 후보, ka10027)
-    try:
-        dip_stocks = kiwoom._call_api("ka10027", {"flu_tp": "2"})  # 하락 종목
-        for item in (dip_stocks.get("output") or dip_stocks.get("output1") or [])[:20]:
-            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
-            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if code and code not in existing_codes and len(code) == 6:
-                # 이미 candidates에 있으면 스킵
-                if not any(c["stock_code"] == code for c in candidates):
-                    candidates.append({"stock_code": code, "stock_name": name, "source": "눌림목 후보"})
-    except Exception as e:
-        logger.warning(f"등락률 하위 조회 실패: {e}")
-
-    time.sleep(1)
-
-    # 3. 외인 연속 순매수 상위 (ka10035)
-    try:
-        foreign_buy = kiwoom._call_api("ka10035", {})
-        for item in (foreign_buy.get("output") or foreign_buy.get("output1") or [])[:10]:
-            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
-            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if code and code not in existing_codes and len(code) == 6:
-                if not any(c["stock_code"] == code for c in candidates):
-                    candidates.append({"stock_code": code, "stock_name": name, "source": "외인 순매수"})
-    except Exception as e:
-        logger.warning(f"외인 순매수 조회 실패: {e}")
-
-    logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견")
-    return candidates[:30]  # 최대 30개
-
+# ═══════════════════════════ 메인: 일일 자동 스크리닝 ═══════════════════════════
 
 def run_daily_screening():
-    """일일 자동 스크리닝: 후보 발굴 → 개별 분석 → 적합 종목 자동 편입."""
+    """일일 자동 스크리닝: 후보 발굴 → AI 분석 → 적합 종목 자동 편입 + 텔레그램 알림."""
     from notifications.telegram import send_message
     from data.db import save_strategy_note
 
-    candidates = screen_stocks()
+    candidates = _screen_candidates()
     if not candidates:
         logger.info("[스크리닝] 후보 없음")
         return
@@ -326,10 +294,10 @@ def run_daily_screening():
     for cand in candidates:
         try:
             logger.info(f"[스크리닝] 분석 중: {cand['stock_name']} ({cand['stock_code']})")
-            analysis = analyze_stock(cand["stock_code"], cand["stock_name"])
+            analysis = _analyze_candidate(cand["stock_code"], cand["stock_name"])
 
             if analysis.get("recommendation") == "편입":
-                auto_add_to_watchlist(cand["stock_code"], cand["stock_name"], analysis)
+                _auto_add_to_watchlist(cand["stock_code"], cand["stock_name"], analysis)
                 added.append({
                     "name": cand["stock_name"],
                     "code": cand["stock_code"],

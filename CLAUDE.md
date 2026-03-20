@@ -248,14 +248,14 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 - 리포트 조회: `worker/report.py`
 - 외부 API 클라이언트: `worker/clients/` (키움 경량, DART 경량, 뉴스) / `kiwoom_mcp/kiwoom_mcp/` (키움 풀, DART 풀)
 - 뉴스 검색: `worker/clients/news_client.py` — 네이버 뉴스 API, AI 판단에 뉴스 컨텍스트 제공
-- 종목 분석/스크리닝: `worker/stock_analyzer.py` — 종목 편입 검토 + 자동 스크리닝
+- 자동 스크리닝: `worker/stock_analyzer.py` — 장 마감 후 유망 종목 자동 발굴 (워커 전용)
 - 신호 로그: `data/db.py`
 - 텔레그램 알림: `notifications/telegram.py` (인라인 버튼 포함)
 - 텔레그램 봇 주문: `notifications/telegram_bot.py`
 
 ---
 
-## 상황 7: 종목 추천/분석 요청
+## 상황 7: 종목 추천/분석 요청 (Claude Desktop)
 
 **트리거 예시**
 - "이 종목 어때?", "XX 편입할 만해?"
@@ -266,21 +266,20 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 
 ### 특정 종목 분석 요청 시
 1. `kiwoom_execute_api`로 현재가(`ka10001`) + 일봉(`ka10081`) 조회
-2. 차트 지표 분석 (RSI, MA, MACD, 볼린저, 스토캐스틱, CCI, 일목균형표 등)
-3. `dart_disclosures` / `dart_financial_summary`로 공시+재무 조회
+2. 차트 지표 직접 분석 (RSI, MA, MACD, 볼린저, 스토캐스틱, CCI, 일목균형표 등)
+3. `dart_disclosures` / `dart_financial`로 공시+재무 조회
 4. 편입 조건 4가지 (눌림목/저평가/테마미반영/실적개선) 중 2가지 이상 충족 여부 평가
 5. 편입 적합 시: 목표가, 손절가, horizon, RSI 기준값 제안
 6. 사용자 확인 후 `quant_watchlist_add`로 관심종목 등록
 
 ### 종목 추천 요청 시 (막연한 요청)
-- 최근 시장 동향 + 보유 포트폴리오 확인 후 테마/섹터 기반 후보 제안
-- 키움 API 활용 가능: `ka10023`(거래량 급증) / `ka10027`(등락률) / `ka10035`(외인 순매수)
-- 후보별 간단 분석 후 편입 적합성 평가
+1. `quant_report(type="portfolio")` + `quant_report(type="strategy")`로 현재 상태 확인
+2. 포트폴리오 편중/현금 비중/전략 방향 분석
+3. 키움 API로 후보 탐색: `ka10023`(거래량 급증) / `ka10027`(등락률) / `ka10035`(외인 순매수)
+4. 후보별 간단 분석 후 편입 적합성 평가 → 사용자에게 제안
 
-### 자동 스크리닝 (워커)
-- **실행 시각**: 평일 15:40 (장 마감 후)
-- **프로세스**: 거래량 급증 + 눌림목 후보 + 외인 순매수 → AI 분석 → 적합 종목 watchlist 자동 추가
-- **알림**: 텔레그램으로 편입 종목 및 전략 요약 발송
+> **참고**: 워커가 평일 15:40에 자동 스크리닝도 수행합니다 (`worker/stock_analyzer.py`).
+> 거래량 급증 + 눌림목 + 외인 순매수 후보를 AI 분석 → 적합 종목 watchlist 자동 추가 + 텔레그램 알림.
 
 ## 지표 계산 기준 (worker/indicators.py 기준)
 
