@@ -175,167 +175,51 @@ def init_db():
             )
         """)
         conn.commit()
-    _migrate_yaml_to_db()
-    _ensure_conditions()
-    _populate_descriptions()
-    _migrate_cooldown_minutes()
+    _seed_conditions()
 
 
-def _ensure_conditions():
-    """conditions.yaml 자동마이그레이션이 안 되는 신규 조건을 직접 INSERT OR IGNORE."""
-    new_conditions = [
-        {
-            "id": "rsi_oversold_intraday",
-            "name": "RSI 과매도 (5분봉)",
-            "evaluator": "rsi_lte_intraday",
-            "param": "rsi_oversold_intraday",
-            "cooldown_minutes": 60,
-            "message": "RSI 5분봉 과매도 ({rsi_intraday:.1f} <= {threshold})",
-            "chart_field": None,
-            "sort_order": 4,
-        },
+def _seed_conditions():
+    """conditions_def 초기 시드 데이터 (29개). DB가 비어있을 때만 INSERT."""
+    SEED = [
+        ("target_price", "목표가 도달", "price_gte", "target_price", 240, "목표가 도달 ({price:,}원 >= {threshold:,}원)", None, 0, "설정한 목표 주가에 도달했을 때 발생. 익절 타이밍 신호. 목표가 이상이면 트리거.", "exit"),
+        ("stop_loss_price", "손절가 도달", "price_lte", "stop_loss_price", 240, "손절가 도달 ({price:,}원 <= {threshold:,}원)", None, 1, "설정한 손절 주가 이하로 떨어졌을 때 발생. 손실 확대 방지 신호. 손절가 이하면 트리거.", "exit"),
+        ("rsi_overbought", "RSI 과매수", "rsi_gte", "rsi_overbought", 120, "RSI 과매수 ({rsi:.1f} >= {threshold})", None, 2, "RSI(상대강도지수)가 과매수 기준(보통 70) 이상일 때. 단기 고점 도달 가능성. 매도 검토 신호.", "exit"),
+        ("rsi_oversold", "RSI 과매도", "rsi_lte", "rsi_oversold", 120, "RSI 과매도 ({rsi:.1f} <= {threshold})", None, 3, "RSI가 과매도 기준(보통 30) 이하일 때. 단기 저점 도달 가능성. 반등 매수 검토 신호.", "entry"),
+        ("rsi_oversold_intraday", "RSI 과매도 (5분봉)", "rsi_lte_intraday", "rsi_oversold_intraday", 60, "RSI 5분봉 과매도 ({rsi_intraday:.1f} <= {threshold})", None, 4, "5분봉 RSI(14기간)가 과매도 기준(종목별 30~35) 이하일 때. 단기 종목 당일 급락 감지 신호.", "entry"),
+        ("golden_cross", "MA 골든크로스", "flag", "golden_cross", 1440, "골든크로스 (MA5 {ma5:,} > MA20 {ma20:,})", "golden_cross", 5, "단기 이동평균(MA5)이 장기 이동평균(MA20)을 아래에서 위로 돌파하는 순간. 중기 상승 추세 전환 신호.", "entry"),
+        ("death_cross", "MA 데드크로스", "flag", "death_cross", 1440, "데드크로스 (MA5 {ma5:,} < MA20 {ma20:,})", "death_cross", 6, "단기 이동평균(MA5)이 장기 이동평균(MA20)을 위에서 아래로 돌파하는 순간. 중기 하락 추세 전환 신호.", "exit"),
+        ("new_high_20d", "20일 신고가 돌파", "flag", "new_high_20d", 240, "20일 신고가 돌파 ({price:,}원)", "new_high_20d", 7, "현재가가 최근 20거래일 중 가장 높은 고가를 돌파. 강한 상승 모멘텀 신호. 신고가 돌파 매수 전략에 활용.", "both"),
+        ("ma20_support_break", "MA20 하향 이탈", "flag", "ma20_support_break", 240, "MA20 하향 이탈 ({price:,}원 < MA20 {ma20:,}원)", "broke_below_ma20", 8, "전일까지 MA20 위에 있다가 오늘 MA20 아래로 이탈. 중기 지지선 붕괴 신호. 추가 하락 가능성.", "exit"),
+        ("ma5_support_break", "MA5 하향 이탈", "flag", "ma5_support_break", 120, "MA5 하향 이탈 ({price:,}원 < MA5 {ma5:,}원)", "broke_below_ma5", 9, "전일까지 MA5 위에 있다가 오늘 MA5 아래로 이탈. 단기 지지선 붕괴 신호. 단기 조정 진입 가능성.", "both"),
+        ("ma5_recovery", "MA5 상향 돌파 (회복)", "flag", "ma5_recovery", 120, "MA5 상향 돌파 ({price:,}원 > MA5 {ma5:,}원)", "broke_above_ma5", 10, "전일까지 MA5 아래에 있다가 오늘 MA5 위로 돌파. 단기 반등 회복 신호. 단기 매수 진입 검토.", "entry"),
+        ("macd_golden_cross", "MACD 골든크로스", "flag", "macd_golden_cross", 1440, "MACD 골든크로스 (MACD {macd:.0f} > Signal {signal:.0f})", "macd_golden_cross", 11, "MACD 라인(EMA12-EMA26)이 시그널 라인(MACD의 EMA9)을 아래에서 위로 돌파. 상승 모멘텀 강화 신호.", "entry"),
+        ("macd_death_cross", "MACD 데드크로스", "flag", "macd_death_cross", 1440, "MACD 데드크로스 (MACD {macd:.0f} < Signal {signal:.0f})", "macd_death_cross", 12, "MACD 라인이 시그널 라인을 위에서 아래로 돌파. 하락 모멘텀 강화 신호. 매도 검토.", "exit"),
+        ("bollinger_upper_break", "볼린저 밴드 상단 돌파", "flag", "bollinger_upper_break", 120, "볼린저 상단 돌파 ({price:,}원 > 상단 {upper:,}원)", "bollinger_above_upper", 13, "현재가가 볼린저 상단(MA20 + 2σ)을 돌파. 강한 상승 돌파 또는 과열 신호. 추세 추종 or 과매수 주의.", "both"),
+        ("bollinger_lower_break", "볼린저 밴드 하단 이탈", "flag", "bollinger_lower_break", 120, "볼린저 하단 이탈 ({price:,}원 < 하단 {lower:,}원)", "bollinger_below_lower", 14, "현재가가 볼린저 하단(MA20 - 2σ) 아래로 이탈. 급락 또는 과매도 신호. 반등 가능성 검토.", "entry"),
+        ("rsi_oversold_add", "RSI 과매도 (추가매수)", "rsi_lte", "rsi_oversold", 120, "📉 물타기 타이밍 — RSI {rsi:.1f} 과매도 (기준 {threshold})", None, 15, "보유 중 종목의 RSI가 과매도 기준 이하로 하락. 물타기(평단 낮추기) 타이밍 검토.", "add"),
+        ("bollinger_lower_break_add", "볼린저 하단 이탈 (추가매수)", "flag", "bollinger_lower_break", 120, "볼린저 하단 이탈 물타기 타이밍 ({price:,}원 < 하단 {lower:,}원)", "bollinger_below_lower", 16, "보유 중 종목이 볼린저 하단을 이탈. 과매도 구간 진입, 물타기 타이밍 검토.", "add"),
+        ("ma5_recovery_add", "MA5 상향 돌파 (추가매수)", "flag", "ma5_recovery", 120, "MA5 회복 추가매수 타이밍 ({price:,}원 > MA5 {ma5:,}원)", "broke_above_ma5", 17, "보유 중 종목이 하락 후 MA5를 상향 돌파. 반등 확인 후 추가매수 타이밍 검토.", "add"),
+        ("rsi_critical", "RSI 극단적 과매도 (심각)", "rsi_lte", "rsi_critical", 5, "RSI 극단적 과매도 경고 (RSI {rsi:.1f} <= {threshold}) — 즉각 검토 필요", None, 18, "RSI 극단 과매도 심각 경고. 홀드 후에도 독립 재알림.", "both"),
+        ("bollinger_critical_below", "볼린저 하단 3% 이탈 (심각)", "flag", "bollinger_lower_break", 5, "볼린저 하단 3% 이상 급락 경고 ({price:,}원 << 하단 {lower:,}원) — 즉각 검토 필요", "bollinger_critical_below", 19, "볼린저 하단 3% 이상 이탈. 극단적 과매도. 홀드 후에도 독립 재알림.", "both"),
+        ("volume_surge_ratio", "거래량 급증", "volume_gte", "volume_surge_ratio", 120, "거래량 급증 ({ratio:.1f}배)", None, 20, "오늘 거래량이 최근 20일 평균 거래량 대비 N배 이상일 때. 세력 개입, 뉴스/공시 등 이슈 발생 가능성 신호.", "both"),
+        ("stochastic_golden_cross", "스토캐스틱 골든크로스", "flag", "stochastic_golden_cross", 1440, "스토캐스틱 골든크로스 (%K {stoch_k:.0f} > %D {stoch_d:.0f})", "stochastic_golden_cross", 21, "%K가 %D를 상향 돌파 (과매도 구간에서 더 강력)", "entry"),
+        ("stochastic_death_cross", "스토캐스틱 데드크로스", "flag", "stochastic_death_cross", 1440, "스토캐스틱 데드크로스 (%K {stoch_k:.0f} < %D {stoch_d:.0f})", "stochastic_death_cross", 22, "%K가 %D를 하향 돌파 (과매수 구간에서 더 강력)", "exit"),
+        ("cci_oversold", "CCI 과매도", "cci_lte", "cci_oversold", 120, "CCI 과매도 ({cci:.0f} <= {threshold})", None, 23, "CCI가 -100 이하로 진입 (과매도 → 반등 가능)", "entry"),
+        ("cci_overbought", "CCI 과매수", "cci_gte", "cci_overbought", 120, "CCI 과매수 ({cci:.0f} >= {threshold})", None, 24, "CCI가 +100 이상으로 진입 (과매수 → 조정 가능)", "exit"),
+        ("ichimoku_golden_cross", "일목 전환선 골든크로스", "flag", "ichimoku_golden_cross", 1440, "일목균형표 전환선 골든크로스", "ichimoku_tenkan_golden", 25, "전환선(9일)이 기준선(26일) 상향 돌파 → 매수 신호", "entry"),
+        ("ichimoku_death_cross", "일목 전환선 데드크로스", "flag", "ichimoku_death_cross", 1440, "일목균형표 전환선 데드크로스", "ichimoku_tenkan_dead", 26, "전환선(9일)이 기준선(26일) 하향 돌파 → 매도 신호", "exit"),
+        ("ichimoku_cloud_breakout", "일목 구름대 돌파", "flag", "ichimoku_cloud_breakout", 1440, "일목균형표 구름대 돌파 ({price:,}원)", "ichimoku_above_cloud", 27, "가격이 구름대 위로 돌파 → 상승 추세 전환", "entry"),
+        ("ichimoku_cloud_breakdown", "일목 구름대 이탈", "flag", "ichimoku_cloud_breakdown", 1440, "일목균형표 구름대 이탈 ({price:,}원)", "ichimoku_below_cloud", 28, "가격이 구름대 아래로 이탈 → 하락 추세 전환", "exit"),
     ]
     with get_conn() as conn:
-        for c in new_conditions:
-            conn.execute(
-                "INSERT OR IGNORE INTO conditions_def "
-                "(id, name, evaluator, param, cooldown_minutes, message, chart_field, sort_order) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (c["id"], c["name"], c["evaluator"], c["param"],
-                 c["cooldown_minutes"], c["message"], c["chart_field"], c["sort_order"])
-            )
-        conn.commit()
-
-
-def _migrate_yaml_to_db():
-    """최초 실행 시 YAML → DB 1회 자동 마이그레이션"""
-    from pathlib import Path
-    base = Path(DB_PATH).parent.parent
-
-    with get_conn() as conn:
-        if conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] == 0:
-            try:
-                import yaml
-                path = base / "config" / "worker.yaml"
-                data = yaml.safe_load(open(path, encoding="utf-8"))
-                for s in data.get("stocks", []):
-                    conn.execute(
-                        "INSERT OR IGNORE INTO watchlist (code, name, enabled, conditions) VALUES (?,?,?,?)",
-                        (str(s["code"]), s["name"], int(s.get("enabled", True)),
-                         json.dumps(s.get("conditions", {}), ensure_ascii=False))
-                    )
-                conn.commit()
-            except Exception:
-                pass
-
         if conn.execute("SELECT COUNT(*) FROM conditions_def").fetchone()[0] == 0:
-            try:
-                import yaml
-                path = base / "config" / "conditions.yaml"
-                data = yaml.safe_load(open(path, encoding="utf-8"))
-                for i, c in enumerate(data.get("conditions", [])):
-                    conn.execute(
-                        "INSERT OR IGNORE INTO conditions_def "
-                        "(id, name, evaluator, param, cooldown_minutes, message, chart_field, sort_order) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
-                        (c["id"], c["name"], c["evaluator"], c["param"],
-                         c.get("cooldown_minutes", 60), c["message"],
-                         c.get("chart_field"), i)
-                    )
-                conn.commit()
-            except Exception:
-                pass
-
-
-_CONDITION_SIGNAL_TYPES = {
-    # exit: 보유 중 종목에만 의미 있는 조건
-    "target_price":          "exit",
-    "stop_loss_price":       "exit",
-    "rsi_overbought":        "exit",
-    "death_cross":           "exit",
-    "ma20_support_break":    "exit",
-    "macd_death_cross":      "exit",
-    # entry: 미보유 종목 매수 타이밍 조건
-    "rsi_oversold":             "entry",
-    "rsi_oversold_intraday":    "entry",
-    "golden_cross":          "entry",
-    "ma5_recovery":          "entry",
-    "macd_golden_cross":     "entry",
-    "bollinger_lower_break": "entry",
-    # both: 보유/미보유 모두 의미 있는 조건 (물타기 포함)
-    "volume_surge_ratio":    "both",
-    "new_high_20d":          "both",
-    "ma5_support_break":     "both",
-    "bollinger_upper_break": "both",
-    # 심각 조건 (홀드 후 재알림 + 독립 발동)
-    "rsi_critical":                "both",
-    "bollinger_critical_below":    "both",
-}
-
-_CONDITION_DESCRIPTIONS = {
-    "target_price":        "설정한 목표 주가에 도달했을 때 발생. 익절 타이밍 신호. 목표가 이상이면 트리거.",
-    "stop_loss_price":     "설정한 손절 주가 이하로 떨어졌을 때 발생. 손실 확대 방지 신호. 손절가 이하면 트리거.",
-    "rsi_overbought":      "RSI(상대강도지수)가 과매수 기준(보통 70) 이상일 때. 단기 고점 도달 가능성. 매도 검토 신호.",
-    "rsi_oversold":            "일봉 RSI(14일)가 과매도 기준(종목별 38~43) 이하일 때. 스윙 매수 진입 타이밍 신호.",
-    "rsi_oversold_intraday":   "5분봉 RSI(14기간)가 과매도 기준(종목별 30~35) 이하일 때. 단기 종목 당일 급락 감지 신호.",
-    "volume_surge_ratio":  "오늘 거래량이 최근 20일 평균 거래량 대비 N배 이상일 때. 세력 개입, 뉴스/공시 등 이슈 발생 가능성 신호.",
-    "golden_cross":        "단기 이동평균(MA5)이 장기 이동평균(MA20)을 아래에서 위로 돌파하는 순간. 중기 상승 추세 전환 신호.",
-    "death_cross":         "단기 이동평균(MA5)이 장기 이동평균(MA20)을 위에서 아래로 돌파하는 순간. 중기 하락 추세 전환 신호.",
-    "new_high_20d":        "현재가가 최근 20거래일 중 가장 높은 고가를 돌파. 강한 상승 모멘텀 신호. 신고가 돌파 매수 전략에 활용.",
-    "ma20_support_break":  "전일까지 MA20 위에 있다가 오늘 MA20 아래로 이탈. 중기 지지선 붕괴 신호. 추가 하락 가능성.",
-    "ma5_support_break":   "전일까지 MA5 위에 있다가 오늘 MA5 아래로 이탈. 단기 지지선 붕괴 신호. 단기 조정 진입 가능성.",
-    "ma5_recovery":        "전일까지 MA5 아래에 있다가 오늘 MA5 위로 돌파. 단기 반등 회복 신호. 단기 매수 진입 검토.",
-    "macd_golden_cross":   "MACD 라인(EMA12-EMA26)이 시그널 라인(MACD의 EMA9)을 아래에서 위로 돌파. 상승 모멘텀 강화 신호.",
-    "macd_death_cross":    "MACD 라인이 시그널 라인을 위에서 아래로 돌파. 하락 모멘텀 강화 신호. 매도 검토.",
-    "bollinger_upper_break": "현재가가 볼린저 상단(MA20 + 2σ)을 돌파. 강한 상승 돌파 또는 과열 신호. 추세 추종 or 과매수 주의.",
-    "bollinger_lower_break": "현재가가 볼린저 하단(MA20 - 2σ) 아래로 이탈. 급락 또는 과매도 신호. 반등 가능성 검토.",
-    "rsi_critical":             "RSI가 극단적 과매도(rsi_critical 기준, 예:20) 이하. 심각한 낙폭 경고. 홀드 후에도 독립 재알림.",
-    "bollinger_critical_below": "현재가가 볼린저 하단보다 3% 이상 하락. 극단적 과매도 구간. 홀드 후에도 독립 재알림.",
-}
-
-
-def _populate_descriptions():
-    """conditions_def 테이블에 한글 설명 및 signal_type 채우기 (빈 항목만)"""
-    with get_conn() as conn:
-        for cid, desc in _CONDITION_DESCRIPTIONS.items():
-            conn.execute(
-                "UPDATE conditions_def SET description = ? WHERE id = ? AND (description IS NULL OR description = '')",
-                (desc, cid)
-            )
-        for cid, stype in _CONDITION_SIGNAL_TYPES.items():
-            conn.execute(
-                "UPDATE conditions_def SET signal_type = ? WHERE id = ? AND (signal_type IS NULL OR signal_type = 'both')",
-                (stype, cid)
-            )
-        conn.commit()
-
-
-def _migrate_cooldown_minutes():
-    """쿨다운 분 초기값 마이그레이션 — cooldown_minutes=60(기본값)인 경우만 업데이트 (사용자 변경값 보존)"""
-    updates = [
-        (120, "rsi_overbought"),
-        (120, "rsi_oversold"),
-        (390, "target_price"),
-        (390, "golden_cross"),
-        (390, "death_cross"),
-        (390, "ma20_support_break"),
-        (390, "new_high_20d"),
-        (390, "macd_golden_cross"),
-        (390, "macd_death_cross"),
-        (240, "rsi_oversold_add"),
-        (240, "bollinger_lower_break_add"),
-        (240, "ma5_recovery_add"),
-        (5,   "rsi_critical"),
-        (5,   "bollinger_critical_below"),
-        (60,  "rsi_oversold_intraday"),
-    ]
-    with get_conn() as conn:
-        for minutes, cid in updates:
-            conn.execute(
-                "UPDATE conditions_def SET cooldown_minutes = ? WHERE id = ? AND cooldown_minutes = 60",
-                (minutes, cid)
-            )
-        conn.commit()
+            for row in SEED:
+                conn.execute(
+                    "INSERT INTO conditions_def "
+                    "(id, name, evaluator, param, cooldown_minutes, message, chart_field, sort_order, description, signal_type) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)", row
+                )
+            conn.commit()
 
 
 # ── watchlist ──────────────────────────────────────────────────────────────
