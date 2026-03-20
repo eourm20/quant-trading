@@ -142,6 +142,18 @@ def _screen_candidates() -> list[dict]:
     except Exception as e:
         logger.warning(f"외인 순매수 조회 실패: {e}")
 
+    time.sleep(1)
+
+    # 4. HTS 조건검색 (ka10171 → ka10172, WebSocket)
+    try:
+        cond_stocks = kiwoom.run_all_quant_conditions()
+        for item in cond_stocks:
+            code = item["stock_code"]
+            if code not in existing_codes and not any(c["stock_code"] == code for c in candidates):
+                candidates.append(item)
+    except Exception as e:
+        logger.warning(f"HTS 조건검색 실패: {e}")
+
     logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견")
     return candidates[:30]
 
