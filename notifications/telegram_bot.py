@@ -452,6 +452,23 @@ class TelegramBot:
             self._send("❌ 임계값 변경 제안을 모두 취소했습니다.")
             return
 
+        # ── 스크리닝 콜백 (관심종목 등록/패스) ──
+        if data.startswith("screen_add:"):
+            code = data.split(":", 1)[1]
+            from worker.stock_analyzer import handle_screening_callback
+            result = handle_screening_callback(code, "add")
+            self._answer_callback(callback_id, result)
+            self._send(result)
+            return
+
+        if data.startswith("screen_pass:"):
+            code = data.split(":", 1)[1]
+            from worker.stock_analyzer import handle_screening_callback
+            result = handle_screening_callback(code, "pass")
+            self._answer_callback(callback_id, result)
+            self._send(result)
+            return
+
         parts = data.split(":", 3)
         if len(parts) < 3:
             self._answer_callback(callback_id)

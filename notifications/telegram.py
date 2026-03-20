@@ -37,6 +37,26 @@ def send_message(text: str) -> bool:
     return _post(text)
 
 
+def send_message_with_inline_buttons(text: str, buttons: list[list[dict]]) -> int | None:
+    """인라인 버튼이 포함된 메시지 발송. 성공 시 message_id 반환."""
+    if not BOT_TOKEN or not CHAT_ID:
+        return None
+    payload: dict = {
+        "chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
+        "reply_markup": {"inline_keyboard": buttons},
+    }
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json=payload, timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("result", {}).get("message_id")
+    except Exception:
+        pass
+    return None
+
+
 _FIELD_LABELS = {
     "rsi_oversold":          "RSI 과매도",
     "rsi_overbought":        "RSI 과매수",

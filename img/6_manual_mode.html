@@ -219,9 +219,9 @@
       <p style="font-size:13px;color:#666;margin-bottom:12px;">두 모드는 독립 실행 가능하며, 같은 DB를 공유합니다. 동시 실행도 가능.</p>
       <table>
         <tr><th></th><th>수동 (Claude Desktop + MCP)</th><th>자동 (백그라운드 워커)</th></tr>
-        <tr><td><strong>종목 추천</strong></td><td>추천만 → 사용자가 판단</td><td>추천 + watchlist <strong>자동 추가</strong></td></tr>
-        <tr><td><strong>초기 임계치</strong></td><td>자동 제안 → 사용자 확인 후 등록</td><td>AI가 자동 설정</td></tr>
-        <tr><td><strong>신호 → 행동</strong></td><td>텔레그램 알림 → <strong>사용자 승인</strong></td><td>AI 판단 → <strong>자동 매매</strong></td></tr>
+        <tr><td><strong>종목 추천</strong></td><td>추천 + 승인 버튼 (✅ 관심종목 등록 / ❌ 패스)</td><td>추천 + <strong>자동 관심종목 등록</strong></td></tr>
+        <tr><td><strong>초기 임계치</strong></td><td>AI 제안 + 근거 → <strong>사용자 승인 시 적용</strong></td><td>AI 제안 + 근거 → <strong>자동 적용</strong></td></tr>
+        <tr><td><strong>신호 → 행동</strong></td><td>AI 판단 + 승인 버튼 → <strong>사용자 승인</strong></td><td>AI 판단 → <strong>자동 매매</strong></td></tr>
         <tr><td><strong>포트폴리오 동기화</strong></td><td>MCP auto_sync (10분)</td><td>워커 스케줄러 (2분)</td></tr>
         <tr><td><strong>프로세스 가이드</strong></td><td>이 페이지</td><td><a href="5_auto_mode.html">자동 모드 가이드 →</a></td></tr>
       </table>
