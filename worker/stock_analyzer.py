@@ -51,14 +51,17 @@ def _screen_candidates() -> list[dict]:
 
     candidates = []
 
-    # 1. 거래량 급증 종목 (ka10023)
-    try:
-        vol_surge = kiwoom._call_api("ka10023", {})
-        for item in (vol_surge.get("output") or vol_surge.get("output1") or [])[:20]:
+    def _extract(items, source, limit=20):
+        for item in items[:limit]:
             code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
             name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
             if code and code not in existing_codes and len(code) == 6:
-                candidates.append({"stock_code": code, "stock_name": name, "source": "거래량 급증"})
+                if not any(c["stock_code"] == code for c in candidates):
+                    candidates.append({"stock_code": code, "stock_name": name, "source": source})
+
+    # 1. 거래량 급증 종목 (ka10023)
+    try:
+        _extract(kiwoom.get_volume_surge(), "거래량 급증", 20)
     except Exception as e:
         logger.warning(f"거래량 급증 조회 실패: {e}")
 
@@ -66,13 +69,7 @@ def _screen_candidates() -> list[dict]:
 
     # 2. 전일대비 등락률 하위 — 눌림목 후보 (ka10027)
     try:
-        dip_stocks = kiwoom._call_api("ka10027", {"flu_tp": "2"})
-        for item in (dip_stocks.get("output") or dip_stocks.get("output1") or [])[:20]:
-            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
-            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if code and code not in existing_codes and len(code) == 6:
-                if not any(c["stock_code"] == code for c in candidates):
-                    candidates.append({"stock_code": code, "stock_name": name, "source": "눌림목 후보"})
+        _extract(kiwoom.get_decline_rank(), "눌림목 후보", 20)
     except Exception as e:
         logger.warning(f"등락률 하위 조회 실패: {e}")
 
@@ -80,13 +77,7 @@ def _screen_candidates() -> list[dict]:
 
     # 3. 외인 연속 순매수 상위 (ka10035)
     try:
-        foreign_buy = kiwoom._call_api("ka10035", {})
-        for item in (foreign_buy.get("output") or foreign_buy.get("output1") or [])[:10]:
-            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
-            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if code and code not in existing_codes and len(code) == 6:
-                if not any(c["stock_code"] == code for c in candidates):
-                    candidates.append({"stock_code": code, "stock_name": name, "source": "외인 순매수"})
+        _extract(kiwoom.get_foreign_net_buy(), "외인 순매수", 10)
     except Exception as e:
         logger.warning(f"외인 순매수 조회 실패: {e}")
 
@@ -114,8 +105,7 @@ def run_intraday_scan():
     # 쿨다운: 같은 종목은 하루에 1번만 알림
     movers = []
     try:
-        vol_surge = kiwoom._call_api("ka10023", {})
-        for item in (vol_surge.get("output") or vol_surge.get("output1") or [])[:15]:
+        for item in kiwoom.get_volume_surge()[:15]:
             code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
             name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
             if not code or code in existing_codes or len(code) != 6:
