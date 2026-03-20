@@ -365,15 +365,15 @@ class KiwoomClient:
     def get_volume_surge(self) -> list[dict]:
         """거래량 급증 종목 (ka10023)"""
         payload = self._post(
-            "/api/dostk/sise", "ka10023",
-            {"mrkt_tp": "0", "vol_tp": "1"},
+            "/api/dostk/rank", "ka10023",
+            {"mrkt_tp": "0"},
         )
         return payload.get("output") or payload.get("output1") or []
 
     def get_decline_rank(self) -> list[dict]:
         """등락률 하위 종목 (ka10027)"""
         payload = self._post(
-            "/api/dostk/sise", "ka10027",
+            "/api/dostk/rank", "ka10027",
             {"mrkt_tp": "0", "flu_tp": "2"},
         )
         return payload.get("output") or payload.get("output1") or []
@@ -381,7 +381,7 @@ class KiwoomClient:
     def get_foreign_net_buy(self) -> list[dict]:
         """외인 순매수 상위 (ka10035)"""
         payload = self._post(
-            "/api/dostk/sise", "ka10035",
+            "/api/dostk/rank", "ka10035",
             {"mrkt_tp": "0"},
         )
         return payload.get("output") or payload.get("output1") or []
