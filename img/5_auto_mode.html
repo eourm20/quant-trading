@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>자동화 모드 — 프로세스 & 사용법</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f9f8f5;
+    color: #1a1a18;
+    padding: 0;
+    line-height: 1.6;
+  }
+
+  /* ── Header ── */
+  .hero {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    color: #fff;
+    padding: 48px 24px 36px;
+    text-align: center;
+  }
+  .hero h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .hero p { font-size: 15px; color: #a8b2d1; max-width: 600px; margin: 0 auto; }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+  .badge-auto { background: #e94560; color: #fff; }
+
+  /* ── Layout ── */
+  .container { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex; gap: 6px; justify-content: center;
+    margin-bottom: 28px; flex-wrap: wrap;
+  }
+  .tab {
+    padding: 8px 18px; border: 1px solid #c8c6bc; border-radius: 8px;
+    background: transparent; color: #5f5e5a; font-size: 13px;
+    cursor: pointer; transition: all .15s; font-family: inherit; font-weight: 500;
+  }
+  .tab.on { background: #e94560; color: #fff; border-color: #e94560; }
+
+  /* ── Panels ── */
+  .panel { display: none; }
+  .panel.on { display: block; }
+
+  /* ── Section ── */
+  .section {
+    background: #fff; border: 1px solid #e4e2d8; border-radius: 12px;
+    padding: 24px; margin-bottom: 20px;
+  }
+  .section h2 {
+    font-size: 17px; font-weight: 600; margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section h3 { font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #444; }
+
+  /* ── Flow Diagram ── */
+  .flow {
+    display: flex; flex-direction: column; gap: 0; align-items: center; margin: 16px 0;
+  }
+  .flow-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center;
+  }
+  .node {
+    padding: 10px 16px; border-radius: 8px; font-size: 13px;
+    font-weight: 500; text-align: center; min-width: 120px;
+    border: 1.5px solid; position: relative;
+  }
+  .node-main { background: #e6f1fb; border-color: #85b7eb; color: #0c447c; }
+  .node-api { background: #EEEDFE; border-color: #534AB7; color: #3C3489; }
+  .node-ai { background: #FAECE7; border-color: #993C1D; color: #712B13; }
+  .node-db { background: #E1F5EE; border-color: #0F6E56; color: #085041; }
+  .node-alert { background: #FAEEDA; border-color: #854F0B; color: #633806; }
+  .node-action { background: #fce4ec; border-color: #c62828; color: #b71c1c; }
+  .node-gray { background: #F1EFE8; border-color: #5F5E5A; color: #444441; }
+  .node small { display: block; font-size: 11px; font-weight: 400; opacity: 0.8; margin-top: 2px; }
+
+  .arrow {
+    width: 2px; height: 20px; background: #b4b2a9; position: relative; margin: 0 auto;
+  }
+  .arrow::after {
+    content: ''; position: absolute; bottom: -4px; left: -4px;
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+    border-top: 6px solid #b4b2a9;
+  }
+  .arrow-h {
+    width: 24px; height: 2px; background: #b4b2a9; position: relative;
+  }
+  .arrow-h::after {
+    content: ''; position: absolute; right: -4px; top: -4px;
+    border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+    border-left: 6px solid #b4b2a9;
+  }
+
+  /* ── Table ── */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th { background: #f5f4ef; padding: 8px 10px; text-align: left; font-weight: 600;
+       border-bottom: 2px solid #d4d2c8; font-size: 12px; color: #555; }
+  td { padding: 8px 10px; border-bottom: 1px solid #e8e6de; }
+  tr:hover td { background: #fafaf7; }
+  code {
+    background: #f0efe8; padding: 1px 5px; border-radius: 3px;
+    font-size: 12px; font-family: "SF Mono", monospace;
+  }
+
+  /* ── Info Box ── */
+  .info {
+    background: #f0f7ff; border-left: 3px solid #3b82f6;
+    padding: 12px 16px; border-radius: 0 8px 8px 0;
+    font-size: 13px; margin: 12px 0;
+  }
+  .warn {
+    background: #fff7ed; border-left: 3px solid #f59e0b;
+    padding: 12px 16px; border-radius: 0 8px 8px 0;
+    font-size: 13px; margin: 12px 0;
+  }
+
+  /* ── Timeline ── */
+  .timeline {
+    display: flex; gap: 0; overflow-x: auto; padding: 8px 0; margin: 16px 0;
+  }
+  .tl-item {
+    min-width: 90px; text-align: center; position: relative; flex-shrink: 0;
+  }
+  .tl-time { font-size: 12px; font-weight: 600; color: #0c447c; }
+  .tl-label { font-size: 11px; color: #666; margin-top: 4px; }
+  .tl-bar {
+    height: 4px; background: #85b7eb; margin: 6px 0;
+  }
+  .tl-bar.active { background: #e94560; }
+  .tl-bar.idle { background: #d4d2c8; }
+
+  /* ── Condition Cards ── */
+  .cond-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin: 12px 0; }
+  .cond-card {
+    padding: 10px 14px; border-radius: 8px; border: 1px solid #e4e2d8;
+    font-size: 12px;
+  }
+  .cond-card strong { font-size: 13px; }
+  .cond-tag {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; font-weight: 600;
+  }
+  .tag-entry { background: #e6f1fb; color: #0c447c; }
+  .tag-exit { background: #fce4ec; color: #b71c1c; }
+  .tag-add { background: #FAEEDA; color: #633806; }
+  .tag-both { background: #E1F5EE; color: #085041; }
+
+  /* ── Dark Mode ── */
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a18; color: #e8e6de; }
+    .section { background: #242422; border-color: #3a3a36; }
+    th { background: #2e2e2a; border-color: #444; color: #bbb; }
+    td { border-color: #3a3a36; }
+    tr:hover td { background: #2e2e2a; }
+    code { background: #2e2e2a; color: #d4d0c8; }
+    .tab { border-color: #444; color: #999; }
+    .info { background: #1a2332; border-color: #3b82f6; }
+    .warn { background: #2a2010; border-color: #f59e0b; }
+    .cond-card { border-color: #3a3a36; }
+    .tl-bar.idle { background: #444; }
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <span class="badge badge-auto">AUTO MODE</span>
+  <h1>자동화 모드 프로세스 가이드</h1>
+  <p>백그라운드 워커가 24/7 자동으로 조건 감지 → AI 판단 → 텔레그램 알림 → 자동 매매를 수행합니다</p>
+</div>
+
+<div class="container">
+  <div class="tabs">
+    <button class="tab on" onclick="showTab(this,'overview')">전체 구조</button>
+    <button class="tab" onclick="showTab(this,'scheduler')">스케줄러</button>
+    <button class="tab" onclick="showTab(this,'signal')">신호 감지</button>
+    <button class="tab" onclick="showTab(this,'ai')">AI 판단</button>
+    <button class="tab" onclick="showTab(this,'screening')">자동 스크리닝</button>
+    <button class="tab" onclick="showTab(this,'telegram')">텔레그램 봇</button>
+    <button class="tab" onclick="showTab(this,'safety')">안전장치</button>
+  </div>
+
+  <!-- ═══════════════════ 전체 구조 ═══════════════════ -->
+  <div id="overview" class="panel on">
+    <div class="section">
+      <h2>🔄 워커 전체 아키텍처</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:16px;">
+        <code>worker/main.py</code> — APScheduler 기반, 장 운영 시간(08:00~18:59) 동안 자동 실행
+      </p>
+
+      <div class="flow">
+        <div class="node node-main" style="min-width:280px;">
+          <strong>워커 시작</strong>
+          <small>python -m worker.main [--test]</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-db">DB 초기화<small>init_db()</small></div>
+          <div class="arrow-h"></div>
+          <div class="node node-api">포트폴리오 동기화<small>sync_all(kiwoom)</small></div>
+          <div class="arrow-h"></div>
+          <div class="node node-alert">텔레그램 봇 시작<small>start_bot_thread()</small></div>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-main" style="min-width:350px;">
+          <strong>APScheduler 시작</strong>
+          <small>11개 예약 작업 등록 → 무한 루프</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row" style="gap:8px;">
+          <div class="node node-action" style="min-width:100px;font-size:12px;">신호 감지<small>매 1분</small></div>
+          <div class="node node-ai" style="min-width:100px;font-size:12px;">AI 판단<small>신호 시</small></div>
+          <div class="node node-db" style="min-width:100px;font-size:12px;">포트폴리오<small>매 2분</small></div>
+          <div class="node node-alert" style="min-width:100px;font-size:12px;">스크리닝<small>15:40</small></div>
+          <div class="node node-gray" style="min-width:100px;font-size:12px;">트레일링<small>매 30분</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>⏰ 장 시간대별 동작</h2>
+      <div class="timeline">
+        <div class="tl-item" style="min-width:60px;"><div class="tl-time">~08:29</div><div class="tl-bar idle"></div><div class="tl-label">장외</div></div>
+        <div class="tl-item"><div class="tl-time">08:30</div><div class="tl-bar" style="background:#f59e0b;"></div><div class="tl-label">장전시간외</div></div>
+        <div class="tl-item" style="min-width:200px;"><div class="tl-time">09:00 ~ 15:30</div><div class="tl-bar active"></div><div class="tl-label">정규장 (전 조건 활성)</div></div>
+        <div class="tl-item"><div class="tl-time">15:40</div><div class="tl-bar" style="background:#f59e0b;"></div><div class="tl-label">장후시간외</div></div>
+        <div class="tl-item"><div class="tl-time">16:00</div><div class="tl-bar" style="background:#d4d2c8;"></div><div class="tl-label">시간외단일가</div></div>
+        <div class="tl-item" style="min-width:60px;"><div class="tl-time">18:00~</div><div class="tl-bar idle"></div><div class="tl-label">장외</div></div>
+      </div>
+
+      <table>
+        <tr><th>시간대</th><th>세션</th><th>활성 조건</th><th>주문 유형</th></tr>
+        <tr><td>08:30~09:00</td><td>장전 시간외</td><td>exit / add / both만</td><td>종가 주문 (trde_tp=61)</td></tr>
+        <tr><td><strong>09:00~15:30</strong></td><td><strong>정규장</strong></td><td><strong>전체 (entry 포함)</strong></td><td><strong>시장가 / 지정가</strong></td></tr>
+        <tr><td>15:40~16:00</td><td>장후 시간외</td><td>exit / add / both만</td><td>종가 주문 (trde_tp=81)</td></tr>
+        <tr><td>16:00~18:00</td><td>시간외 단일가</td><td>exit / add / both만</td><td>지정가만 (trde_tp=62)</td></tr>
+      </table>
+      <div class="info">정규장 외 시간대에서는 <strong>entry(신규 매수) 조건이 비활성화</strong>됩니다. 보유 종목의 exit/add 신호만 감지합니다.</div>
+    </div>
+
+    <div class="section">
+      <h2>📁 핵심 파일 구조</h2>
+      <table>
+        <tr><th>파일</th><th>역할</th><th>라인</th></tr>
+        <tr><td><code>worker/main.py</code></td><td>스케줄러 + 오케스트레이터 (진입점)</td><td>~490</td></tr>
+        <tr><td><code>worker/monitor.py</code></td><td>조건 평가 엔진 (check_stock)</td><td>~270</td></tr>
+        <tr><td><code>worker/indicators.py</code></td><td>기술적 지표 계산 (40+ 지표)</td><td>~920</td></tr>
+        <tr><td><code>worker/claude_judge.py</code></td><td>AI 판단 프롬프트 + 파싱</td><td>~690</td></tr>
+        <tr><td><code>worker/stock_analyzer.py</code></td><td>종목 분석 + 자동 스크리닝</td><td>~366</td></tr>
+        <tr><td><code>worker/cooldown.py</code></td><td>쿨다운 필터링</td><td>~37</td></tr>
+        <tr><td><code>worker/portfolio_sync.py</code></td><td>포트폴리오 동기화</td><td>~61</td></tr>
+        <tr><td><code>data/db.py</code></td><td>SQLite DB 스키마 + CRUD</td><td>~600</td></tr>
+        <tr><td><code>notifications/telegram.py</code></td><td>텔레그램 알림 포맷팅</td><td>~150</td></tr>
+        <tr><td><code>notifications/telegram_bot.py</code></td><td>텔레그램 봇 명령 + 인라인 버튼</td><td>~300</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 스케줄러 ═══════════════════ -->
+  <div id="scheduler" class="panel">
+    <div class="section">
+      <h2>📋 예약 작업 전체 목록 (11개)</h2>
+      <table>
+        <tr><th>작업</th><th>실행 주기</th><th>시간대</th><th>설명</th></tr>
+        <tr><td><strong>run_check</strong></td><td>매 1분</td><td>08:00~18:59</td><td>핵심: 종목별 조건 체크 → 신호 감지 → AI 판단</td></tr>
+        <tr><td>reset_all_cooldowns</td><td>1일 1회</td><td>09:00</td><td>장 시작 시 전 종목 쿨다운 초기화</td></tr>
+        <tr><td>sync_premarket</td><td>1일 1회</td><td>08:30</td><td>장전 포트폴리오 동기화</td></tr>
+        <tr><td>sync_open</td><td>1일 1회</td><td>09:01</td><td>장 시작 직후 동기화</td></tr>
+        <tr><td>sync_close</td><td>1일 1회</td><td>18:05</td><td>장 마감 후 최종 동기화</td></tr>
+        <tr><td>sync_realtime</td><td>매 2분</td><td>08:00~18:59</td><td>실시간 포트폴리오 동기화</td></tr>
+        <tr><td>update_signal_results</td><td>매 30분</td><td>09:00~18:00</td><td>신호 결과 수익률 업데이트 (1d/3d/5d/10d)</td></tr>
+        <tr><td>check_trailing_stops</td><td>매 30분</td><td>09:00~15:00</td><td>수익 구간 손절가 자동 상향</td></tr>
+        <tr><td>check_inactive_stocks</td><td>1일 1회</td><td>08:30</td><td>30일 미발동 종목 알림 (주 1회)</td></tr>
+        <tr><td>check_removal_candidates</td><td>매 30분</td><td>09:00~15:00</td><td>미보유 90일 미발동 종목 자동 삭제</td></tr>
+        <tr><td><strong>run_daily_screening</strong></td><td>1일 1회</td><td>15:40</td><td>장 마감 후 유망 종목 자동 발굴</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>🔄 트레일링 스탑 자동화</h2>
+      <div class="flow">
+        <div class="node node-db">보유 종목 수익률 계산<small>(현재가 - 평단) / 평단 × 100</small></div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-main" style="font-size:12px;">+5% 도달<small>손절 → 평단(본전)</small></div>
+          <div class="node node-main" style="font-size:12px;">+10% 도달<small>손절 → 평단+5%</small></div>
+          <div class="node node-main" style="font-size:12px;">+15% 도달<small>손절 → 평단+10%</small></div>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-alert">텔레그램 알림 + 전략 노트 기록</div>
+      </div>
+      <div class="info">손절가는 <strong>항상 올리기만</strong> 합니다. 이미 설정된 손절가보다 낮은 값으로는 변경되지 않습니다.</div>
+    </div>
+
+    <div class="section">
+      <h2>🗑 종목 자동 관리</h2>
+      <table>
+        <tr><th>기능</th><th>조건</th><th>동작</th></tr>
+        <tr>
+          <td><strong>미발동 알림</strong></td>
+          <td>30일 이상 신호 없음</td>
+          <td>텔레그램 경고 (주 1회) — 조건 검토 권고</td>
+        </tr>
+        <tr>
+          <td><strong>자동 삭제</strong></td>
+          <td>미보유 + 90일 미발동</td>
+          <td>watchlist에서 제거 + 텔레그램 알림 + 전략 노트</td>
+        </tr>
+        <tr>
+          <td><strong>결과 추적</strong></td>
+          <td>신호 발생 후 1/3/5/10일</td>
+          <td>해당 시점 현재가로 수익률 자동 계산 → signals 테이블</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 신호 감지 ═══════════════════ -->
+  <div id="signal" class="panel">
+    <div class="section">
+      <h2>🎯 신호 감지 프로세스 (run_check → check_stock)</h2>
+      <div class="flow">
+        <div class="node node-main" style="min-width:300px;">
+          <strong>1. 데이터 로드</strong>
+          <small>watchlist (DB) + conditions_def (DB) 실시간 로드</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-api" style="min-width:300px;">
+          <strong>2. 시장 데이터 조회 (종목별)</strong>
+          <small>ka10001 현재가 + ka10081 일봉 90일</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-main" style="min-width:300px;">
+          <strong>3. 기술적 지표 계산</strong>
+          <small>RSI, MA, MACD, 볼린저, 스토캐스틱, CCI, 일목균형표 등 40+</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-main" style="min-width:300px;">
+          <strong>4. 조건 평가 (29개 조건)</strong>
+          <small>signal_type 필터 (entry/exit/add/both) + 쿨다운 필터</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-ai" style="min-width:300px;">
+          <strong>5. AI 판단 (Claude API)</strong>
+          <small>차트 + 공시 + 뉴스 + 포트폴리오 → [매수/매도/홀드]</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-db">신호 저장<small>signals 테이블</small></div>
+          <div class="node node-alert">텔레그램 알림<small>인라인 버튼 포함</small></div>
+          <div class="node node-action">자동 매매<small>AUTO_TRADE=true 시</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📊 signal_type 필터링</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:12px;">보유 여부에 따라 평가할 조건이 달라집니다.</p>
+      <table>
+        <tr><th>상태</th><th>평가 대상</th><th>대표 조건</th></tr>
+        <tr>
+          <td><strong>미보유</strong></td>
+          <td><span class="cond-tag tag-entry">entry</span> <span class="cond-tag tag-both">both</span></td>
+          <td>rsi_oversold, golden_cross, bollinger_lower_break</td>
+        </tr>
+        <tr>
+          <td><strong>보유</strong></td>
+          <td><span class="cond-tag tag-exit">exit</span> <span class="cond-tag tag-add">add</span> <span class="cond-tag tag-both">both</span></td>
+          <td>target_price, stop_loss_price, death_cross, rsi_overbought</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>📈 주요 신호 조건 (29개)</h2>
+      <div class="cond-grid">
+        <div class="cond-card">
+          <strong>RSI 과매도</strong> <span class="cond-tag tag-entry">entry</span><br>
+          RSI ≤ 종목별 기준값 (38~43)<br>
+          <small>쿨다운 120분 | horizon별 RSI 기간 차등</small>
+        </div>
+        <div class="cond-card">
+          <strong>RSI 과매수</strong> <span class="cond-tag tag-exit">exit</span><br>
+          RSI ≥ 종목별 기준값 (60~75)<br>
+          <small>쿨다운 120분</small>
+        </div>
+        <div class="cond-card">
+          <strong>골든크로스 (MA)</strong> <span class="cond-tag tag-entry">entry</span><br>
+          MA5가 MA20 상향 돌파<br>
+          <small>쿨다운 1440분 | 전환형 (1회 발동)</small>
+        </div>
+        <div class="cond-card">
+          <strong>데드크로스 (MA)</strong> <span class="cond-tag tag-exit">exit</span><br>
+          MA5가 MA20 하향 돌파<br>
+          <small>쿨다운 1440분 | 전환형</small>
+        </div>
+        <div class="cond-card">
+          <strong>목표가 도달</strong> <span class="cond-tag tag-exit">exit</span><br>
+          현재가 ≥ target_price<br>
+          <small>쿨다운 360분</small>
+        </div>
+        <div class="cond-card">
+          <strong>손절가 도달</strong> <span class="cond-tag tag-exit">exit</span><br>
+          현재가 ≤ stop_loss_price<br>
+          <small>쿨다운 60분</small>
+        </div>
+        <div class="cond-card">
+          <strong>거래량 급증</strong> <span class="cond-tag tag-both">both</span><br>
+          당일 거래량 ≥ 20일 평균 × 배율<br>
+          <small>쿨다운 60분</small>
+        </div>
+        <div class="cond-card">
+          <strong>볼린저 하단 이탈</strong> <span class="cond-tag tag-entry">entry</span><br>
+          가격 < 하단 밴드 (MA20 - 2σ)<br>
+          <small>쿨다운 360분 | 전환형</small>
+        </div>
+        <div class="cond-card">
+          <strong>볼린저 Critical</strong> <span class="cond-tag tag-entry">entry</span><br>
+          가격 < 하단 × 0.97 (3%+ 이탈)<br>
+          <small>쿨다운 5분 | 긴급 반복 알림</small>
+        </div>
+        <div class="cond-card">
+          <strong>MACD 골든/데드크로스</strong><br>
+          <span class="cond-tag tag-entry">entry</span> / <span class="cond-tag tag-exit">exit</span><br>
+          <small>쿨다운 1440분 | 전환형</small>
+        </div>
+        <div class="cond-card">
+          <strong>스토캐스틱 크로스</strong><br>
+          <span class="cond-tag tag-entry">entry</span> / <span class="cond-tag tag-exit">exit</span><br>
+          <small>%K/%D 교차 | 전환형</small>
+        </div>
+        <div class="cond-card">
+          <strong>일목균형표</strong><br>
+          전환선/기준선 크로스 + 구름대 돌파/이탈<br>
+          <small>4개 조건 | 전환형</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>⏱ 쿨다운 체계</h2>
+      <table>
+        <tr><th>등급</th><th>시간</th><th>대상 조건</th><th>특성</th></tr>
+        <tr><td style="color:#c62828;font-weight:600;">Critical</td><td>5분</td><td>볼린저 Critical</td><td>긴급 반복 알림</td></tr>
+        <tr><td style="color:#f59e0b;font-weight:600;">Short</td><td>30~60분</td><td>거래량, RSI, 손절가</td><td>빈번한 신호</td></tr>
+        <tr><td style="color:#3b82f6;font-weight:600;">Medium</td><td>2~6시간</td><td>목표가, 볼린저</td><td>구조적 변화</td></tr>
+        <tr><td style="color:#666;font-weight:600;">Long</td><td>24시간</td><td>골든/데드크로스</td><td>전환형 (1회)</td></tr>
+      </table>
+      <div class="info">매일 <strong>09:00 장 시작 시</strong> 전체 쿨다운이 리셋됩니다. 매매 실행 후에도 해당 종목 쿨다운이 리셋됩니다.</div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ AI 판단 ═══════════════════ -->
+  <div id="ai" class="panel">
+    <div class="section">
+      <h2>🤖 AI 판단 시스템 (claude_judge.py)</h2>
+      <div class="flow">
+        <div class="flow-row">
+          <div class="node node-main">신호 데이터<small>조건, 가격, RSI</small></div>
+          <div class="node node-api">차트 분석<small>40+ 기술 지표</small></div>
+          <div class="node node-db">DART 공시<small>재무 + 주요 공시</small></div>
+          <div class="node node-alert">뉴스 5건<small>네이버 뉴스 API</small></div>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-ai" style="min-width:400px;">
+          <strong>Claude API 호출</strong>
+          <small>시스템 프롬프트 (캐싱, 17개 섹션) + 유저 프롬프트 (실시간 데이터)</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-action">[매수]<small>+ 추천수량 N주</small></div>
+          <div class="node node-gray">[홀드]<small>+ 전환조건 + 임계값</small></div>
+          <div class="node node-action">[매도]<small>+ 추천수량 N주</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📝 AI 응답 구조</h2>
+      <table>
+        <tr><th>태그</th><th>내용</th><th>후속 동작</th></tr>
+        <tr><td><code>[매수]</code> / <code>[매도]</code></td><td>판정 + 근거</td><td>AUTO_TRADE=true 시 자동 주문</td></tr>
+        <tr><td><code>[홀드]</code></td><td>판정 + 근거</td><td>전환조건/임계값 파싱</td></tr>
+        <tr><td><code>[근거]</code></td><td>판단 이유 2~3문장</td><td>신호 기록에 저장</td></tr>
+        <tr><td><code>[추천수량]</code></td><td>N주</td><td>자동 매매 시 주문 수량</td></tr>
+        <tr><td><code>[전환조건]</code></td><td>홀드→매수/매도 전환 기준</td><td>전략 노트에 저장</td></tr>
+        <tr><td><code>[임계값]</code></td><td>field=value 쌍</td><td>텔레그램 인라인 버튼으로 적용 제안</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>💰 프롬프트 캐싱</h2>
+      <p style="font-size:13px;">시스템 프롬프트(트레이딩 지식 17개 섹션)에 Anthropic <code>cache_control: ephemeral</code> 적용</p>
+      <div class="flow" style="flex-direction:row;gap:24px;margin-top:16px;">
+        <div class="node node-gray" style="flex:1;">
+          <strong>시스템 프롬프트</strong><br>
+          ~693줄 고정 | 캐싱됨<br>
+          <small>비용 90% 절감</small>
+        </div>
+        <div class="node node-ai" style="flex:1;">
+          <strong>유저 프롬프트</strong><br>
+          매 신호마다 동적 생성<br>
+          <small>지표+공시+뉴스+포트폴리오</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>🔄 홀드 시 임계값 자동 제안 프로세스</h2>
+      <div class="flow">
+        <div class="node node-ai">AI: [홀드] + [임계값] rsi_oversold=38</div>
+        <div class="arrow"></div>
+        <div class="node node-alert" style="min-width:350px;">
+          텔레그램 메시지 발송 (인라인 버튼)<br>
+          <small>[✅ 적용] [✏️ 수정] [❌ 거절]</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-db">✅ 적용<small>DB 즉시 반영 + 전략 노트</small></div>
+          <div class="node node-alert">✏️ 수정<small>새 값 입력 대기</small></div>
+          <div class="node node-gray">❌ 거절<small>무시</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 자동 스크리닝 ═══════════════════ -->
+  <div id="screening" class="panel">
+    <div class="section">
+      <h2>🔍 자동 스크리닝 프로세스 (매일 15:40)</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:16px;">
+        <code>worker/stock_analyzer.py</code> — 장 마감 후 유망 종목을 자동 발굴하여 watchlist에 추가
+      </p>
+
+      <div class="flow">
+        <div class="node node-main" style="min-width:350px;">
+          <strong>Step 1. 후보 수집 (screen_stocks)</strong>
+          <small>키움 API 3종 호출 → 후보 최대 30개</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-api">거래량 급증<small>ka10023 · 상위 20개</small></div>
+          <div class="node node-api">눌림목 후보<small>ka10027 · 하락 상위 20개</small></div>
+          <div class="node node-api">외인 순매수<small>ka10035 · 상위 10개</small></div>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-gray" style="min-width:350px;">
+          <strong>필터링</strong>
+          <small>기존 watchlist 종목 제외 + 종목코드 6자리 검증</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-main" style="min-width:350px;">
+          <strong>Step 2. 개별 분석 (analyze_stock)</strong>
+          <small>후보별 차트 + 공시 + 뉴스 + AI 분석</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-api">현재가 + 90일 차트<small>ka10001 + ka10081</small></div>
+          <div class="node node-main">40+ 지표 계산</div>
+          <div class="node node-db">DART 공시/재무</div>
+          <div class="node node-alert">뉴스 5건</div>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-ai" style="min-width:350px;">
+          <strong>Step 3. AI 편입 판단 (Claude API)</strong>
+          <small>편입 조건 4가지 중 2가지 이상 충족 여부 평가</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-db" style="min-width:160px;">편입<small>watchlist 자동 추가</small></div>
+          <div class="node node-gray" style="min-width:100px;">보류<small>스킵</small></div>
+          <div class="node node-gray" style="min-width:100px;">부적합<small>스킵</small></div>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-alert" style="min-width:350px;">
+          <strong>Step 4. 텔레그램 알림</strong>
+          <small>편입 종목 + 목표가/손절가/horizon 요약</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>✅ 편입 조건 4가지 (2가지 이상 충족 필요)</h2>
+      <div class="cond-grid">
+        <div class="cond-card" style="border-left:3px solid #3b82f6;">
+          <strong>1. 눌림목</strong><br>
+          MA20 지지 근처, RSI 과매도, 피보나치 되돌림 구간
+        </div>
+        <div class="cond-card" style="border-left:3px solid #10b981;">
+          <strong>2. 저평가</strong><br>
+          PER/PBR 동종업계 대비 낮음, 실적 대비 주가 저평가
+        </div>
+        <div class="cond-card" style="border-left:3px solid #f59e0b;">
+          <strong>3. 테마 미반영</strong><br>
+          호재 공시/뉴스 있으나 주가에 미반영
+        </div>
+        <div class="cond-card" style="border-left:3px solid #e94560;">
+          <strong>4. 실적 개선</strong><br>
+          매출/영업이익 증가 추세
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📦 자동 편입 시 설정되는 값</h2>
+      <table>
+        <tr><th>필드</th><th>값</th><th>소스</th></tr>
+        <tr><td>target_price</td><td>AI 제안</td><td>기술적 분석 + 피보나치 확장</td></tr>
+        <tr><td>stop_loss_price</td><td>AI 제안</td><td>평단 -5~-10%</td></tr>
+        <tr><td>horizon</td><td>단기/중기/장기</td><td>AI 판단</td></tr>
+        <tr><td>rsi_oversold</td><td>38~43</td><td>AI 제안</td></tr>
+        <tr><td>rsi_overbought</td><td>60~75</td><td>AI 제안</td></tr>
+        <tr><td>golden_cross</td><td>true</td><td>기본값</td></tr>
+        <tr><td>death_cross</td><td>true</td><td>기본값</td></tr>
+        <tr><td>volume_surge_ratio</td><td>2.0</td><td>기본값</td></tr>
+        <tr><td>bollinger_lower_break</td><td>true</td><td>기본값</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 텔레그램 봇 ═══════════════════ -->
+  <div id="telegram" class="panel">
+    <div class="section">
+      <h2>📱 텔레그램 봇 명령어</h2>
+      <table>
+        <tr><th>명령</th><th>설명</th><th>예시</th></tr>
+        <tr><td><code>/buy 종목명 [수량]</code></td><td>매수 주문</td><td>/buy 삼성전자 100</td></tr>
+        <tr><td><code>/sell 종목명 [수량]</code></td><td>매도 주문</td><td>/sell 삼성전자 50</td></tr>
+        <tr><td><code>/price 종목명</code></td><td>현재가 조회</td><td>/price 한화에어로</td></tr>
+        <tr><td><code>/balance</code></td><td>계좌 잔고 조회</td><td>/balance</td></tr>
+        <tr><td><code>/confirm</code></td><td>대기 주문 확인 실행</td><td>/confirm</td></tr>
+        <tr><td><code>/cancel</code></td><td>대기 주문 취소</td><td>/cancel</td></tr>
+        <tr><td><code>/help</code></td><td>명령어 안내</td><td>/help</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>🔘 인라인 버튼 (신호 알림)</h2>
+      <div class="flow">
+        <div class="node node-alert" style="min-width:350px;">
+          <strong>신호 알림 메시지</strong><br>
+          종목명 · 현재가 · 조건 · AI 판정
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-action">📊 시장가<small>수량 입력 후 주문</small></div>
+          <div class="node node-main">💰 지정가<small>가격+수량 입력</small></div>
+          <div class="node node-gray">🚪 홀드<small>쿨다운 25%로 단축</small></div>
+          <div class="node node-gray">❌ 무시</div>
+        </div>
+      </div>
+      <div class="warn">
+        <strong>주의:</strong> 실제 주문 실행에는 <code>KIWOOM_ALLOW_TRADE_EXECUTION=true</code> 설정이 필요합니다.
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>🔄 임계값 변경 제안 버튼</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:8px;">AI 홀드 판단 시 [임계값] 태그가 있으면 자동 생성됩니다.</p>
+      <div class="flow-row" style="gap:12px;margin:12px 0;">
+        <div class="node node-db">✅ 적용<small>즉시 DB 반영</small></div>
+        <div class="node node-alert">✏️ 수정<small>새 값 텍스트 입력</small></div>
+        <div class="node node-gray">❌ 거절<small>무시</small></div>
+      </div>
+      <p style="font-size:12px;color:#888;">허용 필드: rsi_oversold, rsi_overbought, target_price, stop_loss_price, volume_surge_ratio</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 안전장치 ═══════════════════ -->
+  <div id="safety" class="panel">
+    <div class="section">
+      <h2>🛡 매매 안전장치</h2>
+      <table>
+        <tr><th>체크 항목</th><th>내용</th></tr>
+        <tr><td><code>KIWOOM_ALLOW_TRADE_EXECUTION</code></td><td>true여야 실제 주문 가능 (기본 false)</td></tr>
+        <tr><td><code>AUTO_TRADE</code></td><td>true여야 AI 판단 기반 자동 주문 (기본 false)</td></tr>
+        <tr><td>세션 검증</td><td>장 시간 외 주문 차단</td></tr>
+        <tr><td>주문 유형 매칭</td><td>시간대별 허용 주문 유형 검증</td></tr>
+        <tr><td>2단계 확인</td><td>텔레그램 봇: 수량 입력 → /confirm 필수 (1분 타임아웃)</td></tr>
+        <tr><td>추천수량 없으면 홀드</td><td>AI가 수량을 명시하지 않으면 자동 매매 스킵</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>⚖ 전략 변경 원칙</h2>
+      <table>
+        <tr><th>항목</th><th>원칙</th><th>허용</th><th>금지</th></tr>
+        <tr>
+          <td><strong>손절가</strong></td><td>진입 시 확정</td>
+          <td>트레일링 스탑 상향</td>
+          <td>손실 회피 목적 하향</td>
+        </tr>
+        <tr>
+          <td><strong>목표가</strong></td><td>진입 시 확정</td>
+          <td>펀더멘털 변화 시</td>
+          <td>막연한 기대감 상향</td>
+        </tr>
+        <tr>
+          <td><strong>RSI 기준</strong></td><td>전략 수립 시 확정</td>
+          <td>구조적 오류 수정</td>
+          <td>신호 빈도 조절 목적</td>
+        </tr>
+        <tr>
+          <td><strong>물타기</strong></td><td>최대 1회</td>
+          <td>평단 -8% + RSI/볼린저 신호</td>
+          <td>death_cross 동반 시</td>
+        </tr>
+      </table>
+      <div class="warn">
+        <strong>3단계 의사결정:</strong> 1차 워커(신호) → 2차 AI(판단) → 3차 사람(최종결정)
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>🔧 환경 변수 (.env)</h2>
+      <table>
+        <tr><th>변수</th><th>용도</th><th>기본값</th></tr>
+        <tr><td><code>ANTHROPIC_API_KEY</code></td><td>Claude AI (1순위)</td><td>-</td></tr>
+        <tr><td><code>OPENAI_API_KEY</code></td><td>GPT 대체 (2순위)</td><td>-</td></tr>
+        <tr><td><code>KIWOOM_APP_KEY/SECRET</code></td><td>키움증권 API</td><td>-</td></tr>
+        <tr><td><code>KIWOOM_ACCOUNT_NO</code></td><td>계좌번호</td><td>-</td></tr>
+        <tr><td><code>KIWOOM_ALLOW_TRADE_EXECUTION</code></td><td>주문 실행 허용</td><td>false</td></tr>
+        <tr><td><code>AUTO_TRADE</code></td><td>자동 매매 모드</td><td>false</td></tr>
+        <tr><td><code>TELEGRAM_BOT_TOKEN</code></td><td>텔레그램 봇</td><td>-</td></tr>
+        <tr><td><code>TELEGRAM_CHAT_ID</code></td><td>텔레그램 채팅 ID</td><td>-</td></tr>
+        <tr><td><code>DART_API_KEY</code></td><td>DART 공시</td><td>-</td></tr>
+        <tr><td><code>NAVER_CLIENT_ID/SECRET</code></td><td>네이버 뉴스</td><td>-</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(btn, id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById(id).classList.add('on');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>수동 모드 — 프로세스 & 사용법</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f9f8f5;
+    color: #1a1a18;
+    padding: 0;
+    line-height: 1.6;
+  }
+
+  /* ── Header ── */
+  .hero {
+    background: linear-gradient(135deg, #0f3460 0%, #16537e 50%, #1a8aa0 100%);
+    color: #fff;
+    padding: 48px 24px 36px;
+    text-align: center;
+  }
+  .hero h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .hero p { font-size: 15px; color: #a8d8ea; max-width: 600px; margin: 0 auto; }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+  .badge-manual { background: #3b82f6; color: #fff; }
+
+  /* ── Layout ── */
+  .container { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex; gap: 6px; justify-content: center;
+    margin-bottom: 28px; flex-wrap: wrap;
+  }
+  .tab {
+    padding: 8px 18px; border: 1px solid #c8c6bc; border-radius: 8px;
+    background: transparent; color: #5f5e5a; font-size: 13px;
+    cursor: pointer; transition: all .15s; font-family: inherit; font-weight: 500;
+  }
+  .tab.on { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+
+  /* ── Panels ── */
+  .panel { display: none; }
+  .panel.on { display: block; }
+
+  /* ── Section ── */
+  .section {
+    background: #fff; border: 1px solid #e4e2d8; border-radius: 12px;
+    padding: 24px; margin-bottom: 20px;
+  }
+  .section h2 {
+    font-size: 17px; font-weight: 600; margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section h3 { font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #444; }
+
+  /* ── Flow Diagram ── */
+  .flow {
+    display: flex; flex-direction: column; gap: 0; align-items: center; margin: 16px 0;
+  }
+  .flow-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center;
+  }
+  .node {
+    padding: 10px 16px; border-radius: 8px; font-size: 13px;
+    font-weight: 500; text-align: center; min-width: 120px;
+    border: 1.5px solid; position: relative;
+  }
+  .node-user { background: #ede9fe; border-color: #8b5cf6; color: #5b21b6; }
+  .node-claude { background: #fef3c7; border-color: #d97706; color: #92400e; }
+  .node-mcp { background: #e6f1fb; border-color: #85b7eb; color: #0c447c; }
+  .node-kiwoom { background: #EEEDFE; border-color: #534AB7; color: #3C3489; }
+  .node-db { background: #E1F5EE; border-color: #0F6E56; color: #085041; }
+  .node-tg { background: #FAEEDA; border-color: #854F0B; color: #633806; }
+  .node-action { background: #fce4ec; border-color: #c62828; color: #b71c1c; }
+  .node-gray { background: #F1EFE8; border-color: #5F5E5A; color: #444441; }
+  .node small { display: block; font-size: 11px; font-weight: 400; opacity: 0.8; margin-top: 2px; }
+
+  .arrow {
+    width: 2px; height: 20px; background: #b4b2a9; position: relative; margin: 0 auto;
+  }
+  .arrow::after {
+    content: ''; position: absolute; bottom: -4px; left: -4px;
+    border-left: 5px solid transparent; border-right: 5px solid transparent;
+    border-top: 6px solid #b4b2a9;
+  }
+  .arrow-h {
+    width: 24px; height: 2px; background: #b4b2a9; position: relative;
+  }
+  .arrow-h::after {
+    content: ''; position: absolute; right: -4px; top: -4px;
+    border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+    border-left: 6px solid #b4b2a9;
+  }
+
+  /* ── Table ── */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th { background: #f5f4ef; padding: 8px 10px; text-align: left; font-weight: 600;
+       border-bottom: 2px solid #d4d2c8; font-size: 12px; color: #555; }
+  td { padding: 8px 10px; border-bottom: 1px solid #e8e6de; vertical-align: top; }
+  tr:hover td { background: #fafaf7; }
+  code {
+    background: #f0efe8; padding: 1px 5px; border-radius: 3px;
+    font-size: 12px; font-family: "SF Mono", monospace;
+  }
+
+  /* ── Info/Warn Box ── */
+  .info {
+    background: #f0f7ff; border-left: 3px solid #3b82f6;
+    padding: 12px 16px; border-radius: 0 8px 8px 0;
+    font-size: 13px; margin: 12px 0;
+  }
+  .warn {
+    background: #fff7ed; border-left: 3px solid #f59e0b;
+    padding: 12px 16px; border-radius: 0 8px 8px 0;
+    font-size: 13px; margin: 12px 0;
+  }
+  .success {
+    background: #f0fdf4; border-left: 3px solid #22c55e;
+    padding: 12px 16px; border-radius: 0 8px 8px 0;
+    font-size: 13px; margin: 12px 0;
+  }
+
+  /* ── Scenario Card ── */
+  .scenario {
+    border: 1px solid #e4e2d8; border-radius: 10px; padding: 16px 20px;
+    margin: 12px 0; position: relative;
+  }
+  .scenario-num {
+    position: absolute; top: -10px; left: 16px;
+    background: #3b82f6; color: #fff; font-size: 11px; font-weight: 700;
+    padding: 2px 10px; border-radius: 10px;
+  }
+  .scenario h3 { margin-top: 4px; font-size: 15px; }
+  .scenario .trigger { color: #666; font-size: 12px; margin: 4px 0 12px; }
+
+  /* ── Chat Bubble ── */
+  .chat { margin: 12px 0; }
+  .bubble {
+    max-width: 80%; padding: 10px 14px; border-radius: 12px;
+    font-size: 13px; margin: 6px 0; position: relative;
+  }
+  .bubble-user {
+    background: #3b82f6; color: #fff; margin-left: auto;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble-ai {
+    background: #f5f4ef; color: #1a1a18; margin-right: auto;
+    border-bottom-left-radius: 4px;
+  }
+  .bubble-label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    color: #999; margin-bottom: 2px;
+  }
+
+  /* ── MCP Tool Badge ── */
+  .mcp-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+    background: #e6f1fb; color: #0c447c; border: 1px solid #85b7eb;
+  }
+  .kiwoom-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600;
+    background: #EEEDFE; color: #3C3489; border: 1px solid #534AB7;
+  }
+
+  /* ── Dark Mode ── */
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a18; color: #e8e6de; }
+    .section { background: #242422; border-color: #3a3a36; }
+    .scenario { border-color: #3a3a36; }
+    th { background: #2e2e2a; border-color: #444; color: #bbb; }
+    td { border-color: #3a3a36; }
+    tr:hover td { background: #2e2e2a; }
+    code { background: #2e2e2a; color: #d4d0c8; }
+    .tab { border-color: #444; color: #999; }
+    .info { background: #1a2332; border-color: #3b82f6; }
+    .warn { background: #2a2010; border-color: #f59e0b; }
+    .success { background: #1a2a1a; border-color: #22c55e; }
+    .bubble-ai { background: #2e2e2a; color: #e8e6de; }
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <span class="badge badge-manual">MANUAL MODE</span>
+  <h1>수동 모드 프로세스 가이드</h1>
+  <p>Claude Desktop (MCP 연동)을 통해 대화형으로 포트폴리오 관리, 매매 실행, 전략 수립을 합니다</p>
+</div>
+
+<div class="container">
+  <div class="tabs">
+    <button class="tab on" onclick="showTab(this,'overview')">전체 구조</button>
+    <button class="tab" onclick="showTab(this,'query')">현황 조회</button>
+    <button class="tab" onclick="showTab(this,'trade')">매매 실행</button>
+    <button class="tab" onclick="showTab(this,'watchlist')">관심종목 관리</button>
+    <button class="tab" onclick="showTab(this,'analysis')">종목 분석/추천</button>
+    <button class="tab" onclick="showTab(this,'strategy')">전략 관리</button>
+    <button class="tab" onclick="showTab(this,'tools')">MCP 도구 목록</button>
+  </div>
+
+  <!-- ═══════════════════ 전체 구조 ═══════════════════ -->
+  <div id="overview" class="panel on">
+    <div class="section">
+      <h2>🏗 수동 모드 아키텍처</h2>
+      <div class="flow">
+        <div class="node node-user" style="min-width:250px;">
+          <strong>사용자 (Claude Desktop)</strong>
+          <small>자연어로 요청</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-claude" style="min-width:250px;">
+          <strong>Claude AI (CLAUDE.md 행동 지침)</strong>
+          <small>요청 해석 → MCP 도구 자동 호출</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-mcp">Quant MCP<small>17개 도구</small></div>
+          <div class="node node-kiwoom">Kiwoom MCP<small>API 직접 호출</small></div>
+          <div class="node node-mcp">DART MCP<small>6개 도구</small></div>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-db">SQLite DB<small>watchlist, signals, ...</small></div>
+          <div class="node node-kiwoom">키움 REST API<small>현재가, 주문, 잔고</small></div>
+          <div class="node node-tg">텔레그램<small>전략 노트 발송</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>💬 대화 → 자동 도구 호출 원칙</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:12px;">
+        CLAUDE.md에 정의된 트리거를 감지하면 사용자가 별도 지시 없이도 자동으로 MCP 도구를 호출합니다.
+      </p>
+      <table>
+        <tr><th>사용자 발화</th><th>자동 호출 도구</th><th>상황</th></tr>
+        <tr><td>"지금 삼성전자 얼마야?"</td><td><span class="kiwoom-badge">ka10001</span></td><td>실시간 현재가</td></tr>
+        <tr><td>"포트폴리오 어때?"</td><td><span class="mcp-badge">quant_report(portfolio)</span></td><td>현황 조회</td></tr>
+        <tr><td>"오늘 신호 뭐 왔어?"</td><td><span class="mcp-badge">quant_report(signals)</span></td><td>신호 조회</td></tr>
+        <tr><td>"손절가 XX원으로 바꿔줘"</td><td><span class="mcp-badge">quant_watchlist_update</span></td><td>조건 변경</td></tr>
+        <tr><td>"삼성전자 100주 매수해줘"</td><td><span class="kiwoom-badge">주문 실행</span> + <span class="mcp-badge">쿨다운 리셋</span></td><td>매매 실행</td></tr>
+        <tr><td>"이 종목 어때?"</td><td><span class="kiwoom-badge">ka10001+ka10081</span> + <span class="mcp-badge">DART</span></td><td>종목 분석</td></tr>
+        <tr><td>"오늘 복기하자"</td><td><span class="mcp-badge">quant_report(all)</span></td><td>일일 리뷰</td></tr>
+      </table>
+      <div class="info">
+        <strong>핵심:</strong> 실시간 데이터는 반드시 <strong>키움 MCP</strong>로 조회합니다. DB는 스냅샷이므로 현재가·수익률이 부정확할 수 있습니다.
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📊 시나리오 흐름 요약 (7개)</h2>
+      <table>
+        <tr><th>#</th><th>시나리오</th><th>트리거</th><th>자동 동작</th></tr>
+        <tr><td>1</td><td>조건 변경</td><td>"목표가/손절가/RSI 바꿔줘"</td><td>watchlist 업데이트 → 전략 노트</td></tr>
+        <tr><td>2</td><td>매매 실행</td><td>매수/매도 주문 후</td><td>쿨다운 리셋 → 전략 노트 → 포트폴리오 동기화</td></tr>
+        <tr><td>3</td><td>신호 검토</td><td>워커 신호 수신 후</td><td>신호 조회 → watchlist 확인 → 매매 결정</td></tr>
+        <tr><td>4</td><td>하루 복기</td><td>"오늘 복기하자"</td><td>전체 리포트 → 총평 전략 노트</td></tr>
+        <tr><td>5</td><td>전략 수립</td><td>"전략 바꿀게"</td><td>전략 노트 + watchlist 반영</td></tr>
+        <tr><td>6</td><td>현황 조회</td><td>"신호/포트폴리오/매매 내역"</td><td>quant_report 호출</td></tr>
+        <tr><td>7</td><td>종목 분석</td><td>"이 종목 어때?"</td><td>차트+공시+뉴스 분석 → 편입 제안</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 현황 조회 ═══════════════════ -->
+  <div id="query" class="panel">
+    <div class="section">
+      <h2>📊 현황 조회 (상황 6)</h2>
+      <table>
+        <tr><th>요청</th><th>MCP 도구 호출</th><th>반환 내용</th></tr>
+        <tr>
+          <td>"오늘 신호 뭐 왔어?"</td>
+          <td><code>quant_report(type="signals", days=1)</code></td>
+          <td>시각, 종목, 조건, AI 판단, 수익률</td>
+        </tr>
+        <tr>
+          <td>"포트폴리오 어때?"</td>
+          <td><code>quant_report(type="portfolio")</code></td>
+          <td>보유 종목, 수량, 평단, 현재가, 수익률</td>
+        </tr>
+        <tr>
+          <td>"최근 매매 내역"</td>
+          <td><code>quant_report(type="trades")</code></td>
+          <td>체결 일시, 종목, 매수/매도, 수량, 가격</td>
+        </tr>
+        <tr>
+          <td>"전략 노트 보여줘"</td>
+          <td><code>quant_report(type="strategy")</code></td>
+          <td>카테고리별 전략 기록 목록</td>
+        </tr>
+        <tr>
+          <td>"전체 요약해줘"</td>
+          <td><code>quant_report(type="all")</code></td>
+          <td>위 4개 전체 포함</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>💰 실시간 데이터 조회</h2>
+
+      <div class="chat">
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">지금 한화에어로스페이스 얼마야?</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          <span class="kiwoom-badge">ka10001</span> 호출 →<br>
+          한화에어로스페이스(012450): <strong>682,000원</strong><br>
+          전일대비: +12,000 (+1.79%) | 거래량: 1,234,567주
+        </div>
+      </div>
+
+      <table>
+        <tr><th>조회</th><th>키움 TR</th><th>용도</th></tr>
+        <tr><td>단일 종목 현재가</td><td><code>ka10001</code></td><td>가격, 등락률, 거래량</td></tr>
+        <tr><td>일봉 차트</td><td><code>ka10081</code></td><td>N일 OHLCV</td></tr>
+        <tr><td>계좌 잔고</td><td><code>kt00018</code></td><td>예수금, 보유 종목</td></tr>
+        <tr><td>체결 내역</td><td><code>kt00007</code></td><td>당일 주문/체결</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 매매 실행 ═══════════════════ -->
+  <div id="trade" class="panel">
+    <div class="section">
+      <h2>💹 매매 실행 프로세스 (상황 2)</h2>
+      <div class="flow">
+        <div class="node node-user" style="min-width:300px;">
+          <strong>사용자: "삼성전자 100주 매수해줘"</strong>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-claude" style="min-width:300px;">
+          <strong>Claude: 주문 확인 요청</strong>
+          <small>"삼성전자(005930) 100주 시장가 매수 맞으시죠?"</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-kiwoom" style="min-width:300px;">
+          <strong>키움 MCP: 주문 실행</strong>
+          <small>kiwoom_execute_api 호출 → 주문번호 수신</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="flow-row">
+          <div class="node node-mcp">쿨다운 리셋<small>quant_cooldown_reset</small></div>
+          <div class="node node-tg">전략 노트<small>quant_strategy_log</small></div>
+          <div class="node node-db">포트폴리오 동기화<small>quant_portfolio_sync</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📋 매매 후 자동 처리 (3단계)</h2>
+      <table>
+        <tr><th>순서</th><th>도구</th><th>이유</th></tr>
+        <tr>
+          <td><strong>1</strong></td>
+          <td><code>quant_cooldown_reset(stock_code)</code></td>
+          <td>새 포지션 기준으로 신호가 다시 와야 하므로 이전 쿨다운 제거</td>
+        </tr>
+        <tr>
+          <td><strong>2</strong></td>
+          <td><code>quant_strategy_log(category="trade")</code></td>
+          <td>매매 근거 기록 + 텔레그램 발송</td>
+        </tr>
+        <tr>
+          <td><strong>3</strong></td>
+          <td><code>quant_portfolio_sync()</code></td>
+          <td>포트폴리오 DB를 키움 실제 잔고와 동기화</td>
+        </tr>
+      </table>
+      <div class="warn">
+        <strong>주의:</strong> 실제 주문에는 <code>KIWOOM_ALLOW_TRADE_EXECUTION=true</code> 설정이 필요합니다. false일 때 주문 시도 시 에러가 발생합니다.
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>💬 매매 대화 예시</h2>
+      <div class="chat">
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">한화에어로 현재가 좀 봐줘</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          <span class="kiwoom-badge">ka10001</span> 조회 결과:<br>
+          한화에어로스페이스(012450): <strong>682,000원</strong> (+1.79%)<br>
+          거래량: 1,234,567주 (평소 대비 1.8배)
+        </div>
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">10주 매수해줘</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          한화에어로스페이스(012450) <strong>10주 시장가 매수</strong> 진행할까요?<br>
+          예상 금액: ~6,820,000원
+        </div>
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">응 진행해</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          ✅ 주문 접수 완료 (주문번호: 12345)<br>
+          → 쿨다운 리셋 완료<br>
+          → 전략 노트 기록: "한화에어로 10주 매수"<br>
+          → 포트폴리오 동기화 완료
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 관심종목 관리 ═══════════════════ -->
+  <div id="watchlist" class="panel">
+    <div class="section">
+      <h2>📋 관심종목 관리 (상황 1, 6)</h2>
+      <table>
+        <tr><th>요청</th><th>MCP 도구</th><th>파라미터</th></tr>
+        <tr>
+          <td>"관심종목 보여줘"</td>
+          <td><code>quant_watchlist_read()</code></td>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td>"이 종목 모니터링해줘"</td>
+          <td><code>quant_watchlist_add(code, name, conditions)</code></td>
+          <td>종목코드, 이름, 조건 JSON</td>
+        </tr>
+        <tr>
+          <td>"목표가 XX원으로 바꿔줘"</td>
+          <td><code>quant_watchlist_update(code, "target_price", value)</code></td>
+          <td>종목코드, 필드명, 값</td>
+        </tr>
+        <tr>
+          <td>"이 종목 감시 해제해줘"</td>
+          <td><code>quant_watchlist_delete(code)</code></td>
+          <td>종목코드</td>
+        </tr>
+        <tr>
+          <td>"어떤 조건으로 신호 보내?"</td>
+          <td><code>quant_conditions_list()</code></td>
+          <td>-</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>🔄 조건 변경 프로세스</h2>
+      <div class="flow">
+        <div class="node node-user">사용자: "손절가 XX원으로 바꿔줘"</div>
+        <div class="arrow"></div>
+        <div class="node node-claude" style="min-width:350px;">
+          <strong>Claude: 전략 변경 원칙 검증</strong>
+          <small>손절가 하향? → 원칙 위반 가능성 지적</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-mcp" style="min-width:300px;">
+          <strong>quant_watchlist_update 실행</strong>
+          <small>DB 즉시 반영 (텔레그램 미발송)</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-tg" style="min-width:300px;">
+          <strong>quant_strategy_log 1회 호출</strong>
+          <small>변경 요약 + 근거 → 텔레그램 발송</small>
+        </div>
+      </div>
+      <div class="info">
+        <strong>변경 원칙 자동 검증:</strong> Claude는 손절가 하향, RSI 빈도 조절 목적 변경 등 원칙 위반을 감지하면 먼저 지적합니다.
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>💬 조건 변경 대화 예시</h2>
+      <div class="chat">
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">한화에어로 손절가를 60만원으로 내려줘</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          ⚠️ <strong>전략 변경 원칙 확인</strong><br><br>
+          손절가를 현재 65만원 → 60만원으로 <strong>하향</strong>하시려는 건데요.<br>
+          전략 원칙상 손절가는 진입 시 확정이며, <strong>손실 회피 목적 하향은 금지</strong>입니다.<br><br>
+          구조적 오류 수정이나 특별한 근거가 있으신가요?
+        </div>
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">아니 그냥 좀 더 여유를 주려고. 그러면 그대로 두자</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          네, 손절가 65만원 유지합니다. 원칙대로 좋은 판단이에요. 👍
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>⚙️ 변경 가능 필드</h2>
+      <table>
+        <tr><th>필드</th><th>설명</th><th>변경 원칙</th></tr>
+        <tr><td><code>target_price</code></td><td>목표가</td><td>펀더멘털 변화 시만 허용</td></tr>
+        <tr><td><code>stop_loss_price</code></td><td>손절가</td><td>상향만 허용 (트레일링)</td></tr>
+        <tr><td><code>rsi_oversold</code></td><td>RSI 과매도 기준</td><td>구조적 오류 수정 시만</td></tr>
+        <tr><td><code>rsi_overbought</code></td><td>RSI 과매수 기준</td><td>구조적 오류 수정 시만</td></tr>
+        <tr><td><code>horizon</code></td><td>매매 기간</td><td>자유 변경</td></tr>
+        <tr><td><code>enabled</code></td><td>모니터링 ON/OFF</td><td>자유 변경</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 종목 분석/추천 ═══════════════════ -->
+  <div id="analysis" class="panel">
+    <div class="section">
+      <h2>🔍 종목 분석/추천 프로세스 (상황 7)</h2>
+
+      <div class="scenario">
+        <span class="scenario-num">Case A</span>
+        <h3>특정 종목 분석 요청</h3>
+        <div class="trigger">"이 종목 어때?", "XX 편입할 만해?", "XX 분석해줘"</div>
+
+        <div class="flow">
+          <div class="flow-row">
+            <div class="node node-kiwoom">현재가<small>ka10001</small></div>
+            <div class="node node-kiwoom">90일 차트<small>ka10081</small></div>
+            <div class="node node-mcp">DART 공시<small>dart_disclosures</small></div>
+            <div class="node node-mcp">DART 재무<small>dart_financial</small></div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-claude" style="min-width:380px;">
+            <strong>Claude: 종합 분석</strong>
+            <small>기술적 지표 40+ · 공시 · 재무제표 · 뉴스 · 편입조건 4가지 평가</small>
+          </div>
+          <div class="arrow"></div>
+          <div class="flow-row">
+            <div class="node node-db" style="min-width:180px;">편입 적합<small>목표가/손절가/horizon 제안</small></div>
+            <div class="node node-gray">보류<small>근거 제시</small></div>
+            <div class="node node-gray">부적합<small>근거 제시</small></div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-mcp" style="min-width:300px;">
+            <strong>사용자 확인 후 watchlist 등록</strong>
+            <small>quant_watchlist_add(code, name, conditions)</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="scenario">
+        <span class="scenario-num">Case B</span>
+        <h3>막연한 종목 추천 요청</h3>
+        <div class="trigger">"종목 추천해줘", "뭐 살 만한 거 없어?"</div>
+
+        <div class="flow">
+          <div class="flow-row">
+            <div class="node node-mcp">포트폴리오 확인<small>quant_report(portfolio)</small></div>
+            <div class="node node-mcp">전략 노트<small>quant_report(strategy)</small></div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-claude" style="min-width:350px;">
+            <strong>시장 동향 + 포트폴리오 분석</strong>
+            <small>보유 섹터 편중? 현금 비중? 전략 방향?</small>
+          </div>
+          <div class="arrow"></div>
+          <div class="flow-row">
+            <div class="node node-kiwoom">거래량 급증<small>ka10023</small></div>
+            <div class="node node-kiwoom">등락률 상위<small>ka10027</small></div>
+            <div class="node node-kiwoom">외인 순매수<small>ka10035</small></div>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-claude" style="min-width:350px;">
+            <strong>후보별 간단 분석 → 편입 적합성 평가</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>✅ 편입 조건 4가지 (2가지 이상 충족 필요)</h2>
+      <table>
+        <tr><th>#</th><th>조건</th><th>판단 기준</th></tr>
+        <tr><td>1</td><td><strong>눌림목</strong></td><td>MA20 지지 근처, RSI 과매도, 피보나치 되돌림 구간</td></tr>
+        <tr><td>2</td><td><strong>저평가</strong></td><td>PER/PBR 동종업계 대비 낮음, 실적 대비 주가 저평가</td></tr>
+        <tr><td>3</td><td><strong>테마 미반영</strong></td><td>호재 공시/뉴스 있으나 주가 미반영</td></tr>
+        <tr><td>4</td><td><strong>실적 개선</strong></td><td>매출/영업이익 증가 추세</td></tr>
+      </table>
+      <div class="warn">
+        <strong>금지:</strong> 단순히 주가가 많이 올랐다는 이유만으로 편입하지 않습니다.
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>💬 종목 분석 대화 예시</h2>
+      <div class="chat">
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">에코프로비엠 편입할 만해?</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          에코프로비엠(247540) 분석을 시작합니다.<br><br>
+          <span class="kiwoom-badge">ka10001</span> <span class="kiwoom-badge">ka10081</span> <span class="mcp-badge">DART</span> 조회 중...
+        </div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          <strong>에코프로비엠(247540) 편입 분석 결과</strong><br><br>
+          📊 현재가: 182,500원 | RSI(14): 38.2 | MA20: 195,000원<br>
+          📈 추세: 하락 중 반등 시도 | 볼린저 하단 근처<br><br>
+          <strong>편입 조건 충족:</strong><br>
+          ✅ 눌림목: MA20 지지선 근처 + RSI 과매도 영역<br>
+          ✅ 실적 개선: 매출 YoY +23%, 영업이익 흑자전환<br>
+          ❌ 저평가: PER 45배 (업종 대비 높음)<br>
+          ❌ 테마 미반영: 2차전지 테마 이미 반영<br><br>
+          <strong>판정: 편입 가능</strong> (2/4 충족)<br>
+          제안: 목표가 210,000 / 손절가 165,000 / 중기 / RSI 과매도 40<br><br>
+          watchlist에 추가할까요?
+        </div>
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">응 추가해줘</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          ✅ 에코프로비엠(247540) 관심종목 등록 완료<br>
+          → 목표가: 210,000원 | 손절가: 165,000원 | 중기<br>
+          → 전략 노트에 편입 근거 기록 완료
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ 전략 관리 ═══════════════════ -->
+  <div id="strategy" class="panel">
+    <div class="section">
+      <h2>📝 전략 관리 (상황 4, 5)</h2>
+
+      <div class="scenario">
+        <span class="scenario-num">상황 4</span>
+        <h3>하루 복기 (daily_review)</h3>
+        <div class="trigger">"오늘 복기하자", "오늘 하루 어땠어?", "총평 저장해줘"</div>
+        <div class="flow">
+          <div class="node node-mcp" style="min-width:300px;">
+            <code>quant_report(type="all")</code>
+            <small>오늘 신호 + 매매 + 전략 노트 전체 조회</small>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-claude" style="min-width:300px;">
+            사용자와 대화하며 총평 도출
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-tg" style="min-width:300px;">
+            <code>quant_strategy_log(category="daily_review")</code>
+            <small>총평 저장 + 텔레그램 발송</small>
+          </div>
+        </div>
+      </div>
+
+      <div class="scenario">
+        <span class="scenario-num">상황 5</span>
+        <h3>전략 수립/변경</h3>
+        <div class="trigger">"방산주 비중 늘릴게", "현금 비중 높게 가자", "이번 분기 전략은..."</div>
+        <div class="flow">
+          <div class="node node-tg" style="min-width:300px;">
+            <code>quant_strategy_log(category="general")</code>
+            <small>전략 기록 + 텔레그램 발송</small>
+          </div>
+          <div class="arrow"></div>
+          <div class="node node-mcp" style="min-width:300px;">
+            전략에 수치가 포함된 경우<br>
+            <code>quant_watchlist_update</code>로 즉시 반영
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>📋 전략 노트 카테고리</h2>
+      <table>
+        <tr><th>카테고리</th><th>용도</th><th>발생 시점</th></tr>
+        <tr><td><code>trade</code></td><td>매매 근거 기록</td><td>매수/매도 실행 후</td></tr>
+        <tr><td><code>watchlist</code></td><td>조건 변경 이유</td><td>목표가/손절가/RSI 변경 시</td></tr>
+        <tr><td><code>general</code></td><td>전략 방향 기록</td><td>전략 수립/변경 시</td></tr>
+        <tr><td><code>daily_review</code></td><td>하루 복기 총평</td><td>장 마감 후 복기 시</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>🔧 전략 노트 편집</h2>
+      <table>
+        <tr><th>요청</th><th>도구</th></tr>
+        <tr><td>"전략 노트 보여줘"</td><td><code>quant_report(type="strategy")</code></td></tr>
+        <tr><td>"전략 노트 ID 5번 수정해줘"</td><td><code>quant_strategy_note_update(note_id=5, ...)</code></td></tr>
+        <tr><td>"전략 노트 ID 5번 삭제해줘"</td><td><code>quant_strategy_note_delete(note_id=5)</code></td></tr>
+        <tr><td>"전략 노트 전부 삭제해줘"</td><td><code>quant_strategy_note_delete(delete_all=True)</code></td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>💬 복기 대화 예시</h2>
+      <div class="chat">
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">오늘 복기하자</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          <span class="mcp-badge">quant_report(all)</span> 조회 완료.<br><br>
+          📊 <strong>오늘 요약:</strong><br>
+          • 신호 3건: 한화에어로(RSI 과매도), LIG(거래량 급증), 에프에스티(골든크로스)<br>
+          • 매매 1건: 한화에어로 10주 매수<br>
+          • 전략 변경: 없음<br><br>
+          어떤 부분부터 볼까요?
+        </div>
+        <div class="bubble-label" style="text-align:right;">YOU</div>
+        <div class="bubble bubble-user">한화에어로 매수 잘한 것 같아. 총평 저장해줘</div>
+        <div class="bubble-label">CLAUDE</div>
+        <div class="bubble bubble-ai">
+          ✅ 총평 저장 완료<br><br>
+          📝 <strong>2026-03-20 하루 복기</strong><br>
+          한화에어로 RSI 과매도 구간 매수 — 지표 수렴 확인 후 적절한 타이밍.<br>
+          LIG/에프에스티 신호는 관망 — 추가 확인 필요.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ MCP 도구 목록 ═══════════════════ -->
+  <div id="tools" class="panel">
+    <div class="section">
+      <h2>🔧 Quant MCP 도구 (17개)</h2>
+      <table>
+        <tr><th>도구</th><th>설명</th><th>주요 파라미터</th></tr>
+        <tr><td><code>quant_report</code></td><td>리포트 조회</td><td>type: signals|portfolio|trades|strategy|all</td></tr>
+        <tr><td><code>quant_strategy_log</code></td><td>전략 노트 기록 + TG 발송</td><td>category, summary, detail</td></tr>
+        <tr><td><code>quant_portfolio_sync</code></td><td>포트폴리오 동기화</td><td>-</td></tr>
+        <tr><td><code>quant_watchlist_read</code></td><td>관심종목 조회</td><td>-</td></tr>
+        <tr><td><code>quant_watchlist_add</code></td><td>관심종목 추가</td><td>code, name, conditions (JSON)</td></tr>
+        <tr><td><code>quant_watchlist_update</code></td><td>관심종목 필드 수정</td><td>stock_code, field, value</td></tr>
+        <tr><td><code>quant_watchlist_delete</code></td><td>관심종목 삭제</td><td>stock_code</td></tr>
+        <tr><td><code>quant_conditions_list</code></td><td>조건 정의 목록</td><td>-</td></tr>
+        <tr><td><code>quant_condition_add</code></td><td>조건 추가</td><td>id, name, evaluator, param, ...</td></tr>
+        <tr><td><code>quant_condition_update</code></td><td>조건 수정</td><td>id, name|cooldown|message|signal_type</td></tr>
+        <tr><td><code>quant_condition_remove</code></td><td>조건 삭제</td><td>id</td></tr>
+        <tr><td><code>quant_signal_log_delete</code></td><td>신호 로그 삭제</td><td>signal_id|stock_code|before_date|delete_all</td></tr>
+        <tr><td><code>quant_strategy_note_update</code></td><td>전략 노트 수정</td><td>note_id, summary, detail</td></tr>
+        <tr><td><code>quant_strategy_note_delete</code></td><td>전략 노트 삭제</td><td>note_id|delete_all</td></tr>
+        <tr><td><code>quant_cooldown_reset</code></td><td>쿨다운 초기화</td><td>stock_code|reset_all</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>📡 DART MCP 도구 (6개)</h2>
+      <table>
+        <tr><th>도구</th><th>설명</th><th>용도</th></tr>
+        <tr><td><code>dart_disclosures</code></td><td>공시 검색</td><td>최근 공시, 키워드 검색</td></tr>
+        <tr><td><code>dart_company_info</code></td><td>기업 기본 정보</td><td>대표자, 업종, 설립일</td></tr>
+        <tr><td><code>dart_financial</code></td><td>재무제표 조회</td><td>요약/전체/비율 분석</td></tr>
+        <tr><td><code>dart_shareholders</code></td><td>주주 정보</td><td>대주주, 임원 지분</td></tr>
+        <tr><td><code>dart_periodic_report</code></td><td>정기보고서 (28유형)</td><td>배당, 임원 현황 등</td></tr>
+        <tr><td><code>dart_major_event</code></td><td>주요사항 보고 (36유형)</td><td>유상증자, M&A 등</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <h2>📡 키움 MCP (직접 API 호출)</h2>
+      <table>
+        <tr><th>TR 코드</th><th>용도</th><th>사용 시점</th></tr>
+        <tr><td><code>ka10001</code></td><td>종목 현재가</td><td>"얼마야?", "현재가 알려줘"</td></tr>
+        <tr><td><code>ka10081</code></td><td>일봉 차트 (OHLCV)</td><td>차트 분석, 종목 분석</td></tr>
+        <tr><td><code>kt00018</code></td><td>계좌 잔고</td><td>"잔고 확인", "계좌 어때"</td></tr>
+        <tr><td><code>kt00007</code></td><td>주문 체결 내역</td><td>"오늘 체결된 거 있어?"</td></tr>
+        <tr><td><code>ka10023</code></td><td>거래량 급증</td><td>종목 추천</td></tr>
+        <tr><td><code>ka10027</code></td><td>등락률 순위</td><td>종목 추천</td></tr>
+        <tr><td><code>ka10035</code></td><td>외인 순매수</td><td>종목 추천</td></tr>
+      </table>
+      <div class="info">
+        키움 MCP는 <code>kiwoom_execute_api</code> 도구를 통해 TR 코드 + 파라미터로 직접 호출합니다.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(btn, id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById(id).classList.add('on');
+}
+</script>
+</body>
+</html>
