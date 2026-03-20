@@ -25,7 +25,7 @@ from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
 from worker.claude_judge import get_trade_opinion
 from worker.cooldown import filter_new_conditions, mark_sent
-from worker.stock_analyzer import run_daily_screening
+from worker.stock_analyzer import run_daily_screening, run_intraday_scan
 from worker.portfolio_sync import sync_all
 from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
@@ -464,6 +464,9 @@ def main():
     scheduler.add_job(check_removal_candidates, "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="removal_check")
+    scheduler.add_job(run_intraday_scan, "cron",
+                      day_of_week="mon-fri", hour="10,13", minute=0,
+                      id="intraday_scan")
     scheduler.add_job(run_daily_screening, "cron",
                       day_of_week="mon-fri", hour=15, minute=40,
                       id="daily_screening")

@@ -195,6 +195,19 @@
   <!-- ═══════════════════ 전체 구조 ═══════════════════ -->
   <div id="overview" class="panel on">
     <div class="section">
+      <h2>⚡ 자동 모드 vs 수동 모드</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:12px;">두 모드는 독립 실행 가능하며, 같은 DB를 공유합니다. 동시 실행도 가능.</p>
+      <table>
+        <tr><th></th><th>수동 (Claude Desktop + MCP)</th><th>자동 (백그라운드 워커)</th></tr>
+        <tr><td><strong>종목 추천</strong></td><td>추천만 → 사용자가 판단</td><td>추천 + watchlist <strong>자동 추가</strong></td></tr>
+        <tr><td><strong>초기 임계치</strong></td><td>자동 제안 → 사용자 확인 후 등록</td><td>AI가 자동 설정</td></tr>
+        <tr><td><strong>신호 → 행동</strong></td><td>텔레그램 알림 → <strong>사용자 승인</strong></td><td>AI 판단 → <strong>자동 매매</strong></td></tr>
+        <tr><td><strong>포트폴리오 동기화</strong></td><td>MCP auto_sync (10분)</td><td>워커 스케줄러 (2분)</td></tr>
+        <tr><td><strong>프로세스 가이드</strong></td><td><a href="6_manual_mode.html">수동 모드 가이드 →</a></td><td>이 페이지</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
       <h2>🔄 워커 전체 아키텍처</h2>
       <p style="font-size:13px;color:#666;margin-bottom:16px;">
         <code>worker/main.py</code> — APScheduler 기반, 장 운영 시간(08:00~18:59) 동안 자동 실행
@@ -284,7 +297,8 @@
         <tr><td>check_trailing_stops</td><td>매 30분</td><td>09:00~15:00</td><td>수익 구간 손절가 자동 상향</td></tr>
         <tr><td>check_inactive_stocks</td><td>1일 1회</td><td>08:30</td><td>30일 미발동 종목 알림 (주 1회)</td></tr>
         <tr><td>check_removal_candidates</td><td>매 30분</td><td>09:00~15:00</td><td>미보유 90일 미발동 종목 자동 삭제</td></tr>
-        <tr><td><strong>run_daily_screening</strong></td><td>1일 1회</td><td>15:40</td><td>장 마감 후 유망 종목 자동 발굴</td></tr>
+        <tr><td><strong>run_intraday_scan</strong></td><td>1일 2회</td><td>10:00, 13:00</td><td>장중 거래량 급증 경량 스캔 → 텔레그램 알림만</td></tr>
+        <tr><td><strong>run_daily_screening</strong></td><td>1일 1회</td><td>15:40</td><td>장 마감 후 유망 종목 AI 풀 분석 → watchlist 자동 추가</td></tr>
       </table>
     </div>
 
@@ -539,9 +553,33 @@
   <!-- ═══════════════════ 자동 스크리닝 ═══════════════════ -->
   <div id="screening" class="panel">
     <div class="section">
-      <h2>🔍 자동 스크리닝 프로세스 (매일 15:40)</h2>
+      <h2>📡 장중 경량 스캔 (10:00, 13:00)</h2>
       <p style="font-size:13px;color:#666;margin-bottom:16px;">
-        <code>worker/stock_analyzer.py</code> — 장 마감 후 유망 종목을 자동 발굴하여 watchlist에 추가
+        거래량 급증 종목만 빠르게 체크 → 텔레그램 알림만 발송 (watchlist 추가 안 함, AI 분석 없음)
+      </p>
+      <div class="flow">
+        <div class="node node-api" style="min-width:300px;">
+          <strong>거래량 급증 조회</strong>
+          <small>ka10023 · API 1회 호출 · 상위 15개</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-gray" style="min-width:300px;">
+          <strong>필터링</strong>
+          <small>기존 watchlist 제외 + 하루 1번 쿨다운 (12시간)</small>
+        </div>
+        <div class="arrow"></div>
+        <div class="node node-alert" style="min-width:350px;">
+          <strong>텔레그램 알림</strong>
+          <small>"📡 거래량 급증 N종목" + 종목명/가격/등락률</small>
+        </div>
+      </div>
+      <div class="info">관심 종목이 있으면 Claude Desktop에서 <strong>"XX 분석해줘"</strong>로 상세 분석을 요청하세요.</div>
+    </div>
+
+    <div class="section">
+      <h2>🔍 장 마감 풀 스크리닝 (매일 15:40)</h2>
+      <p style="font-size:13px;color:#666;margin-bottom:16px;">
+        <code>worker/stock_analyzer.py</code> — 후보 수집 → AI 풀 분석 → 적합 종목 watchlist 자동 추가
       </p>
 
       <div class="flow">

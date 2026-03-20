@@ -94,6 +94,62 @@ def _screen_candidates() -> list[dict]:
     return candidates[:30]
 
 
+# ═══════════════════════════ 장중 경량 스캔 ═══════════════════════════
+
+def run_intraday_scan():
+    """장중 거래량 급증 종목 경량 스캔 → 텔레그램 알림만 (watchlist 추가 안 함).
+
+    - AI 분석 없이 거래량만 체크 (API 1회)
+    - 기존 watchlist 종목은 제외
+    - 관심 가면 사용자가 Claude Desktop에서 직접 분석 요청
+    """
+    from worker.clients.kiwoom_client import KiwoomClient
+    from data.db import get_watchlist, get_cooldown, set_cooldown
+    from notifications.telegram import send_message
+    from datetime import datetime
+
+    kiwoom = KiwoomClient()
+    existing_codes = {s["code"] for s in get_watchlist()}
+
+    # 쿨다운: 같은 종목은 하루에 1번만 알림
+    movers = []
+    try:
+        vol_surge = kiwoom._call_api("ka10023", {})
+        for item in (vol_surge.get("output") or vol_surge.get("output1") or [])[:15]:
+            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
+            name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
+            if not code or code in existing_codes or len(code) != 6:
+                continue
+
+            # 하루 1번 쿨다운
+            key = f"intraday_scan:{code}"
+            last = get_cooldown(key)
+            if last and (datetime.now() - last).total_seconds() < 43200:  # 12시간
+                continue
+
+            prc = str(item.get("cur_prc") or item.get("stk_prpr") or "").replace(",", "")
+            chg = str(item.get("prdy_ctrt") or item.get("flu_rt") or "").replace(",", "")
+            vol = str(item.get("trde_qty") or item.get("acml_vol") or "").replace(",", "")
+
+            movers.append({"code": code, "name": name, "price": prc, "change": chg, "volume": vol})
+            set_cooldown(key)
+    except Exception as e:
+        logger.warning(f"장중 스캔 실패: {e}")
+        return
+
+    if not movers:
+        logger.info("[장중 스캔] 특이 종목 없음")
+        return
+
+    lines = [f"📡 *[장중 스캔] 거래량 급증 {len(movers)}종목*\n"]
+    for m in movers[:10]:
+        lines.append(f"• *{m['name']}* (`{m['code']}`) {m['price']}원 ({m['change']}%) vol:{m['volume']}")
+    lines.append("\n_관심 종목은 Claude Desktop에서 \"XX 분석해줘\"로 상세 분석_")
+
+    send_message("\n".join(lines))
+    logger.info(f"[장중 스캔] {len(movers)}개 종목 알림 발송")
+
+
 # ═══════════════════════════ AI 편입 분석 ═══════════════════════════
 
 def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
