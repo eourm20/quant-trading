@@ -182,11 +182,9 @@ def update_screening_results():
         col = "result_7d" if period_name == "7d" else "result_30d"
         with get_conn() as conn:
             rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, "
-                f"(SELECT current_price FROM signals WHERE stock_code = screening_log.stock_code "
-                f" ORDER BY created_at DESC LIMIT 1) as base_price "
+                f"SELECT id, stock_code, stock_name, current_price "
                 f"FROM screening_log "
-                f"WHERE {col} IS NULL AND created_at >= ? AND created_at < ?",
+                f"WHERE {col} IS NULL AND current_price IS NOT NULL AND created_at >= ? AND created_at < ?",
                 (cutoff_from, cutoff_to),
             ).fetchall()
 
@@ -196,8 +194,7 @@ def update_screening_results():
                 now_price = abs(int(str(
                     pd.get("cur_prc") or pd.get("stk_prpr") or "0"
                 ).replace(",", "")))
-                # base_price: 스크리닝 시점 현재가 (signals에서 가져오거나 직접 조회)
-                base = row["base_price"]
+                base = row["current_price"]
                 if not base:
                     continue
                 if now_price and base:
@@ -557,7 +554,7 @@ def main():
                       day_of_week="mon-fri", hour="10,13", minute=0,
                       id="intraday_scan")
     scheduler.add_job(run_daily_screening, "cron",
-                      day_of_week="mon-fri", hour=19, minute=17,
+                      day_of_week="mon-fri", hour=21, minute=48,
                       id="daily_screening")
     run_check()
 

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 
 from dotenv import load_dotenv
 
@@ -158,59 +159,148 @@ def _screen_candidates() -> list[dict]:
     return candidates[:30]
 
 
-# ═══════════════════════════ 장중 경량 스캔 ═══════════════════════════
+# ═══════════════════════════ 장중 스캔 ═══════════════════════════
 
 def run_intraday_scan():
-    """장중 거래량 급증 종목 경량 스캔 → 텔레그램 알림만 (watchlist 추가 안 함).
+    """장중 스캔: 거래량 급증 + HTS 조건검색 → AI 분석 → 모드에 따라 등록/승인.
 
-    - AI 분석 없이 거래량만 체크 (API 1회)
-    - 기존 watchlist 종목은 제외
-    - 관심 가면 사용자가 Claude Desktop에서 직접 분석 요청
+    후보 수집: ka10023(거래량 급증) + HTS 조건검색(퀀트_ 전체)
+    AI 분석 후 자동 모드면 watchlist 등록, 수동이면 승인 버튼
     """
     from worker.clients.kiwoom_client import KiwoomClient
-    from data.db import get_watchlist, get_cooldown, set_cooldown
-    from notifications.telegram import send_message
-    from datetime import datetime
+    from data.db import get_watchlist, get_cooldown, set_cooldown, save_screening_log
+    from notifications.telegram import send_message, send_message_with_inline_buttons
 
     kiwoom = KiwoomClient()
     existing_codes = {s["code"] for s in get_watchlist()}
+    auto_mode = _is_auto_mode()
+    market_text = _build_market_text(kiwoom)
 
-    # 쿨다운: 같은 종목은 하루에 1번만 알림
-    movers = []
+    candidates = []
+    seen_codes = set()
+
+    # 1. 거래량 급증 (ka10023)
     try:
         for item in kiwoom.get_volume_surge()[:15]:
             code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
             name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if not code or code in existing_codes or len(code) != 6:
+            if not code or code in existing_codes or len(code) != 6 or code in seen_codes:
                 continue
-
-            # 하루 1번 쿨다운
-            key = f"intraday_scan:{code}"
-            last = get_cooldown(key)
-            if last and (datetime.now() - last).total_seconds() < 43200:  # 12시간
-                continue
-
-            prc = str(item.get("cur_prc") or item.get("stk_prpr") or "").replace(",", "")
-            chg = str(item.get("prdy_ctrt") or item.get("flu_rt") or "").replace(",", "")
-            vol = str(item.get("trde_qty") or item.get("acml_vol") or "").replace(",", "")
-
-            movers.append({"code": code, "name": name, "price": prc, "change": chg, "volume": vol})
-            set_cooldown(key)
+            seen_codes.add(code)
+            candidates.append({"stock_code": code, "stock_name": name, "source": "거래량 급증"})
     except Exception as e:
-        logger.warning(f"장중 스캔 실패: {e}")
+        logger.warning(f"장중 스캔 거래량 조회 실패: {e}")
+
+    time.sleep(1)
+
+    # 2. HTS 조건검색 (퀀트_ 전체)
+    try:
+        cond_stocks = kiwoom.run_all_quant_conditions()
+        for item in cond_stocks:
+            code = item["stock_code"]
+            if code not in existing_codes and code not in seen_codes:
+                seen_codes.add(code)
+                candidates.append(item)
+    except Exception as e:
+        logger.warning(f"장중 스캔 HTS 조건검색 실패: {e}")
+
+    if not candidates:
+        logger.info("[장중 스캔] 후보 없음")
         return
 
-    if not movers:
-        logger.info("[장중 스캔] 특이 종목 없음")
+    # 쿨다운 필터 (같은 종목 하루 1번)
+    filtered = []
+    for cand in candidates:
+        key = f"intraday_scan:{cand['stock_code']}"
+        last = get_cooldown(key)
+        if last and (datetime.now() - last).total_seconds() < 43200:  # 12시간
+            continue
+        set_cooldown(key)
+        filtered.append(cand)
+
+    if not filtered:
+        logger.info("[장중 스캔] 후보 전부 쿨다운 중")
         return
 
-    lines = [f"📡 *[장중 스캔] 거래량 급증 {len(movers)}종목*\n"]
-    for m in movers[:10]:
-        lines.append(f"• *{m['name']}* (`{m['code']}`) {m['price']}원 ({m['change']}%) vol:{m['volume']}")
-    lines.append("\n_관심 종목은 Claude Desktop에서 \"XX 분석해줘\"로 상세 분석_")
+    logger.info(f"[장중 스캔] 후보 {len(filtered)}개 → AI 분석 시작")
 
-    send_message("\n".join(lines))
-    logger.info(f"[장중 스캔] {len(movers)}개 종목 알림 발송")
+    added = []
+    pending = []
+    for cand in filtered[:15]:  # 최대 15개
+        try:
+            analysis = _analyze_candidate(
+                cand["stock_code"], cand["stock_name"],
+                kiwoom=kiwoom, market_text=market_text,
+            )
+            rec = analysis.get("recommendation", "분석 실패")
+            rr = analysis.get("rr_ratio", "N/A")
+            reason = str(analysis.get("reason", "") or "").replace("\n", " ").strip()
+            logger.info(
+                f"[장중 스캔] {cand['stock_name']} ({cand['stock_code']}) "
+                f"→ {rec} (R/R={rr})"
+            )
+
+            # screening_log 저장
+            try:
+                log_id = save_screening_log(
+                    stock_code=cand["stock_code"],
+                    stock_name=cand["stock_name"],
+                    source=cand["source"],
+                    recommendation=rec,
+                    reason=reason,
+                    met_conditions=analysis.get("met_conditions"),
+                    rr_ratio=float(rr) if rr and rr != "N/A" else None,
+                    current_price=analysis.get("_current_price"),
+                    dart_summary=analysis.get("_dart_summary"),
+                    news_summary=analysis.get("_news_summary"),
+                    market_snapshot=market_text,
+                    ai_response=analysis.get("_ai_response"),
+                )
+            except Exception:
+                log_id = None
+
+            if rec != "관심종목 등록":
+                time.sleep(2)
+                continue
+
+            alert_text = _format_screening_alert(
+                cand["stock_name"], cand["stock_code"], cand["source"], analysis,
+            )
+            alert_text = f"📡 *[장중 스캔]*\n{alert_text}"
+
+            if auto_mode:
+                add_to_watchlist(cand["stock_code"], cand["stock_name"], analysis)
+                send_message(f"{alert_text}\n\n✅ *자동 관심종목 등록 완료*")
+                added.append(cand["stock_name"])
+                if log_id:
+                    try:
+                        from data.db import update_screening_action
+                        update_screening_action(log_id, "auto_accepted")
+                    except Exception:
+                        pass
+            else:
+                buttons = [[
+                    {"text": "✅ 관심종목 등록", "callback_data": f"screen_add:{cand['stock_code']}"},
+                    {"text": "❌ 패스", "callback_data": f"screen_pass:{cand['stock_code']}"},
+                ]]
+                _pending_screenings[cand["stock_code"]] = {
+                    "stock_name": cand["stock_name"],
+                    "analysis": analysis,
+                    "log_id": log_id,
+                }
+                send_message_with_inline_buttons(alert_text, buttons)
+                pending.append(cand["stock_name"])
+
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"[장중 스캔] {cand['stock_name']} 분석 실패: {e}")
+
+    if added:
+        logger.info(f"[장중 스캔] {len(added)}개 자동 등록: {', '.join(added)}")
+    if pending:
+        logger.info(f"[장중 스캔] {len(pending)}개 승인 대기")
+    if not added and not pending:
+        logger.info("[장중 스캔] 적합 종목 없음")
 
 
 # ═══════════════════════════ 스크리닝 AI 시스템 프롬프트 (캐싱) ═══════════════════════════
@@ -667,6 +757,11 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
                 logger.info(f"[스크리닝] {stock_name}: R/R {rr} < 2.0 → 보류로 변환")
                 result["recommendation"] = "보류"
                 result["reason"] = f"R/R {rr}:1 미달 (2:1 이상 필요). " + result.get("reason", "")
+            # RAG용 컨텍스트 첨부
+            result["_current_price"] = current_price
+            result["_dart_summary"] = dart_text or None
+            result["_news_summary"] = news_text or None
+            result["_ai_response"] = ai_text
             return result
 
         return {"recommendation": "분석 실패"}
@@ -855,12 +950,16 @@ def run_daily_screening():
                     reason=reason,
                     met_conditions=analysis.get("met_conditions"),
                     rr_ratio=float(rr) if rr and rr != "N/A" else None,
+                    current_price=analysis.get("_current_price"),
                     indicator_snapshot=json.dumps(
                         {k: v for k, v in analysis.get("enabled_conditions", {}).items()
                          if isinstance(v, dict) and v.get("enabled")},
                         ensure_ascii=False,
                     ) if analysis.get("enabled_conditions") else None,
+                    dart_summary=analysis.get("_dart_summary"),
+                    news_summary=analysis.get("_news_summary"),
                     market_snapshot=market_text,
+                    ai_response=analysis.get("_ai_response"),
                 )
             except Exception as e:
                 logger.warning(f"[스크리닝] screening_log 저장 실패: {e}")

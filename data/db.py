@@ -157,13 +157,33 @@ def init_db():
                 reason             TEXT,
                 met_conditions     TEXT,
                 rr_ratio           REAL,
+                current_price      INTEGER DEFAULT NULL,
                 indicator_snapshot TEXT,
+                dart_summary       TEXT DEFAULT NULL,
+                news_summary       TEXT DEFAULT NULL,
                 market_snapshot    TEXT,
+                ai_response        TEXT DEFAULT NULL,
                 user_action        TEXT DEFAULT NULL,
                 result_7d          REAL DEFAULT NULL,
                 result_30d         REAL DEFAULT NULL
             )
         """)
+        # screening_log 마이그레이션 (기존 테이블에 컬럼 추가)
+        for col, typedef in [
+            ("current_price", "INTEGER DEFAULT NULL"),
+            ("dart_summary", "TEXT DEFAULT NULL"),
+            ("news_summary", "TEXT DEFAULT NULL"),
+            ("ai_response", "TEXT DEFAULT NULL"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE screening_log ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+        # RAG 검색용 인덱스
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_stock_date ON signals (stock_code, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_verdict ON signals (verdict, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_screening_stock_date ON screening_log (stock_code, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_screening_recommendation ON screening_log (recommendation, created_at)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cooldowns (
                 key TEXT PRIMARY KEY,
@@ -818,21 +838,27 @@ def save_screening_log(
     reason: str,
     met_conditions: list | None = None,
     rr_ratio: float | None = None,
+    current_price: int | None = None,
     indicator_snapshot: str | None = None,
+    dart_summary: str | None = None,
+    news_summary: str | None = None,
     market_snapshot: str | None = None,
+    ai_response: str | None = None,
 ) -> int:
     """스크리닝 AI 판단 이력 저장. screening_log_id 반환."""
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO screening_log
                 (created_at, stock_code, stock_name, source, recommendation, reason,
-                 met_conditions, rr_ratio, indicator_snapshot, market_snapshot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 met_conditions, rr_ratio, current_price, indicator_snapshot,
+                 dart_summary, news_summary, market_snapshot, ai_response)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 stock_code, stock_name, source, recommendation, reason,
                 json.dumps(met_conditions or [], ensure_ascii=False),
-                rr_ratio, indicator_snapshot, market_snapshot,
+                rr_ratio, current_price, indicator_snapshot,
+                dart_summary, news_summary, market_snapshot, ai_response,
             ),
         )
         conn.commit()
