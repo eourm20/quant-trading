@@ -1,7 +1,22 @@
 # Quant Trading System
 
 AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
-키움증권 REST API 기반 24/7 자동 모니터링 + AI 매매 판단 → 텔레그램 봇 반자동 매매.
+수동 모드(Claude Desktop + MCP)와 자동 모드(백그라운드 워커)로 운영.
+
+> 프로세스 상세 가이드: [자동 모드](img/5_auto_mode.html) · [수동 모드](img/6_manual_mode.html)
+
+---
+
+## 수동 모드 vs 자동 모드
+
+두 모드는 독립 실행 가능하며, 같은 DB를 공유. 동시 실행도 가능.
+
+| 기능 | 수동 (Claude Desktop) | 자동 (Worker) |
+|------|---------------------|---------------|
+| **종목 추천** | MCP로 분석 → 추천만 (사용자가 판단) | 장중 스캔 + 장 마감 AI 분석 → watchlist **자동 추가** |
+| **초기 임계치** | 자동 제안 → 사용자 확인 후 등록 | AI가 자동 설정 |
+| **신호 대응** | 텔레그램 알림 → **사용자 승인** | AI 판단 → **자동 매매** (`AUTO_TRADE=true`) |
+| **포트폴리오 동기화** | MCP auto_sync (10분) | 워커 스케줄러 (2분) |
 
 ---
 
@@ -14,111 +29,111 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 | 애프터장 (장후 시간외) | 15:40~16:00 | 81 (당일 종가) | exit/add/both만 |
 | 시간외 단일가 | 16:00~18:00 | 62 (지정가 필수) | exit/add/both만 |
 
-> 프리/애프터장 entry 조건 제외: 유동성 낮은 시간대 신규 매수 오발신호 방지
-> 시간외 단일가 시장가 주문 시 현재가 자동 조회 후 지정가로 변환
+---
+
+## 워커 스케줄러 (자동 모드)
+
+| 작업 | 주기 | 시간대 | 설명 |
+|------|------|--------|------|
+| **run_check** | 매 1분 | 08:00~18:59 | 핵심: 종목별 조건 체크 → AI 판단 → 알림/자동매매 |
+| reset_all_cooldowns | 1일 1회 | 09:00 | 장 시작 시 전 종목 쿨다운 초기화 |
+| sync (4개) | 2분~개별 | 08:30~18:05 | 포트폴리오 실시간 동기화 |
+| update_signal_results | 매 30분 | 09:00~18:00 | 신호 후 1/3/5/10일 수익률 자동 계산 |
+| check_trailing_stops | 매 30분 | 09:00~15:00 | 수익 구간 손절가 자동 상향 |
+| check_inactive_stocks | 1일 1회 | 08:30 | 30일 미발동 종목 경고 |
+| check_removal_candidates | 매 30분 | 09:00~15:00 | 미보유 90일 미발동 자동 삭제 |
+| **run_intraday_scan** | 1일 2회 | 10:00, 13:00 | 장중 거래량 급증 경량 스캔 → 텔레그램 알림 |
+| **run_daily_screening** | 1일 1회 | 15:40 | 장 마감 AI 풀 분석 → watchlist 자동 추가 |
 
 ---
 
-## 신호 발생 흐름 (상세)
+## 신호 발생 흐름
 
 ```
-워커 1분 체크 (평일 08:00~18:59 cron — 장외 시간 미실행)
+워커 1분 체크 (평일 08:00~18:59)
      │
-     ├─ 현재 세션 확인 (premarket / main / aftermarket / offhours)
-     │   └─ 세션 없음(갭/장외) → 즉시 return
-     │
-     ├─ DB에서 watchlist + conditions_def 로드 (최신 즉시 반영)
-     │   └─ 정규장 외 세션: entry 조건 자동 제외
+     ├─ 세션 확인 → 장외 시간이면 return
+     ├─ DB에서 watchlist + conditions_def 로드 (실시간 반영)
      │
      ├─ 종목별:
-     │   ├─ 현재가 조회 (ka10001)
-     │   ├─ 40일 일봉 조회 (ka10081)
-     │   ├─ 지표 계산:
-     │   │   RSI / MA5·MA20 / MACD / 볼린저 밴드
-     │   │   골든크로스·데드크로스 / 신고가 / 지지선 이탈
+     │   ├─ 현재가 (ka10001) + 90일 일봉 (ka10081)
+     │   ├─ 기술적 지표 40+ 계산
+     │   │   RSI / MA / MACD / 볼린저 / 스토캐스틱 / CCI / 일목균형표
+     │   │   OBV / 캔들 패턴 / 차트 패턴 / 다이버전스 / 피보나치
      │   │
-     │   ├─ [조건 평가] conditions_def 기반 동적 평가
-     │   │   ├─ price_gte / price_lte  → 현재가 비교
-     │   │   ├─ rsi_gte / rsi_lte      → RSI 비교
-     │   │   ├─ volume_gte             → 거래량 배율
-     │   │   └─ flag                  → 차트 불리언 필드
+     │   ├─ 조건 평가 (29개 조건)
+     │   │   ├─ signal_type 필터 (미보유: entry/both, 보유: exit/add/both)
+     │   │   └─ 쿨다운 필터
      │   │
-     │   ├─ [signal_type 필터]
-     │   │   ├─ 미보유 종목: entry / both 조건만 평가
-     │   │   ├─ 보유 종목:  exit / add / both 조건만 평가
-     │   │   └─ add: 물타기·추가매수 전용 조건
+     │   ├─ AI 판단 (Claude API)
+     │   │   Input: 차트 + DART 공시/재무 + 뉴스 + 포트폴리오 + 시장지수
+     │   │   Output: [매수/매도/홀드] + 추천수량 + 근거
      │   │
-     │   ├─ [쿨다운 필터] 조건별 재발송 방지
-     │   │   (조건마다 쿨다운 시간 다름: 5분 ~ 6.5시간)
-     │   │   (매일 09:00 장 시작 시 전체 리셋)
+     │   ├─ 텔레그램 알림 (인라인 버튼: 시장가/지정가/홀드/무시)
      │   │
-     │   ├─ [AI 판단] ANTHROPIC_API_KEY → Claude Sonnet
-     │   │   Input: 시장지수 + 섹터 + 차트 + 조건 + 포트폴리오
-     │   │   Output: [매수/매도/홀드] + 근거 + 추천 주문방식
-     │   │
-     │   └─ [텔레그램 발송]
-     │       메시지1: 신호 요약 (종목/가격/조건)
-     │       메시지2: AI 판단 의견
-     │       인라인 버튼: 시장가매수 / 지정가매수 / 매도 / 홀드
+     │   └─ AUTO_TRADE=true 시 → 자동 주문 실행
      │
-     └─ 신호 DB 저장 (signals 테이블)
+     └─ 신호 DB 저장 (지표 스냅샷 + DART + 차트 패턴 포함)
 ```
 
 ---
 
-## 텔레그램 봇 주문 흐름
+## 종목 스크리닝
+
+### 장중 경량 스캔 (10:00, 13:00)
+- 거래량 급증 종목만 조회 (API 1회, AI 없음)
+- 텔레그램 알림만 발송 (watchlist 추가 안 함)
+- 관심 있으면 Claude Desktop에서 상세 분석 요청
+
+### 장 마감 풀 스크리닝 (15:40)
+- 후보 수집: 거래량 급증(ka10023) + 눌림목(ka10027) + 외인 순매수(ka10035)
+- 기존 watchlist 종목 제외 → 최대 30개 후보
+- 후보별 AI 분석: 차트 + DART + 뉴스 → 편입 조건 4가지 중 2개 이상 충족 평가
+- 편입 판정 시 watchlist 자동 추가 (목표가/손절가/RSI 기준 AI 설정)
+
+### Claude Desktop 종목 추천 (수동)
+- "이 종목 어때?" → MCP로 차트+공시+뉴스 직접 분석 → 편입 제안
+- "종목 추천해줘" → 포트폴리오 확인 후 키움 API로 후보 탐색 → 분석 → 제안
+
+---
+
+## 텔레그램 봇
 
 ```
-신호 알림 수신
-     │
-     ├─ [시장가 매수/매도] 버튼 → 수량 입력 → 최종 확인 → 주문
-     │
-     └─ [지정가 매수/매도] 버튼 → 가격 입력 → 수량 입력 → 최종 확인 → 주문
+신호 알림 인라인 버튼:
+  [📊 시장가] [💰 지정가] [🚪 홀드] [❌ 무시]
+
+임계값 변경 제안 버튼 (AI 홀드 시):
+  [✅ 적용] [✏️ 수정] [❌ 거절]
 
 직접 명령:
-  /buy 종목명  → 세션별 주문방식 선택 → (지정가면 가격 입력) → 수량 입력 → 확인
-  /sell 종목명 → 위와 동일
-  /price 종목명 → 현재가 조회
-  /balance      → 보유 종목 조회
-
-세션별 주문 버튼:
-  정규장        → [📊 시장가] [💰 지정가]
-  프리/애프터장 → [📋 종가 주문]  (가격 불필요 — 종가 자동 적용)
-  시간외단일가  → [💰 지정가]     (시장가 선택 시 현재가 자동 지정가 변환)
-
-주문 시 trde_tp 자동 선택:
-  프리장(08:30~09:00) → 61, 정규장 → 0/3, 애프터장(15:40~16:00) → 81, 시간외단일가 → 62
-
-홀드 버튼: 해당 종목 쿨다운을 원래의 25%로 단축 → 신호 지속 시 조기 재알림
+  /buy 종목명 [수량]    매수 주문
+  /sell 종목명 [수량]   매도 주문
+  /price 종목명         현재가 조회
+  /balance              보유 종목 조회
 ```
 
 ---
 
-## Claude Desktop (claude.ai) 기능
+## Claude Desktop (MCP 도구)
 
-```
-사용자 발화 예시                     → claude.ai 자동 행동
-────────────────────────────────────────────────────────
-"오늘 신호 뭐 왔어?"                 → quant_report(signals)
-"포트폴리오 보여줘"                   → quant_report(portfolio)
-"최근 매매 내역"                      → quant_report(trades)
-"전략 노트 보여줘"                    → quant_report(strategy)
+### Quant MCP (15개)
+| 도구 | 설명 |
+|------|------|
+| `quant_report` | 신호/포트폴리오/매매/전략 조회 |
+| `quant_strategy_log` | 전략 노트 기록 + 텔레그램 발송 |
+| `quant_portfolio_sync` | 포트폴리오 동기화 |
+| `quant_watchlist_read/add/update/delete` | 관심종목 CRUD |
+| `quant_conditions_list/add/update/remove` | 조건 정의 관리 |
+| `quant_signal_log_delete` | 신호 로그 삭제 |
+| `quant_strategy_note_update/delete` | 전략 노트 편집 |
+| `quant_cooldown_reset` | 쿨다운 초기화 |
 
-"한화에어로 목표가 얼마야?"           → quant_watchlist_read()
-"SK하이닉스 손절가 830000으로 바꿔"  → quant_watchlist_update()
-"삼성전자 모니터링 꺼줘"              → quant_watchlist_update(enabled=false)
-"현대로템 추가해줘"                   → quant_watchlist_add()
-"LIG 감시 목록에서 빼줘"              → quant_watchlist_delete()
+### DART MCP (6개)
+`dart_disclosures` · `dart_company_info` · `dart_financial` · `dart_shareholders` · `dart_periodic_report` · `dart_major_event`
 
-"어떤 조건으로 신호 보내?"            → quant_conditions_list()
-"볼린저 조건 추가해줘"                → quant_condition_add()
-"RSI 쿨다운 180분으로 바꿔줘"        → quant_condition_update()
-"MA5 이탈 조건 삭제해줘"             → quant_condition_remove()
-
-"포트폴리오 동기화해줘"               → quant_portfolio_sync()
-"삼성전자 200주 매수"                 → kiwoom_execute_api() [주문]
-"계좌 잔고 확인해줘"                  → kiwoom_execute_api() [조회]
-```
+### Kiwoom MCP (직접 API)
+`ka10001` 현재가 · `ka10081` 일봉 · `kt00018` 잔고 · `kt00007` 체결 · 주문 실행 등
 
 ---
 
@@ -129,34 +144,42 @@ quant_trading/
 ├── kiwoom_mcp/                  # MCP 서버 (Claude Desktop 연동)
 │   └── kiwoom_mcp/
 │       ├── server.py            # kiwoom-mcp: 키움 API 도구
-│       └── quant_server.py      # quant-mcp: 리포트/watchlist/조건 관리
+│       ├── quant_server.py      # quant-mcp: 리포트/watchlist/조건 관리
+│       └── dart_client.py       # DART 공시 클라이언트 (풀)
 │
 ├── worker/                      # 백그라운드 워커
-│   ├── main.py                  # 진입점, APScheduler
-│   ├── kiwoom_client.py         # 키움 REST API 직접 호출 (ka10099 종목캐시 포함)
-│   ├── monitor.py               # 조건 평가 엔진 (signal_type 필터 포함)
-│   ├── indicators.py            # RSI / MA / MACD / 볼린저 밴드 계산
-│   ├── claude_judge.py          # AI 매매 판단 (Claude Sonnet)
-│   ├── cooldown.py              # 신호 쿨다운 (DB 기반, 09:00 전체 리셋)
+│   ├── main.py                  # 진입점, APScheduler (12개 작업)
+│   ├── monitor.py               # 조건 평가 엔진 (29개 조건)
+│   ├── indicators.py            # 기술적 지표 40+ (RSI/MA/MACD/볼린저/스토캐스틱/CCI/일목균형표 등)
+│   ├── claude_judge.py          # AI 매매 판단 (프롬프트 캐싱)
+│   ├── stock_analyzer.py        # 자동 스크리닝 (장중 경량 + 장 마감 풀)
+│   ├── cooldown.py              # 신호 쿨다운
 │   ├── portfolio_sync.py        # 포트폴리오/매매내역 동기화
-│   ├── report.py                # 현황 조회 (신호/포트폴리오/매매/전략)
-│   └── daily_report.py          # 일일 리포트 (15:35)
+│   ├── report.py                # 현황 조회
+│   └── clients/                 # 외부 API 경량 클라이언트
+│       ├── kiwoom_client.py     # 키움 REST API
+│       ├── dart_client.py       # DART 공시 API
+│       └── news_client.py       # 네이버 뉴스 API
 │
 ├── notifications/
-│   ├── telegram.py              # 텔레그램 신호 알림 (인라인 버튼 포함)
-│   └── telegram_bot.py          # 텔레그램 봇 (양방향 주문 명령 처리)
+│   ├── telegram.py              # 텔레그램 알림 (인라인 버튼)
+│   └── telegram_bot.py          # 텔레그램 봇 (주문/임계값 버튼)
 │
 ├── data/
-│   ├── db.py                    # SQLite CRUD (전 데이터 통합 관리)
+│   ├── db.py                    # SQLite CRUD (전 데이터 통합)
 │   └── trading.db               # DB 파일 (자동 생성)
 │
 ├── config/
-│   ├── worker.yaml              # 워커 설정값 (장 시간, 인터벌 등)
-│   └── conditions.yaml          # 조건 정의 백업 (실제 사용은 DB)
+│   ├── worker.yaml              # 워커 설정
+│   └── conditions.yaml          # 조건 정의 백업
 │
-├── logs/
-│   └── worker.log
+├── img/                         # 프로세스 가이드 (HTML)
+│   ├── 5_auto_mode.html         # 자동 모드 프로세스
+│   └── 6_manual_mode.html       # 수동 모드 프로세스
+│
+├── logs/worker.log
 ├── .env
+├── CLAUDE.md                    # Claude Desktop 행동 지침
 └── requirements.txt
 ```
 
@@ -166,67 +189,38 @@ quant_trading/
 
 | 테이블 | 용도 |
 |---|---|
-| `watchlist` | 모니터링 종목 + 조건값 (JSON) |
-| `conditions_def` | 시그널 조건 타입 정의 (평가 방식, 쿨다운, signal_type) |
+| `watchlist` | 모니터링 종목 + 조건값 (JSON) + horizon |
+| `conditions_def` | 시그널 조건 타입 29개 (평가 방식, 쿨다운, signal_type) |
 | `portfolio` | 보유 종목 현황 캐시 |
-| `trades` | 매매 내역 |
-| `signals` | 발생 신호 로그 |
+| `trades` | 매매 내역 (30일) |
+| `signals` | 발생 신호 로그 (지표 스냅샷, DART, 차트 패턴, 1~10일 수익률) |
 | `cooldowns` | 조건별 마지막 알림 시각 (09:00 전체 리셋) |
-| `strategy_notes` | 전략 메모 |
+| `strategy_notes` | 전략 메모 (trade/watchlist/general/daily_review) |
 
 ---
 
-## 시그널 조건 (20가지)
+## 시그널 조건 (29개)
 
-| 조건 | 평가 방식 | signal_type | 쿨다운 |
+| 조건 | signal_type | 쿨다운 | 비고 |
 |---|---|---|---|
-| 목표가 도달 | 현재가 >= 설정값 | exit | 6.5시간 |
-| 손절가 도달 | 현재가 <= 설정값 | exit | 1시간 |
-| RSI 과매수 | RSI >= 설정값 (기본 70) | exit | 2시간 |
-| RSI 과매도 | RSI <= 설정값 (기본 30) | entry | 2시간 |
-| 거래량 급증 | 거래량 / 20일평균 >= 설정배수 | both | 1시간 |
-| MA 골든크로스 | 전일 MA5<MA20 → 오늘 MA5>MA20 | entry | 6.5시간 |
-| MA 데드크로스 | 전일 MA5>MA20 → 오늘 MA5<MA20 | exit | 6.5시간 |
-| 20일 신고가 돌파 | 현재가 > 최근 20일 최고가 | both | 6.5시간 |
-| MA20 하향 이탈 | 전일 >= MA20, 오늘 < MA20 | exit | 6.5시간 |
-| MA5 하향 이탈 | 전일 >= MA5, 오늘 < MA5 | both | 1시간 |
-| MA5 상향 돌파 | 전일 <= MA5, 오늘 > MA5 | entry | 1시간 |
-| MACD 골든크로스 | MACD 라인이 시그널 상향 돌파 | entry | 6.5시간 |
-| MACD 데드크로스 | MACD 라인이 시그널 하향 돌파 | exit | 6.5시간 |
-| 볼린저 상단 돌파 | 현재가 > 볼린저 상단 | both | 1시간 |
-| 볼린저 하단 이탈 | 현재가 < 볼린저 하단 | entry | 1시간 |
-| RSI 극단 과매도 | RSI <= 설정값 (기본 20) | both | **5분** |
-| 볼린저 3% 이탈 | 현재가 < 볼린저 하단 × 0.97 | both | **5분** |
-| RSI 과매도 (물타기) | RSI <= 설정값, 보유 중 | add | 4시간 |
-| 볼린저 하단 이탈 (물타기) | 볼린저 하단 이탈, 보유 중 | add | 4시간 |
-| MA5 회복 (물타기) | MA5 상향 돌파, 보유 중 | add | 4시간 |
-
-> - `entry`: 미보유 종목 진입 타이밍
-> - `exit`: 보유 종목 매도·관리
-> - `add`: 보유 종목 물타기·추가매수
-> - `both`: 보유/미보유 모두 적용
-> - `quant_condition_add` / `quant_condition_update` 도구로 코드 수정 없이 관리 가능
-
----
-
-## 쿨다운 동작
-
-- 조건별 개별 쿨다운 (같은 종목+조건은 쿨다운 내 재발송 없음)
-- **매일 09:00 장 시작 시 전체 리셋** → 매일 첫 체크에서 신호 발생 가능
-- 홀드 버튼 클릭 시 해당 종목 쿨다운 25%로 단축 (신호 지속 시 조기 재알림)
-
----
-
-## 포트폴리오 동기화 타이밍
-
-| 시점 | 방식 |
-|---|---|
-| 워커 시작 시 | 자동 1회 |
-| 평일 08:00~18:59 (10분마다) | 워커 자동 스케줄 |
-| 08:30 | 프리장 시작 직후 동기화 |
-| 09:01 | 정규장 시작 직후 동기화 |
-| 18:05 | 시간외단일가 종료 후 확정 동기화 |
-| claude.ai 요청 시 | `quant_portfolio_sync` 수동 호출 |
+| RSI 과매도 | entry | 120분 | horizon별 RSI 기간 차등 (7/14/21일) |
+| RSI 과매수 | exit | 120분 | |
+| RSI 과매도 (5분봉) | entry | 30분 | horizon=단기만 |
+| RSI 극단 과매도 | both | 5분 | 긴급 반복 알림 |
+| 골든크로스 (MA) | entry | 1440분 | 전환형 |
+| 데드크로스 (MA) | exit | 1440분 | 전환형 |
+| MACD 골든/데드크로스 | entry/exit | 1440분 | 전환형 |
+| 볼린저 하단 이탈/상단 돌파 | entry/both | 360분/60분 | 전환형 |
+| 볼린저 Critical (3%+) | both | 5분 | 긴급 |
+| 거래량 급증 | both | 60분 | |
+| 목표가/손절가 도달 | exit | 360분/60분 | |
+| MA5/MA20 이탈/돌파 | exit/entry/both | 60분/1440분 | 전환형 |
+| 20일 신고가 | both | 1440분 | |
+| 스토캐스틱 골든/데드크로스 | entry/exit | - | 전환형 |
+| CCI 과매도/과매수 | entry/exit | - | ±100 기준 |
+| 일목 전환선 크로스 | entry/exit | - | 전환형 |
+| 일목 구름대 돌파/이탈 | entry/exit | - | 전환형 |
+| RSI/볼린저 물타기 | add | 240분 | 보유 종목 전용 |
 
 ---
 
@@ -237,9 +231,6 @@ quant_trading/
 ```bash
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
-
-# MCP 서버 가상환경
-cd kiwoom_mcp && python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 ```
 
 ### 2. `.env` 파일 설정
@@ -249,62 +240,43 @@ cd kiwoom_mcp && python -m venv .venv && .venv/Scripts/pip install -r requiremen
 KIWOOM_APP_KEY=...
 KIWOOM_APP_SECRET=...
 KIWOOM_ACCOUNT_NO=...
-KIWOOM_BASE_URL=https://mockapi.kiwoom.com   # 모의투자
-# KIWOOM_BASE_URL=https://api.kiwoom.com     # 실서버
-
-# 매매 실행 허용 (false면 주문 불가)
+KIWOOM_BASE_URL=https://api.kiwoom.com
 KIWOOM_ALLOW_TRADE_EXECUTION=false
 
-# AI
+# AI (둘 중 하나 필수)
 ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
 
 # 텔레그램
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 
-# MCP 경로
-QUANT_TRADING_PATH=C:\Users\...\quant_trading
+# DART 공시
+DART_API_KEY=...
+
+# 네이버 뉴스
+NAVER_CLIENT_ID=...
+NAVER_CLIENT_SECRET=...
+
+# 자동매매 모드
+AUTO_TRADE=false
 ```
 
-### 3. Claude Desktop MCP 설정 (`claude_desktop_config.json`)
+### 3. Claude Desktop MCP 설정
 
-```json
-{
-  "mcpServers": {
-    "kiwoom-mcp": {
-      "command": "C:\\...\\quant_trading\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "kiwoom_mcp.server"],
-      "cwd": "C:\\...\\quant_trading\\kiwoom_mcp",
-      "env": { "QUANT_TRADING_PATH": "C:\\...\\quant_trading" }
-    },
-    "quant-mcp": {
-      "command": "C:\\...\\quant_trading\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "kiwoom_mcp.quant_server"],
-      "cwd": "C:\\...\\quant_trading\\kiwoom_mcp",
-      "env": { "QUANT_TRADING_PATH": "C:\\...\\quant_trading" }
-    }
-  }
-}
-```
+`claude_desktop_config.json`에 kiwoom-mcp와 quant-mcp 서버 등록.
 
-### 4. 워커 실행
+### 4. 실행
 
 ```bash
-# 평일 08:00~18:59 자동 실행 (프리장~시간외단일가 전 세션 커버)
+# 자동 모드 (워커)
 .venv/Scripts/python worker/main.py
 
 # 테스트 (장 시간 무관 즉시 실행)
 .venv/Scripts/python worker/main.py --test
+
+# 수동 모드 (Claude Desktop에서 MCP로 대화)
 ```
-
----
-
-## 개발 단계
-
-| Phase | 설명 | 상태 |
-|---|---|---|
-| Phase 1 | 반자동 — 조건 감지 → 알림 → 텔레그램 봇으로 매매 | ✅ 완료 |
-| Phase 2 | 완전 자동 — 신뢰 축적 후 워커가 직접 주문 실행 | 예정 |
 
 ---
 
@@ -312,14 +284,15 @@ QUANT_TRADING_PATH=C:\Users\...\quant_trading
 
 | 구분 | 기술 |
 |---|---|
-| AI 판단 | Claude Sonnet (Anthropic API) |
-| 주식 API | 키움증권 REST API (ka10001 / ka10081 / kt00018 / ka10099 등) |
+| AI 판단 | Claude Sonnet (Anthropic API, 프롬프트 캐싱) / GPT 대체 가능 |
+| 주식 API | 키움증권 REST API |
+| 공시 | DART OpenAPI |
+| 뉴스 | 네이버 뉴스 검색 API |
 | MCP | kiwoom-mcp + quant-mcp (FastMCP) |
 | 스케줄러 | APScheduler |
 | 알림/주문 | 텔레그램 Bot API (인라인 버튼 + 양방향 명령) |
-| DB | SQLite (전 설정/데이터 통합) |
-| HTTP | httpx |
-| 지표 | RSI / MA / MACD / 볼린저 밴드 (자체 구현) |
+| DB | SQLite |
+| 지표 | 40+ 기술적 지표 자체 구현 |
 
 ---
 
@@ -327,6 +300,6 @@ QUANT_TRADING_PATH=C:\Users\...\quant_trading
 
 - `.env` 파일은 절대 git에 커밋하지 말 것
 - `KIWOOM_ALLOW_TRADE_EXECUTION=true` 설정 시 실제 주문 실행됨
-- 모의서버(`mockapi.kiwoom.com`)는 rate limit → 요청 간 1초 딜레이
-- `trading.db`는 자동 생성되며 최초 실행 시 YAML → DB 마이그레이션 자동 수행
+- `AUTO_TRADE=true` 설정 시 AI 판단 기반 자동 매매 실행됨
+- `trading.db`는 자동 생성되며 최초 실행 시 마이그레이션 자동 수행
 - MCP 서버 변경 후 Claude Desktop 재시작 필요
