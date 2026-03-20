@@ -5,6 +5,7 @@ MCP 코드 구조 기반으로 작성 (POST + api-id 헤더 방식)
 
 import os
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -30,24 +31,53 @@ class KiwoomClient:
         # 종목명→코드 캐시 (당일 유지)
         self._stock_map: dict[str, str] = {}   # name → code
         self._stock_map_date: str = ""
-        # 모의투자 여부에 따라 거래소 구분 자동 설정
+        # 모의/실거래 여부에 따라 거래소 구분 자동 설정
         self._is_mock = "mockapi" in BASE_URL
-        self._dmst_stex_tp = "KRX" if self._is_mock else "%"
+        self._holdings_markets = ["KRX"] if self._is_mock else ["KRX", "NXT"]
+        self._trade_history_markets = ["KRX"] if self._is_mock else ["%"]
+        self._order_market = "KRX" if self._is_mock else "SOR"
+
+        # 기존 코드 호환용 (사용처가 남아있을 수 있어 유지)
+        self._dmst_stex_tp = self._trade_history_markets[0]
         self._stex_tp = "1" if self._is_mock else "3"
+
+    def _post_with_retry(
+        self,
+        url: str,
+        *,
+        json_body: dict,
+        headers: dict,
+        api_name: str,
+        max_retries: int = 4,
+    ) -> httpx.Response:
+        last_resp: httpx.Response | None = None
+        for attempt in range(max_retries):
+            resp = self._client.post(url, json=json_body, headers=headers)
+            last_resp = resp
+            if resp.status_code == 429:
+                wait = min(8, 2 ** attempt)
+                logger.warning(f"[429] {api_name} 재시도 {attempt + 1}/{max_retries} ({wait}s 대기)")
+                time.sleep(wait)
+                continue
+            return resp
+        if last_resp is not None:
+            return last_resp
+        raise RuntimeError(f"{api_name} 요청 실패 (응답 없음)")
 
     def _get_token(self) -> str:
         now = datetime.now(tz=timezone.utc)
         if self._token and self._token_expires_at and now < self._token_expires_at - timedelta(seconds=60):
             return self._token
 
-        resp = self._client.post(
+        resp = self._post_with_retry(
             f"{BASE_URL}/oauth2/token",
-            json={
+            json_body={
                 "grant_type": "client_credentials",
                 "appkey": APP_KEY,
                 "secretkey": APP_SECRET,
             },
             headers={"Content-Type": "application/json;charset=UTF-8"},
+            api_name="oauth2/token",
         )
         resp.raise_for_status()
         payload = resp.json()
@@ -79,17 +109,26 @@ class KiwoomClient:
         }
 
     def _post(self, path: str, api_id: str, body: dict) -> dict:
-        resp = self._client.post(
-            f"{BASE_URL}/{path.lstrip('/')}",
-            json=body,
-            headers=self._headers(api_id),
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        code = payload.get("return_code")
-        if code not in (None, 0, "0"):
-            raise RuntimeError(f"API 오류 [{api_id}] code={code} msg={payload.get('return_msg')}")
-        return payload
+        url = f"{BASE_URL}/{path.lstrip('/')}"
+        for attempt in range(2):  # 401 토큰 만료 시 1회 재시도
+            resp = self._post_with_retry(
+                url,
+                json_body=body,
+                headers=self._headers(api_id),
+                api_name=api_id,
+            )
+            if resp.status_code == 401 and attempt == 0:
+                self._token = None
+                self._token_expires_at = None
+                logger.warning(f"[{api_id}] 401 응답으로 토큰 갱신 후 재시도")
+                continue
+            resp.raise_for_status()
+            payload = resp.json()
+            code = payload.get("return_code")
+            if code not in (None, 0, "0"):
+                raise RuntimeError(f"API 오류 [{api_id}] code={code} msg={payload.get('return_msg')}")
+            return payload
+        raise RuntimeError(f"API 요청 실패 [{api_id}]")
 
     def get_current_price(self, stock_code: str) -> dict:
         """현재가 조회 (ka10001 주식기본정보요청)"""
@@ -136,12 +175,16 @@ class KiwoomClient:
 
     def get_holdings(self) -> list[dict]:
         """보유 종목 조회 (kt00018 계좌평가잔고내역요청)"""
-        payload = self._post(
-            "/api/dostk/acnt",
-            "kt00018",
-            {"qry_tp": "1", "dmst_stex_tp": self._dmst_stex_tp},
-        )
-        return payload.get("acnt_evlt_remn_indv_tot", [])
+        results = []
+        for market in self._holdings_markets:
+            payload = self._post(
+                "/api/dostk/acnt",
+                "kt00018",
+                {"qry_tp": "1", "dmst_stex_tp": market},
+            )
+            rows = payload.get("acnt_evlt_remn_indv_tot", [])
+            results.extend(rows if isinstance(rows, list) else [])
+        return results
 
     def get_deposit(self) -> dict:
         """주문 가능 예수금 조회 (kt00001 예수금상세현황요청).
@@ -185,26 +228,27 @@ class KiwoomClient:
         end_dt = datetime.now(tz=KST).strftime("%Y%m%d")
         start_dt = (datetime.now(tz=KST) - timedelta(days=days)).strftime("%Y%m%d")
         results = []
-        for tp in ("3", "4"):
-            try:
-                payload = self._post(
-                    "/api/dostk/acnt",
-                    "kt00015",
-                    {
-                        "strt_dt": start_dt,
-                        "end_dt": end_dt,
-                        "tp": tp,
-                        "stk_cd": "",
-                        "crnc_cd": "KRW",
-                        "gds_tp": "1",
-                        "dmst_stex_tp": self._dmst_stex_tp,
-                        "frgn_stex_code": "",
-                    },
-                )
-                rows = payload.get("trst_ovrl_trde_prps_array", [])
-                results.extend(rows if isinstance(rows, list) else [])
-            except Exception as e:
-                logger.warning(f"매매 내역 조회 실패 (tp={tp}): {e}")
+        for market in self._trade_history_markets:
+            for tp in ("3", "4"):
+                try:
+                    payload = self._post(
+                        "/api/dostk/acnt",
+                        "kt00015",
+                        {
+                            "strt_dt": start_dt,
+                            "end_dt": end_dt,
+                            "tp": tp,
+                            "stk_cd": "",
+                            "crnc_cd": "KRW",
+                            "gds_tp": "1",
+                            "dmst_stex_tp": market,
+                            "frgn_stex_code": "",
+                        },
+                    )
+                    rows = payload.get("trst_ovrl_trde_prps_array", [])
+                    results.extend(rows if isinstance(rows, list) else [])
+                except Exception as e:
+                    logger.warning(f"매매 내역 조회 실패 (tp={tp}, market={market}): {e}")
         return results
 
     def _load_stock_map(self) -> None:
@@ -313,6 +357,7 @@ class KiwoomClient:
         order_type: str,  # "1"=매수, "2"=매도
         qty: int,
         price: int = 0,  # 0=시장가
+        order_market: str | None = None,  # "KRX" | "NXT" | "SOR"
     ) -> dict:
         """주식 주문
         kt10000: 매수주문, kt10001: 매도주문
@@ -334,12 +379,22 @@ class KiwoomClient:
                 logger.warning(f"[주문] 시간외단일가 현재가 조회 실패: {e}")
         # 프리장/애프터장 종가매매는 가격 지정 불필요 (종가 자동 적용)
         ord_uv = "" if trde_tp in ("61", "81") else (str(price) if price else "")
-        logger.info(f"[주문] {stock_code} {'매수' if order_type=='1' else '매도'} {qty}주 trde_tp={trde_tp} price={ord_uv or '종가'}")
+        market = str(order_market or self._order_market).strip().upper()
+        if self._is_mock:
+            # 모의투자는 KRX만 사용
+            market = "KRX"
+        elif market not in {"KRX", "NXT", "SOR"}:
+            market = self._order_market
+
+        logger.info(
+            f"[주문] {stock_code} {'매수' if order_type=='1' else '매도'} {qty}주 "
+            f"market={market} trde_tp={trde_tp} price={ord_uv or '종가'}"
+        )
         return self._post(
             "/api/dostk/ordr",
             api_id,
             {
-                "dmst_stex_tp": self._dmst_stex_tp,
+                "dmst_stex_tp": market,
                 "stk_cd": stock_code,
                 "ord_qty": str(qty),
                 "ord_uv": ord_uv,

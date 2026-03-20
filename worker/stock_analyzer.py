@@ -35,6 +35,27 @@ else:
     _AI_BACKEND = ""
 
 
+def _fmt_int(value, default: int = 0) -> int:
+    """None/문자열/숫자를 안전하게 정수로 변환."""
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(str(value).replace(",", "").strip()))
+    except Exception:
+        return default
+
+
+def _build_market_text(kiwoom) -> str:
+    try:
+        kospi = kiwoom.get_market_index("kospi")
+        kosdaq = kiwoom.get_market_index("kosdaq")
+        kospi_rate = kospi.get("flu_rt") or kospi.get("prdy_ctrt") or "N/A"
+        kosdaq_rate = kosdaq.get("flu_rt") or kosdaq.get("prdy_ctrt") or "N/A"
+        return f"코스피 {kospi_rate}% / 코스닥 {kosdaq_rate}%"
+    except Exception:
+        return "시장 지수 조회 실패"
+
+
 # ═══════════════════════════ 후보 수집 ═══════════════════════════
 
 def _screen_candidates() -> list[dict]:
@@ -344,7 +365,7 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 
 # ═══════════════════════════ AI 편입 분석 ═══════════════════════════
 
-def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
+def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_text: str | None = None) -> dict:
     """후보 종목 1개를 차트+공시+뉴스로 분석하여 편입 적합성 판단.
 
     Returns:
@@ -353,7 +374,8 @@ def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
     from worker.clients.kiwoom_client import KiwoomClient
     from worker.indicators import calculate_rsi, calculate_volume_ratio, calculate_chart_summary
 
-    kiwoom = KiwoomClient()
+    if kiwoom is None:
+        kiwoom = KiwoomClient()
 
     # 1. 현재가 + 차트 데이터
     price_data = kiwoom.get_current_price(stock_code)
@@ -428,15 +450,8 @@ def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
         portfolio_context = "포트폴리오 조회 실패"
 
     # 5. 시장 환경
-    market_text = ""
-    try:
-        kospi = kiwoom.get_market_index("kospi")
-        kosdaq = kiwoom.get_market_index("kosdaq")
-        kospi_rate = kospi.get("flu_rt") or kospi.get("prdy_ctrt") or "N/A"
-        kosdaq_rate = kosdaq.get("flu_rt") or kosdaq.get("prdy_ctrt") or "N/A"
-        market_text = f"코스피 {kospi_rate}% / 코스닥 {kosdaq_rate}%"
-    except Exception:
-        market_text = "시장 지수 조회 실패"
+    if not market_text:
+        market_text = _build_market_text(kiwoom)
 
     # 6. 차트 분석 텍스트 (claude_judge.py 수준)
     stoch_text = ""
@@ -471,12 +486,20 @@ def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
     fib_text = ""
     if chart.fibonacci:
         f = chart.fibonacci
-        levels = [("23.6%", f["fib_236"]), ("38.2%", f["fib_382"]),
-                  ("50%", f["fib_500"]), ("61.8%", f["fib_618"])]
+        levels = [
+            ("23.6%", _fmt_int(f.get("fib_236"), 0)),
+            ("38.2%", _fmt_int(f.get("fib_382"), 0)),
+            ("50%", _fmt_int(f.get("fib_500"), 0)),
+            ("61.8%", _fmt_int(f.get("fib_618"), 0)),
+        ]
         nearest = min(levels, key=lambda x: abs(x[1] - current_price))
-        fib_text = (f"고점 {f['swing_high']:,} / 저점 {f['swing_low']:,}"
+        swing_high = _fmt_int(f.get("swing_high"), 0)
+        swing_low = _fmt_int(f.get("swing_low"), 0)
+        ext_1272 = _fmt_int(f.get("ext_1272"), 0)
+        ext_1618 = _fmt_int(f.get("ext_1618"), 0)
+        fib_text = (f"고점 {swing_high:,} / 저점 {swing_low:,}"
                     f" — 근접 레벨: {nearest[0]}({nearest[1]:,})"
-                    f" | 확장: 127.2%={f.get('ext_1272', 0):,} / 161.8%={f.get('ext_1618', 0):,}")
+                    f" | 확장: 127.2%={ext_1272:,} / 161.8%={ext_1618:,}")
 
     # MA20 대비 거리 (눌림목 판단용)
     ma20_dist = ""
@@ -495,22 +518,31 @@ def _analyze_candidate(stock_code: str, stock_name: str) -> dict:
                 break
 
     # 7. 유저 프롬프트 조립
+    ma5_val = _fmt_int(getattr(chart, "ma5", None), 0)
+    ma20_val = _fmt_int(getattr(chart, "ma20", None), 0)
+    support_val = _fmt_int(getattr(chart, "support_level", None), 0)
+    resist_val = _fmt_int(getattr(chart, "resistance_level", None), 0)
+    macd_line = getattr(chart, "macd_line", None)
+    macd_signal = getattr(chart, "macd_signal", None)
+    macd_line_text = f"{macd_line:.0f}" if isinstance(macd_line, (int, float)) else "N/A"
+    macd_signal_text = f"{macd_signal:.0f}" if isinstance(macd_signal, (int, float)) else "N/A"
+
     user_prompt = f"""## 종목 정보
 - 종목: {stock_name} ({stock_code})
 - 현재가: {current_price:,}원
 
 ## 기술적 지표
-- MA5: {int(chart.ma5):,}원 / MA20: {int(chart.ma20):,}원{ma20_dist}
+- MA5: {ma5_val:,}원 / MA20: {ma20_val:,}원{ma20_dist}
 - 추세: {chart.trend} (현재가 MA5 {'위' if chart.above_ma5 else '아래'} / MA20 {'위' if chart.above_ma20 else '아래'})
 - RSI(14): {rsi if rsi else 'N/A'}
 - 거래량 배율: {f'{volume_ratio:.1f}배' if volume_ratio else 'N/A'}
 - 스토캐스틱: {stoch_text or 'N/A'}
 - CCI: {cci_text or 'N/A'}
 - 일목균형표: {' / '.join(ichimoku_parts)}
-- MACD: {f'{chart.macd_line:.0f}' if chart.macd_line else 'N/A'} / Signal: {f'{chart.macd_signal:.0f}' if chart.macd_signal else 'N/A'}
+- MACD: {macd_line_text} / Signal: {macd_signal_text}
 - 볼린저: 상단 {int(chart.bollinger_upper or 0):,} / 하단 {int(chart.bollinger_lower or 0):,}
 - OBV: {chart.obv_trend or 'N/A'}
-- 지지: {chart.support_level:,}원 / 저항: {chart.resistance_level:,}원
+- 지지: {support_val:,}원 / 저항: {resist_val:,}원
 - 피보나치: {fib_text or 'N/A'}
 - RSI 다이버전스: {chart.rsi_divergence or '없음'}
 - MACD 다이버전스: {chart.macd_divergence or '없음'}
@@ -657,8 +689,15 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
 def _format_screening_alert(stock_name: str, stock_code: str, source: str, analysis: dict) -> str:
     """스크리닝 결과를 텔레그램 알림 텍스트로 포맷."""
     reason = analysis.get("reason", "")
-    met = ", ".join(analysis.get("met_conditions", []))
+    met_conditions = analysis.get("met_conditions", [])
+    if not isinstance(met_conditions, list):
+        met_conditions = []
+    met = ", ".join(met_conditions)
     rr = analysis.get("rr_ratio", "N/A")
+    target_price = _fmt_int(analysis.get("target_price"), 0)
+    stop_loss_price = _fmt_int(analysis.get("stop_loss_price"), 0)
+    rsi_oversold = _fmt_int(analysis.get("rsi_oversold"), 40)
+    rsi_overbought = _fmt_int(analysis.get("rsi_overbought"), 65)
 
     lines = [
         f"🔍 *{stock_name}* ({stock_code}) — {source}",
@@ -667,10 +706,10 @@ def _format_screening_alert(stock_name: str, stock_code: str, source: str, analy
         f"{reason}",
         f"",
         f"📌 *제안 전략*",
-        f"• 목표가 {analysis.get('target_price', 0):,}원 — {analysis.get('target_price_reason', '')}",
-        f"• 손절가 {analysis.get('stop_loss_price', 0):,}원 — {analysis.get('stop_loss_price_reason', '')}",
-        f"• RSI 과매도 {analysis.get('rsi_oversold', 40)} — {analysis.get('rsi_oversold_reason', '')}",
-        f"• RSI 과매수 {analysis.get('rsi_overbought', 65)} — {analysis.get('rsi_overbought_reason', '')}",
+        f"• 목표가 {target_price:,}원 — {analysis.get('target_price_reason', '')}",
+        f"• 손절가 {stop_loss_price:,}원 — {analysis.get('stop_loss_price_reason', '')}",
+        f"• RSI 과매도 {rsi_oversold} — {analysis.get('rsi_oversold_reason', '')}",
+        f"• RSI 과매수 {rsi_overbought} — {analysis.get('rsi_overbought_reason', '')}",
         f"• {analysis.get('horizon', '중기')} — {analysis.get('horizon_reason', '')}",
     ]
 
@@ -717,8 +756,11 @@ def run_daily_screening():
     """일일 자동 스크리닝: 후보 발굴 → AI 분석 → 모드에 따라 자동 편입 or 사용자 승인 요청."""
     from notifications.telegram import send_message, send_message_with_inline_buttons
     from data.db import save_strategy_note
+    from worker.clients.kiwoom_client import KiwoomClient
 
     auto_mode = _is_auto_mode()
+    kiwoom = KiwoomClient()
+    market_text = _build_market_text(kiwoom)
 
     candidates = _screen_candidates()
     if not candidates:
@@ -730,7 +772,12 @@ def run_daily_screening():
     for cand in candidates:
         try:
             logger.info(f"[스크리닝] 분석 중: {cand['stock_name']} ({cand['stock_code']})")
-            analysis = _analyze_candidate(cand["stock_code"], cand["stock_name"])
+            analysis = _analyze_candidate(
+                cand["stock_code"],
+                cand["stock_name"],
+                kiwoom=kiwoom,
+                market_text=market_text,
+            )
 
             if analysis.get("recommendation") != "관심종목 등록":
                 time.sleep(2)

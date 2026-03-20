@@ -141,7 +141,17 @@ def _resolve_stock(name_or_code: str, kiwoom=None) -> tuple[str, str]:
 
 
 class _PendingOrder:
-    def __init__(self, stock_code: str, stock_name: str, order_type: str, qty: int, price_type: str = "market", limit_price: int = 0, signal_id: int | None = None):
+    def __init__(
+        self,
+        stock_code: str,
+        stock_name: str,
+        order_type: str,
+        qty: int,
+        price_type: str = "market",
+        limit_price: int = 0,
+        signal_id: int | None = None,
+        order_market: str | None = None,
+    ):
         self.stock_code = stock_code
         self.stock_name = stock_name
         self.order_type = order_type   # "1"=매수, "2"=매도
@@ -149,6 +159,7 @@ class _PendingOrder:
         self.price_type = price_type   # "market" or "limit"
         self.limit_price = limit_price # 지정가 주문 시 사용자가 입력한 가격
         self.signal_id = signal_id     # 원본 신호 ID (행동 기록용)
+        self.order_market = (order_market or "").strip().upper() or None  # "KRX" | "NXT" | "SOR"
         self.created_at = datetime.now()
 
     @property
@@ -192,6 +203,39 @@ class TelegramBot:
         self._waiting_stock_input: dict | None = None
         # 임계값 수정 대기: {"code": ..., "name": ..., "field": ..., "old": int}
         self._waiting_threshold_edit: dict | None = None
+
+    def _available_order_markets(self) -> list[str]:
+        if self._kiwoom and getattr(self._kiwoom, "_is_mock", False):
+            return ["KRX"]
+        return ["SOR", "KRX", "NXT"]
+
+    def _prompt_market_selection(
+        self,
+        order_action: str,   # "buy" | "sell"
+        price_type: str,     # "market" | "limit"
+        code: str,
+        name: str,
+        signal_id: int | None = None,
+        rec_qty: int | None = None,
+    ) -> None:
+        sid = signal_id if signal_id is not None else 0
+        qty = rec_qty if rec_qty is not None else 0
+        markets = self._available_order_markets()
+        labels = {"SOR": "⚡ SOR", "KRX": "🏛 KRX", "NXT": "🧭 NXT"}
+        row = []
+        for market in markets:
+            row.append({
+                "text": labels.get(market, market),
+                "callback_data": f"pick_market:{order_action}:{price_type}:{code}:{sid}:{market}:{qty}",
+            })
+        row.append({"text": "❌ 취소", "callback_data": "cancel_order"})
+
+        side = "매수" if order_action == "buy" else "매도"
+        ptxt = "시장가" if price_type == "market" else "지정가"
+        self._send(
+            f"*{name}* (`{code}`) {side} ({ptxt})\n주문시장을 선택해 주세요.",
+            reply_markup={"inline_keyboard": [row]},
+        )
 
     # ── Telegram API ───────────────────────────────────────────────────────
 
@@ -359,35 +403,97 @@ class TelegramBot:
                 self._answer_callback(callback_id, "매매 비활성화 상태입니다.")
                 self._send("🔒 매매 실행이 비활성화되어 있습니다.")
                 return
-            order_type = "1" if "buy" in data else "2"
-            side = "매수" if order_type == "1" else "매도"
+            order_action = "buy" if "buy" in data else "sell"
             price_type = "limit" if "limit" in data else "market"
+            side = "매수" if order_action == "buy" else "매도"
+            self._answer_callback(callback_id, f"추천 {rec_qty:,}주 {side} — 주문시장 선택.")
+            self._prompt_market_selection(
+                order_action=order_action,
+                price_type=price_type,
+                code=rec_code,
+                name=rec_name,
+                rec_qty=rec_qty,
+            )
+            return
 
-            if price_type == "market":
-                self._answer_callback(callback_id, f"추천 {rec_qty:,}주 {side} 주문 준비.")
-                self._cmd_order(order_type, rec_code, str(rec_qty), price_type="market")
-            else:
-                # 지정가: 가격만 입력받고 수량은 pre-stored
+        # 주문시장 선택 콜백
+        if data.startswith("pick_market:"):
+            parts_m = data.split(":")
+            if len(parts_m) != 7:
+                self._answer_callback(callback_id)
+                return
+            _, order_action, price_type, code, sid_str, order_market, qty_str = parts_m
+            signal_id = int(sid_str) if sid_str.isdigit() and sid_str != "0" else None
+            pre_qty = int(qty_str) if qty_str.isdigit() and qty_str != "0" else None
+
+            side = "매수" if order_action == "buy" else "매도"
+            order_type = "1" if order_action == "buy" else "2"
+            self._answer_callback(callback_id, f"주문시장 {order_market} 선택됨")
+
+            if price_type == "limit":
+                # 지정가: 먼저 가격 입력, 추천수량이면 qty pre-stored
                 cur_prc = 0
                 if self._kiwoom:
                     try:
-                        pd = self._kiwoom.get_current_price(rec_code)
+                        pd = self._kiwoom.get_current_price(code)
                         cur_prc = abs(int(str(
                             pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
                         ).replace(",", "")))
                     except Exception:
                         pass
                 with self._lock:
-                    self._waiting_price = {"order_type": order_type, "code": rec_code, "name": rec_name, "qty": rec_qty}
+                    self._waiting_price = {
+                        "order_type": order_type,
+                        "code": code,
+                        "name": code,
+                        "qty": pre_qty,
+                        "signal_id": signal_id,
+                        "order_market": order_market,
+                    }
+                qty_hint = f", *{pre_qty:,}주*" if pre_qty else ""
                 price_hint = f" (현재가: {cur_prc:,}원)" if cur_prc else ""
-                self._answer_callback(callback_id, f"{side}(지정가) 가격을 입력해 주세요.")
                 self._send(
-                    f"*{rec_name}* {side} (지정가, *{rec_qty:,}주*) — 주문 가격을 입력해 주세요.{price_hint}\n"
+                    f"`{code}` {side} (지정가{qty_hint}, {order_market}) — 주문 가격을 입력해 주세요.{price_hint}\n"
                     f"(숫자만, 예: `{cur_prc or 50000}`)",
                     reply_markup={"inline_keyboard": [[
                         {"text": "❌ 취소", "callback_data": "cancel_order"},
-                    ]]}
+                    ]]},
                 )
+                return
+
+            # 시장가
+            if pre_qty:
+                self._cmd_order(
+                    order_type,
+                    code,
+                    str(pre_qty),
+                    price_type="market",
+                    signal_id=signal_id,
+                    order_market=order_market,
+                )
+            else:
+                with self._lock:
+                    self._waiting_qty_queue.append({
+                        "action": order_action,
+                        "price_type": "market",
+                        "code": code,
+                        "name": code,
+                        "signal_id": signal_id,
+                        "order_market": order_market,
+                    })
+                    queue_len = len(self._waiting_qty_queue)
+                if queue_len == 1:
+                    self._send(
+                        f"`{code}` {side} (시장가, {order_market}) — 수량을 입력해 주세요.\n(숫자만, 예: `100`)",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "❌ 취소", "callback_data": "cancel_order"},
+                        ]]}
+                    )
+                else:
+                    self._send(
+                        f"`{code}` {side}(시장가, {order_market}) 대기열 추가 ({queue_len}번째)\n"
+                        f"현재 처리 중인 주문 수량 먼저 입력해 주세요."
+                    )
             return
 
         # 임계값 변경 제안 콜백
@@ -502,54 +608,14 @@ class TelegramBot:
             order_action = "buy" if action.startswith("buy") else "sell"
             price_type = "limit" if action.endswith("limit") else "market"
             side = "매수" if order_action == "buy" else "매도"
-
-            if price_type == "limit":
-                # 지정가: 먼저 가격 입력 요청
-                cur_prc = 0
-                if self._kiwoom:
-                    try:
-                        pd = self._kiwoom.get_current_price(code)
-                        cur_prc = abs(int(str(
-                            pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
-                        ).replace(",", "")))
-                    except Exception:
-                        pass
-                with self._lock:
-                    self._waiting_price = {"order_type": "1" if order_action == "buy" else "2",
-                                           "code": code, "name": name, "signal_id": _signal_id}
-                price_hint = f" (현재가: {cur_prc:,}원)" if cur_prc else ""
-                self._answer_callback(callback_id, f"{side}(지정가) 가격을 입력해 주세요.")
-                self._send(
-                    f"*{name}* {side} (지정가) — 주문 가격을 입력해 주세요.{price_hint}\n"
-                    f"(숫자만, 예: `{cur_prc or 50000}`)",
-                    reply_markup={"inline_keyboard": [[
-                        {"text": "❌ 취소", "callback_data": "cancel_order"},
-                    ]]}
-                )
-            else:
-                # 시장가: 수량 입력 요청
-                with self._lock:
-                    self._waiting_qty_queue.append({
-                        "action": order_action,
-                        "price_type": "market",
-                        "code": code,
-                        "name": name,
-                        "signal_id": _signal_id,
-                    })
-                    queue_len = len(self._waiting_qty_queue)
-                self._answer_callback(callback_id, f"{side}(시장가) 수량을 입력해 주세요.")
-                if queue_len == 1:
-                    self._send(
-                        f"*{name}* {side} (시장가) — 수량을 입력해 주세요.\n(숫자만, 예: `100`)",
-                        reply_markup={"inline_keyboard": [[
-                            {"text": "❌ 취소", "callback_data": "cancel_order"},
-                        ]]}
-                    )
-                else:
-                    self._send(
-                        f"*{name}* {side}(시장가) 대기열 추가 ({queue_len}번째)\n"
-                        f"현재 처리 중인 주문 수량 먼저 입력해 주세요."
-                    )
+            self._answer_callback(callback_id, f"{side} 주문시장 선택.")
+            self._prompt_market_selection(
+                order_action=order_action,
+                price_type=price_type,
+                code=code,
+                name=name,
+                signal_id=_signal_id,
+            )
         else:
             self._answer_callback(callback_id)
 
@@ -612,9 +678,14 @@ class TelegramBot:
                 self._waiting_price = None
                 pre_qty = wp.get("qty")  # rec 버튼으로 온 경우 수량 pre-stored
             side = "매수" if wp["order_type"] == "1" else "매도"
+            order_market = wp.get("order_market")
             if pre_qty:
                 # 추천수량 pre-stored → 수량 입력 생략, 바로 주문 확인으로
-                self._cmd_order(wp["order_type"], wp["code"], str(pre_qty), price_type="limit", limit_price=limit_price, signal_id=wp.get("signal_id"))
+                self._cmd_order(
+                    wp["order_type"], wp["code"], str(pre_qty),
+                    price_type="limit", limit_price=limit_price,
+                    signal_id=wp.get("signal_id"), order_market=order_market,
+                )
             else:
                 # 일반 지정가 → 수량 입력 단계로
                 with self._lock:
@@ -624,9 +695,11 @@ class TelegramBot:
                         "limit_price": limit_price,
                         "code": wp["code"],
                         "name": wp["name"],
+                        "signal_id": wp.get("signal_id"),
+                        "order_market": order_market,
                     })
                 self._send(
-                    f"*{wp['name']}* {side} (지정가 {limit_price:,}원) — 수량을 입력해 주세요.\n"
+                    f"*{wp['name']}* {side} (지정가 {limit_price:,}원, {order_market or '기본'}) — 수량을 입력해 주세요.\n"
                     f"(숫자만, 예: `100`)",
                     reply_markup={"inline_keyboard": [[
                         {"text": "❌ 취소", "callback_data": "cancel_order"},
@@ -646,14 +719,19 @@ class TelegramBot:
             price_type = wq.get("price_type", "market")
 
             limit_price = wq.get("limit_price", 0)
-            self._cmd_order(order_type, wq["code"], str(qty), price_type=price_type, limit_price=limit_price, signal_id=wq.get("signal_id"))
+            self._cmd_order(
+                order_type, wq["code"], str(qty),
+                price_type=price_type, limit_price=limit_price,
+                signal_id=wq.get("signal_id"), order_market=wq.get("order_market"),
+            )
             if remaining:
                 next_wq = remaining[0]
                 next_side = "매수" if next_wq["action"] == "buy" else "매도"
                 next_price = "지정가" if next_wq.get("price_type") == "limit" else "시장가"
+                next_market = next_wq.get("order_market", "기본")
                 self._send(
                     f"📋 대기 중인 주문 {len(remaining)}건\n"
-                    f"다음: *{next_wq['name']}* {next_side}({next_price}) — 수량을 입력해 주세요."
+                    f"다음: *{next_wq['name']}* {next_side}({next_price}, {next_market}) — 수량을 입력해 주세요."
                 )
             return
 
@@ -792,12 +870,22 @@ class TelegramBot:
         self._send(
             f"⏳ *대기 중인 주문*\n\n"
             f"종목: *{order.stock_name}* (`{order.stock_code}`)\n"
-            f"수량: *{order.qty:,}주* ({order.side_label} 시장가)\n"
+            f"수량: *{order.qty:,}주* ({order.side_label} {order.price_type})\n"
+            f"주문시장: *{order.order_market or '기본'}*\n"
             f"남은 시간: *{remaining}초*\n\n"
             f"✅ `/confirm` — 실행 | ❌ `/cancel` — 취소"
         )
 
-    def _cmd_order(self, order_type: str, name_or_code: str, qty_str: str, price_type: str = "market", limit_price: int = 0, signal_id: int | None = None) -> None:
+    def _cmd_order(
+        self,
+        order_type: str,
+        name_or_code: str,
+        qty_str: str,
+        price_type: str = "market",
+        limit_price: int = 0,
+        signal_id: int | None = None,
+        order_market: str | None = None,
+    ) -> None:
         if not ALLOW_TRADE:
             self._send(
                 "🔒 매매 실행이 비활성화되어 있습니다.\n"
@@ -820,6 +908,7 @@ class TelegramBot:
             return
 
         side = "매수" if order_type == "1" else "매도"
+        market_label = (order_market or "기본").upper()
 
         # 현재가 조회 → 예상 총액 (종목명 보정용으로도 사용)
         cur_prc = 0
@@ -878,7 +967,11 @@ class TelegramBot:
                 pass
 
         with self._lock:
-            self._pending = _PendingOrder(code, stock_name, order_type, qty, price_type=price_type, limit_price=exec_prc, signal_id=signal_id)
+            self._pending = _PendingOrder(
+                code, stock_name, order_type, qty,
+                price_type=price_type, limit_price=exec_prc,
+                signal_id=signal_id, order_market=order_market,
+            )
 
         confirm_markup = {
             "inline_keyboard": [[
@@ -889,7 +982,8 @@ class TelegramBot:
         self._send(
             f"⚠️ *{side} 주문 최종 확인*\n\n"
             f"종목: *{stock_name}* (`{code}`)\n"
-            f"수량: *{qty:,}주* ({price_label})"
+            f"수량: *{qty:,}주* ({price_label})\n"
+            f"주문시장: *{market_label}*"
             f"{total_line}"
             f"{deposit_line}\n\n"
             f"⏱ {CONFIRM_TIMEOUT_SEC}초 내에 확인하세요.",
@@ -928,15 +1022,22 @@ class TelegramBot:
                 logger.warning("[bot] 지정가 주문인데 limit_price=0 — 시장가로 대신 실행")
                 self._send("⚠️ 지정가 정보 없음 — 시장가로 대신 실행합니다.")
 
-        self._send(f"⏳ *{order.stock_name}* {order.qty:,}주 {order.side_label} ({price_label}) 주문 전송 중...")
+        self._send(
+            f"⏳ *{order.stock_name}* {order.qty:,}주 {order.side_label} "
+            f"({price_label}, {order.order_market or '기본'}) 주문 전송 중..."
+        )
 
         try:
-            result = self._kiwoom.place_order(order.stock_code, order.order_type, order.qty, price=exec_price)
+            result = self._kiwoom.place_order(
+                order.stock_code, order.order_type, order.qty,
+                price=exec_price, order_market=order.order_market,
+            )
             ord_no = result.get("ord_no") or result.get("order_no") or "-"
             self._send(
                 f"✅ *{order.side_label} 주문 접수 완료*\n\n"
                 f"종목: *{order.stock_name}* (`{order.stock_code}`)\n"
                 f"수량: *{order.qty:,}주* ({price_label})\n"
+                f"주문시장: *{order.order_market or '기본'}*\n"
                 f"주문번호: `{ord_no}`"
             )
             logger.info(f"[bot] {order.side_label} 주문 완료: {order.stock_name} {order.qty}주 → 주문번호 {ord_no}")

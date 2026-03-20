@@ -316,25 +316,35 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
         return
 
     qty = None
+    order_market = None
     for line in claude_opinion.splitlines():
         if line.strip().startswith("[추천수량]"):
             m = re.search(r"(\d+)\s*주", line)
             if m:
                 qty = int(m.group(1))
                 break
+    for line in claude_opinion.splitlines():
+        if line.strip().startswith("[주문시장]"):
+            m = re.search(r"(KRX|NXT|SOR)", line.upper())
+            if m:
+                order_market = m.group(1)
+            break
 
     if not qty:
         logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
         return
 
     try:
-        result = kiwoom.place_order(signal.stock_code, order_type, qty)
+        result = kiwoom.place_order(signal.stock_code, order_type, qty, order_market=order_market)
         ord_no = result.get("ord_no") or result.get("order_no") or "-"
-        logger.info(f"[{signal.stock_name}] 자동 {side}: {qty}주, 주문번호 {ord_no}")
+        logger.info(
+            f"[{signal.stock_name}] 자동 {side}: {qty}주, 주문시장 {order_market or '기본값'}, 주문번호 {ord_no}"
+        )
         send_message(
             f"🤖 *자동 {side} 주문 접수*\n"
             f"종목: *{signal.stock_name}* (`{signal.stock_code}`)\n"
             f"수량: *{qty:,}주* (시장가)\n"
+            f"주문시장: *{order_market or '기본값'}*\n"
             f"주문번호: `{ord_no}`"
         )
         from data.db import reset_cooldowns_for_stock, update_signal_action, save_strategy_note, set_add_cooldown_after_trade
