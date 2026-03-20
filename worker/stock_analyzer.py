@@ -815,6 +815,13 @@ def run_daily_screening():
                 kiwoom=kiwoom,
                 market_text=market_text,
             )
+            rec = analysis.get("recommendation", "분석 실패")
+            rr = analysis.get("rr_ratio", "N/A")
+            reason = str(analysis.get("reason", "") or "").replace("\n", " ").strip()
+            logger.info(
+                f"[스크리닝] 분석 결과: {cand['stock_name']} ({cand['stock_code']}) "
+                f"→ {rec} (R/R={rr}) 사유: {reason[:140]}"
+            )
 
             if analysis.get("recommendation") != "관심종목 등록":
                 time.sleep(2)
