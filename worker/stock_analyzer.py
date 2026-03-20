@@ -147,7 +147,23 @@ def _screen_candidates() -> list[dict]:
 
     # 4. HTS 조건검색 (ka10171 → ka10172, WebSocket)
     try:
+        logger.info("[추천스캔][HTS] 조건검색 호출 시작 (ka10171 -> ka10172)")
         cond_stocks = kiwoom.run_all_quant_conditions()
+        logger.info(f"[추천스캔][HTS] 조건검색 반환 종목 수: {len(cond_stocks)}")
+        if cond_stocks:
+            source_names = sorted(
+                {
+                    str(item.get("source", "")).replace("조건검색:", "").strip()
+                    for item in cond_stocks
+                    if item.get("source")
+                }
+            )
+            logger.info(
+                f"[추천스캔][HTS] 사용된 조건식 수: {len(source_names)} "
+                f"(샘플: {', '.join(source_names[:5])})"
+            )
+        else:
+            logger.warning("[추천스캔][HTS] 조건검색 결과가 0건입니다.")
         for item in cond_stocks:
             code = item["stock_code"]
             if code not in existing_codes and not any(c["stock_code"] == code for c in candidates):
@@ -283,7 +299,23 @@ def run_intraday_scan():
 
     # 2. HTS 조건검색 (퀀트_ 전체)
     try:
+        logger.info("[장중스캔][HTS] 조건검색 호출 시작 (ka10171 -> ka10172)")
         cond_stocks = kiwoom.run_all_quant_conditions()
+        logger.info(f"[장중스캔][HTS] 조건검색 반환 종목 수: {len(cond_stocks)}")
+        if cond_stocks:
+            source_names = sorted(
+                {
+                    str(item.get("source", "")).replace("조건검색:", "").strip()
+                    for item in cond_stocks
+                    if item.get("source")
+                }
+            )
+            logger.info(
+                f"[장중스캔][HTS] 사용된 조건식 수: {len(source_names)} "
+                f"(샘플: {', '.join(source_names[:5])})"
+            )
+        else:
+            logger.warning("[장중스캔][HTS] 조건검색 결과가 0건입니다.")
         for item in cond_stocks:
             code = item["stock_code"]
             if code not in existing_codes and code not in seen_codes:
