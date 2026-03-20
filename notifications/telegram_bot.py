@@ -754,7 +754,7 @@ class TelegramBot:
             "`/price 종목명or코드` — 현재가 조회\n"
             "`/balance` — 잔고 및 보유 종목 조회\n\n"
             "💡 종목명 전체 검색 가능 (부분 일치 지원)\n"
-            f"🔒 매매 실행: {'*활성화*' if ALLOW_TRADE else '*비활성화* (KIWOOM\\_ALLOW\\_TRADE\\_EXECUTION=true 필요)'}"
+            "🔒 매매 실행: " + ("*활성화*" if ALLOW_TRADE else "*비활성화* (KIWOOM\\_ALLOW\\_TRADE\\_EXECUTION=true 필요)")
         )
 
     def _cmd_status(self) -> None:
