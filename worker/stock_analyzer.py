@@ -56,6 +56,46 @@ def _build_market_text(kiwoom) -> str:
         return "시장 지수 조회 실패"
 
 
+def _extract_json_block(text: str) -> str | None:
+    """응답 텍스트에서 recommendation 키가 포함된 첫 JSON 객체 블록 추출."""
+    m = re.search(r'\{.*"recommendation".*\}', text, re.DOTALL)
+    if not m:
+        return None
+    chunk = text[m.start():]
+    depth = 0
+    for i, ch in enumerate(chunk):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        if depth == 0:
+            return chunk[: i + 1]
+    return m.group()
+
+
+def _repair_screening_json(raw_text: str) -> str:
+    """파싱 실패 시 LLM에게 JSON 정규화 재요청."""
+    repair_prompt = (
+        "아래 텍스트를 JSON 객체 1개로만 정규화해서 반환해.\n"
+        "설명/코드블록/주석 없이 순수 JSON만 출력.\n"
+        "키 이름은 유지하고, 잘못된 따옴표/쉼표/중괄호를 고쳐.\n\n"
+        f"{raw_text}"
+    )
+    if _AI_BACKEND == "anthropic":
+        response = _ai_client.messages.create(
+            model=_AI_MODEL,
+            max_tokens=1200,
+            messages=[{"role": "user", "content": repair_prompt}],
+        )
+        return response.content[0].text
+    response = _ai_client.chat.completions.create(
+        model=_AI_MODEL,
+        max_tokens=1200,
+        messages=[{"role": "user", "content": repair_prompt}],
+    )
+    return response.choices[0].message.content or ""
+
+
 # ═══════════════════════════ 후보 수집 ═══════════════════════════
 
 def _screen_candidates() -> list[dict]:
@@ -589,20 +629,17 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
             )
             ai_text = response.choices[0].message.content
 
-        # 중첩 JSON (enabled_conditions) 파싱을 위해 전체 JSON 블록 추출
-        json_match = re.search(r'\{.*"recommendation".*\}', ai_text, re.DOTALL)
-        if json_match:
-            # 중첩 브레이스 매칭
-            text = ai_text[json_match.start():]
-            depth = 0
-            end = 0
-            for i, ch in enumerate(text):
-                if ch == '{': depth += 1
-                elif ch == '}': depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-            result = json.loads(text[:end]) if end else json.loads(json_match.group())
+        # 중첩 JSON(enabled_conditions) 포함 응답 파싱
+        json_text = _extract_json_block(ai_text)
+        if json_text:
+            try:
+                result = json.loads(json_text)
+            except Exception:
+                # 1차 파싱 실패 시 JSON 정규화 재요청 후 재시도
+                repaired = _repair_screening_json(ai_text)
+                repaired_block = _extract_json_block(repaired) or repaired.strip()
+                result = json.loads(repaired_block)
+
             # R/R 2:1 미만이면 관심종목 등록 → 보류로 강제 변환
             rr = result.get("rr_ratio", 0)
             if result.get("recommendation") == "관심종목 등록" and rr and float(rr) < 2.0:
