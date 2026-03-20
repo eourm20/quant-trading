@@ -233,7 +233,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom) -> list[dict]:
                     continue
 
             passed.append(cand)
-            time.sleep(0.3)  # API rate limit
+            time.sleep(1)  # API rate limit (429 방지)
 
         except Exception as e:
             logger.debug(f"[프리필터] {cand['stock_name']}: 조회 실패 ({e}) → 유지")
