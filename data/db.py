@@ -67,6 +67,10 @@ def init_db():
             conn.execute("ALTER TABLE conditions_def ADD COLUMN signal_type TEXT NOT NULL DEFAULT 'both'")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN horizon TEXT NOT NULL DEFAULT '중기'")
+        except Exception:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,8 +85,22 @@ def init_db():
                 in_portfolio INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # signals id를 0부터 시작 (신규 DB 또는 시퀀스 미초기화 시에만 적용)
+        conn.execute("INSERT OR IGNORE INTO sqlite_sequence (name, seq) VALUES ('signals', -1)")
         try:
             conn.execute("ALTER TABLE signals ADD COLUMN in_portfolio INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN action TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN result_pct REAL DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN signal_type TEXT DEFAULT NULL")
         except Exception:
             pass
         conn.execute("""
@@ -129,8 +147,35 @@ def init_db():
         """)
         conn.commit()
     _migrate_yaml_to_db()
+    _ensure_conditions()
     _populate_descriptions()
     _migrate_cooldown_minutes()
+
+
+def _ensure_conditions():
+    """conditions.yaml 자동마이그레이션이 안 되는 신규 조건을 직접 INSERT OR IGNORE."""
+    new_conditions = [
+        {
+            "id": "rsi_oversold_intraday",
+            "name": "RSI 과매도 (5분봉)",
+            "evaluator": "rsi_lte_intraday",
+            "param": "rsi_oversold_intraday",
+            "cooldown_minutes": 60,
+            "message": "RSI 5분봉 과매도 ({rsi_intraday:.1f} <= {threshold})",
+            "chart_field": None,
+            "sort_order": 4,
+        },
+    ]
+    with get_conn() as conn:
+        for c in new_conditions:
+            conn.execute(
+                "INSERT OR IGNORE INTO conditions_def "
+                "(id, name, evaluator, param, cooldown_minutes, message, chart_field, sort_order) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (c["id"], c["name"], c["evaluator"], c["param"],
+                 c["cooldown_minutes"], c["message"], c["chart_field"], c["sort_order"])
+            )
+        conn.commit()
 
 
 def _migrate_yaml_to_db():
@@ -182,7 +227,8 @@ _CONDITION_SIGNAL_TYPES = {
     "ma20_support_break":    "exit",
     "macd_death_cross":      "exit",
     # entry: 미보유 종목 매수 타이밍 조건
-    "rsi_oversold":          "entry",
+    "rsi_oversold":             "entry",
+    "rsi_oversold_intraday":    "entry",
     "golden_cross":          "entry",
     "ma5_recovery":          "entry",
     "macd_golden_cross":     "entry",
@@ -201,7 +247,8 @@ _CONDITION_DESCRIPTIONS = {
     "target_price":        "설정한 목표 주가에 도달했을 때 발생. 익절 타이밍 신호. 목표가 이상이면 트리거.",
     "stop_loss_price":     "설정한 손절 주가 이하로 떨어졌을 때 발생. 손실 확대 방지 신호. 손절가 이하면 트리거.",
     "rsi_overbought":      "RSI(상대강도지수)가 과매수 기준(보통 70) 이상일 때. 단기 고점 도달 가능성. 매도 검토 신호.",
-    "rsi_oversold":        "RSI가 과매도 기준(보통 30) 이하일 때. 단기 저점 도달 가능성. 반등 매수 검토 신호.",
+    "rsi_oversold":            "일봉 RSI(14일)가 과매도 기준(종목별 38~43) 이하일 때. 스윙 매수 진입 타이밍 신호.",
+    "rsi_oversold_intraday":   "5분봉 RSI(14기간)가 과매도 기준(종목별 30~35) 이하일 때. 단기 종목 당일 급락 감지 신호.",
     "volume_surge_ratio":  "오늘 거래량이 최근 20일 평균 거래량 대비 N배 이상일 때. 세력 개입, 뉴스/공시 등 이슈 발생 가능성 신호.",
     "golden_cross":        "단기 이동평균(MA5)이 장기 이동평균(MA20)을 아래에서 위로 돌파하는 순간. 중기 상승 추세 전환 신호.",
     "death_cross":         "단기 이동평균(MA5)이 장기 이동평균(MA20)을 위에서 아래로 돌파하는 순간. 중기 하락 추세 전환 신호.",
@@ -251,6 +298,7 @@ def _migrate_cooldown_minutes():
         (240, "ma5_recovery_add"),
         (5,   "rsi_critical"),
         (5,   "bollinger_critical_below"),
+        (60,  "rsi_oversold_intraday"),
     ]
     with get_conn() as conn:
         for minutes, cid in updates:
@@ -291,7 +339,7 @@ def update_stock_field(code: str, field: str, value) -> bool:
         row = conn.execute("SELECT * FROM watchlist WHERE code = ?", (code,)).fetchone()
         if not row:
             return False
-        if field in ("name", "enabled"):
+        if field in ("name", "enabled", "horizon"):
             conn.execute(f"UPDATE watchlist SET {field} = ? WHERE code = ?", (value, code))
         else:
             cond = json.loads(row["conditions"])
@@ -460,6 +508,21 @@ def get_trades(limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_recent_trades_for_stock(stock_code: str, days: int = 3) -> list[dict]:
+    """특정 종목의 최근 N일 매매 이력 조회 (최신순)"""
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE stock_code = ? AND executed_at >= ? ORDER BY executed_at DESC",
+                (stock_code, cutoff),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+
 # ── 전략 노트 ──────────────────────────────────────────────────────────────
 
 def save_strategy_note(category: str, summary: str, detail: str = ""):
@@ -588,6 +651,40 @@ def reset_all_cooldowns() -> int:
     return cur.rowcount
 
 
+def reset_cooldowns_for_stock(stock_code: str) -> int:
+    """매매 체결 후 해당 종목의 쿨다운 전체 삭제. 반환: 삭제된 항목 수."""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM cooldowns WHERE key LIKE ?", (f"{stock_code}:%",))
+        conn.commit()
+    return cur.rowcount
+
+
+def set_add_cooldown_after_trade(stock_code: str, suppress_minutes: int = 60) -> int:
+    """매수 체결 후 add/both 조건 신호를 suppress_minutes 동안 억제.
+    last_sent_at = (now + suppress_minutes) - cooldown_minutes
+    → 해당 조건의 다음 발동 시각이 now + suppress_minutes가 되도록 설정.
+    반환: 억제 설정된 조건 수.
+    """
+    from datetime import timedelta
+    cond_map = {c["id"]: c.get("cooldown_minutes", 60) for c in get_conditions()
+                if c.get("signal_type") in ("add", "both")}
+    now = datetime.now()
+    count = 0
+    with get_conn() as conn:
+        for cond_id, cooldown_minutes in cond_map.items():
+            key = f"{stock_code}:{cond_id}"
+            # last_sent_at을 설정해 suppress_minutes 후에 다시 발동하도록 함
+            effective_last = now + timedelta(minutes=suppress_minutes - cooldown_minutes)
+            conn.execute(
+                "INSERT INTO cooldowns (key, last_sent_at) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+                (key, effective_last.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            count += 1
+        conn.commit()
+    return count
+
+
 def shorten_cooldowns_for_stock(stock_code: str, ratio: float = 0.25, min_minutes: int = 30) -> int:
     """홀드 결정 후 해당 종목의 남은 쿨다운을 원래의 ratio 비율로 단축.
     예: 원래 120분 쿨다운 → 30분 후 재알림 (ratio=0.25, min=30)
@@ -618,14 +715,15 @@ def shorten_cooldowns_for_stock(stock_code: str, ratio: float = 0.25, min_minute
     return count
 
 
-def save_signal(signal, claude_opinion: str | None = None, in_portfolio: bool = False):
+def save_signal(signal, claude_opinion: str | None = None, in_portfolio: bool = False) -> int:
+    """신호 저장 후 signal_id 반환."""
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO signals
                 (created_at, stock_code, stock_name, current_price,
-                 triggered_conditions, rsi, volume_ratio, claude_opinion, in_portfolio)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 triggered_conditions, rsi, volume_ratio, claude_opinion, in_portfolio, signal_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -637,9 +735,69 @@ def save_signal(signal, claude_opinion: str | None = None, in_portfolio: bool = 
                 signal.volume_ratio,
                 claude_opinion,
                 int(in_portfolio),
+                getattr(signal, "signal_type", None) or None,
             ),
         )
         conn.commit()
+        return cur.lastrowid
+
+
+def update_signal_result(signal_id: int, result_pct: float) -> bool:
+    """신호 발생 후 N일 결과 수익률 업데이트."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE signals SET result_pct = ? WHERE id = ?", (result_pct, signal_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def get_signal_history(stock_code: str, signal_type: str = "", limit: int = 5) -> list[dict]:
+    """해당 종목의 과거 AI 판단 이력 (결과 수익률 포함, 최신순).
+    signal_type 지정 시 해당 타입만 조회.
+    """
+    with get_conn() as conn:
+        if signal_type:
+            rows = conn.execute(
+                "SELECT created_at, current_price, claude_opinion, action, result_pct "
+                "FROM signals WHERE stock_code = ? AND claude_opinion IS NOT NULL "
+                "AND signal_type = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (stock_code, signal_type, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT created_at, current_price, claude_opinion, action, result_pct "
+                "FROM signals WHERE stock_code = ? AND claude_opinion IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT ?",
+                (stock_code, limit),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_signal_action(signal_id: int, action: str) -> bool:
+    """신호에 대한 사용자 행동 기록 (매수/매도/홀드)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE signals SET action = ? WHERE id = ?", (action, signal_id)
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def get_last_signal_date(stock_code: str) -> datetime | None:
+    """해당 종목의 가장 최근 신호 발생 일시. 없으면 None."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(created_at) as last FROM signals WHERE stock_code = ?",
+            (stock_code,),
+        ).fetchone()
+    if row and row["last"]:
+        try:
+            return datetime.fromisoformat(row["last"])
+        except ValueError:
+            return None
+    return None
 
 
 def get_today_signals() -> list[dict]:

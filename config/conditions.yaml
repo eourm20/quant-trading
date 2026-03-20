@@ -27,6 +27,15 @@ conditions:
     cooldown_minutes: 60
     message: "RSI 과매도 ({rsi:.1f} <= {threshold})"
 
+  - id: rsi_oversold_intraday
+    name: RSI 과매도 (5분봉)
+    evaluator: rsi_lte_intraday
+    param: rsi_oversold_intraday
+    cooldown_minutes: 60
+    message: "RSI 5분봉 과매도 ({rsi_intraday:.1f} <= {threshold})"
+    # 단기(horizon=단기) 종목에만 평가됨 — 5분봉 RSI 14기간
+
+
   - id: volume_surge_ratio
     name: 거래량 급증
     evaluator: volume_gte
@@ -113,3 +122,87 @@ conditions:
     chart_field: bollinger_below_lower
     cooldown_minutes: 120
     message: "볼린저 하단 이탈 ({price:,}원 < 하단 {lower:,}원)"
+
+  # ── 스토캐스틱 ──
+
+  - id: stochastic_golden_cross
+    name: 스토캐스틱 골든크로스
+    evaluator: flag
+    param: stochastic_golden_cross
+    chart_field: stochastic_golden_cross
+    cooldown_minutes: 1440
+    signal_type: entry
+    description: "%K가 %D를 상향 돌파 (과매도 구간에서 더 강력)"
+    message: "스토캐스틱 골든크로스 (%K {stoch_k:.0f} > %D {stoch_d:.0f})"
+
+  - id: stochastic_death_cross
+    name: 스토캐스틱 데드크로스
+    evaluator: flag
+    param: stochastic_death_cross
+    chart_field: stochastic_death_cross
+    cooldown_minutes: 1440
+    signal_type: exit
+    description: "%K가 %D를 하향 돌파 (과매수 구간에서 더 강력)"
+    message: "스토캐스틱 데드크로스 (%K {stoch_k:.0f} < %D {stoch_d:.0f})"
+
+  # ── CCI ──
+
+  - id: cci_oversold
+    name: CCI 과매도
+    evaluator: cci_lte
+    param: cci_oversold
+    cooldown_minutes: 120
+    signal_type: entry
+    description: "CCI가 -100 이하로 진입 (과매도 → 반등 가능)"
+    message: "CCI 과매도 ({cci:.0f} <= {threshold})"
+
+  - id: cci_overbought
+    name: CCI 과매수
+    evaluator: cci_gte
+    param: cci_overbought
+    cooldown_minutes: 120
+    signal_type: exit
+    description: "CCI가 +100 이상으로 진입 (과매수 → 조정 가능)"
+    message: "CCI 과매수 ({cci:.0f} >= {threshold})"
+
+  # ── 일목균형표 ──
+
+  - id: ichimoku_golden_cross
+    name: 일목 전환선 골든크로스
+    evaluator: flag
+    param: ichimoku_golden_cross
+    chart_field: ichimoku_tenkan_golden
+    cooldown_minutes: 1440
+    signal_type: entry
+    description: "전환선(9일)이 기준선(26일) 상향 돌파 → 매수 신호"
+    message: "일목균형표 전환선 골든크로스"
+
+  - id: ichimoku_death_cross
+    name: 일목 전환선 데드크로스
+    evaluator: flag
+    param: ichimoku_death_cross
+    chart_field: ichimoku_tenkan_dead
+    cooldown_minutes: 1440
+    signal_type: exit
+    description: "전환선(9일)이 기준선(26일) 하향 돌파 → 매도 신호"
+    message: "일목균형표 전환선 데드크로스"
+
+  - id: ichimoku_cloud_breakout
+    name: 일목 구름대 돌파
+    evaluator: flag
+    param: ichimoku_cloud_breakout
+    chart_field: ichimoku_above_cloud
+    cooldown_minutes: 1440
+    signal_type: entry
+    description: "가격이 구름대 위로 돌파 → 상승 추세 전환"
+    message: "일목균형표 구름대 돌파 ({price:,}원)"
+
+  - id: ichimoku_cloud_breakdown
+    name: 일목 구름대 이탈
+    evaluator: flag
+    param: ichimoku_cloud_breakdown
+    chart_field: ichimoku_below_cloud
+    cooldown_minutes: 1440
+    signal_type: exit
+    description: "가격이 구름대 아래로 이탈 → 하락 추세 전환"
+    message: "일목균형표 구름대 이탈 ({price:,}원)"

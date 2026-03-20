@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from worker.kiwoom_client import KiwoomClient
+from worker.clients.kiwoom_client import KiwoomClient
 from data.db import upsert_portfolio, upsert_trades, get_portfolio_updated_at
 
 logger = logging.getLogger(__name__)

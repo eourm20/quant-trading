@@ -111,6 +111,25 @@ class KiwoomClient:
         rows = payload.get("stk_dt_pole_chart_qry", [])
         return rows[:period]
 
+    def get_intraday_ohlcv(self, stock_code: str, tic_scope: str = "5", period: int = 30) -> list[dict]:
+        """분봉 데이터 조회 (ka10080 주식분봉차트)
+        tic_scope: 분 단위 ("1", "3", "5", "10", "15", "30", "60")
+        period: 최대 조회 봉 수
+        반환: 최신순 정렬된 분봉 리스트 (cur_prc 필드 사용)
+        """
+        today = datetime.now(tz=KST).strftime("%Y%m%d")
+        payload = self._post(
+            "/api/dostk/chart",
+            "ka10080",
+            {
+                "stk_cd": stock_code,
+                "tic_scope": tic_scope,
+                "base_dt": today,
+            },
+        )
+        rows = payload.get("stk_mnt_pole_chart_qry", [])
+        return rows[:period]
+
     def get_holdings(self) -> list[dict]:
         """보유 종목 조회 (kt00018 계좌평가잔고내역요청)"""
         payload = self._post(

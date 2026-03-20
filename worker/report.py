@@ -108,7 +108,7 @@ def report_strategy(limit: int = 10) -> str:
     if not notes:
         return "📭 전략 노트 없음"
 
-    emoji_map = {"trade": "💼", "watchlist": "⚙️", "general": "📋"}
+    emoji_map = {"trade": "💼", "watchlist": "⚙️", "general": "📋", "daily_review": "📅"}
     lines = [f"📋 전략 노트 (최근 {len(notes)}건)\n"]
     for n in notes:
         emoji = emoji_map.get(n["category"], "📌")

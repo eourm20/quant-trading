@@ -141,13 +141,14 @@ def _resolve_stock(name_or_code: str, kiwoom=None) -> tuple[str, str]:
 
 
 class _PendingOrder:
-    def __init__(self, stock_code: str, stock_name: str, order_type: str, qty: int, price_type: str = "market", limit_price: int = 0):
+    def __init__(self, stock_code: str, stock_name: str, order_type: str, qty: int, price_type: str = "market", limit_price: int = 0, signal_id: int | None = None):
         self.stock_code = stock_code
         self.stock_name = stock_name
         self.order_type = order_type   # "1"=매수, "2"=매도
         self.qty = qty
         self.price_type = price_type   # "market" or "limit"
         self.limit_price = limit_price # 지정가 주문 시 사용자가 입력한 가격
+        self.signal_id = signal_id     # 원본 신호 ID (행동 기록용)
         self.created_at = datetime.now()
 
     @property
@@ -157,6 +158,23 @@ class _PendingOrder:
     @property
     def side_label(self) -> str:
         return "매수" if self.order_type == "1" else "매도"
+
+
+# 임계값 변경 제안 상태: key=stock_code, value={msg_id, stock_name, condition_text, pending}
+_threshold_proposals: dict[str, dict] = {}
+
+
+def store_threshold_proposal(
+    stock_code: str, msg_id: int, stock_name: str,
+    condition_text: str, changes: list[dict],
+) -> None:
+    """main.py에서 제안 발송 후 상태 저장."""
+    _threshold_proposals[stock_code] = {
+        "msg_id": msg_id,
+        "stock_name": stock_name,
+        "condition_text": condition_text,
+        "pending": [dict(c) for c in changes],
+    }
 
 
 class TelegramBot:
@@ -172,6 +190,8 @@ class TelegramBot:
         self._waiting_price: dict | None = None
         # 명령어 인자 없이 입력 시 종목명 대기 상태: {"cmd": "buy"/"sell"/"price"}
         self._waiting_stock_input: dict | None = None
+        # 임계값 수정 대기: {"code": ..., "name": ..., "field": ..., "old": int}
+        self._waiting_threshold_edit: dict | None = None
 
     # ── Telegram API ───────────────────────────────────────────────────────
 
@@ -275,10 +295,34 @@ class TelegramBot:
         except Exception:
             pass
 
+    def _update_threshold_keyboard(self, stock_code: str, done_field: str) -> None:
+        """처리된 필드를 제거하고 남은 필드로 키보드 업데이트."""
+        proposal = _threshold_proposals.get(stock_code)
+        if not proposal:
+            return
+        proposal["pending"] = [c for c in proposal["pending"] if c["field"] != done_field]
+        msg_id = proposal["msg_id"]
+        if not proposal["pending"]:
+            _threshold_proposals.pop(stock_code, None)
+            self._remove_inline_keyboard(msg_id)
+            return
+        from notifications.telegram import _build_threshold_keyboard
+        keyboard = _build_threshold_keyboard(stock_code, proposal["pending"])
+        try:
+            self._client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
+                json={"chat_id": CHAT_ID, "message_id": msg_id,
+                      "reply_markup": {"inline_keyboard": keyboard}},
+                timeout=5,
+            )
+        except Exception:
+            pass
+
     def _handle_callback(self, callback_id: str, data: str, message_id: int | None = None) -> None:
         """인라인 버튼 클릭 처리."""
-        # 버튼 클릭 즉시 키보드 제거 (중복 클릭 방지)
-        if message_id:
+        # th_* 콜백은 필드별 키보드 업데이트로 처리 (전체 제거 X)
+        is_threshold = data.startswith(("th_apply:", "th_reject:", "th_edit:", "th_reject_all:"))
+        if message_id and not is_threshold:
             self._remove_inline_keyboard(message_id)
 
         # 주문 실행/취소 콜백
@@ -299,20 +343,139 @@ class TelegramBot:
             self._cmd_cancel()
             return
 
-        parts = data.split(":", 2)
+        # 추천수량 버튼: rec_buy_market / rec_sell_market / rec_buy_limit / rec_sell_limit
+        if data.startswith(("rec_buy_market:", "rec_sell_market:", "rec_buy_limit:", "rec_sell_limit:")):
+            rec_parts = data.split(":", 3)
+            if len(rec_parts) != 4:
+                self._answer_callback(callback_id)
+                return
+            _, rec_qty_str, rec_code, rec_name = rec_parts
+            try:
+                rec_qty = int(rec_qty_str)
+            except ValueError:
+                self._answer_callback(callback_id)
+                return
+            if not ALLOW_TRADE:
+                self._answer_callback(callback_id, "매매 비활성화 상태입니다.")
+                self._send("🔒 매매 실행이 비활성화되어 있습니다.")
+                return
+            order_type = "1" if "buy" in data else "2"
+            side = "매수" if order_type == "1" else "매도"
+            price_type = "limit" if "limit" in data else "market"
+
+            if price_type == "market":
+                self._answer_callback(callback_id, f"추천 {rec_qty:,}주 {side} 주문 준비.")
+                self._cmd_order(order_type, rec_code, str(rec_qty), price_type="market")
+            else:
+                # 지정가: 가격만 입력받고 수량은 pre-stored
+                cur_prc = 0
+                if self._kiwoom:
+                    try:
+                        pd = self._kiwoom.get_current_price(rec_code)
+                        cur_prc = abs(int(str(
+                            pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
+                        ).replace(",", "")))
+                    except Exception:
+                        pass
+                with self._lock:
+                    self._waiting_price = {"order_type": order_type, "code": rec_code, "name": rec_name, "qty": rec_qty}
+                price_hint = f" (현재가: {cur_prc:,}원)" if cur_prc else ""
+                self._answer_callback(callback_id, f"{side}(지정가) 가격을 입력해 주세요.")
+                self._send(
+                    f"*{rec_name}* {side} (지정가, *{rec_qty:,}주*) — 주문 가격을 입력해 주세요.{price_hint}\n"
+                    f"(숫자만, 예: `{cur_prc or 50000}`)",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "❌ 취소", "callback_data": "cancel_order"},
+                    ]]}
+                )
+            return
+
+        # 임계값 변경 제안 콜백
+        if data.startswith("th_apply:"):
+            _, code, field, new_val_str = data.split(":", 3)
+            try:
+                new_val = float(new_val_str) if "." in new_val_str else int(new_val_str)
+            except ValueError:
+                self._answer_callback(callback_id, "값 파싱 오류")
+                return
+            self._apply_threshold_change(callback_id, code, field, new_val)
+            self._update_threshold_keyboard(code, field)
+            return
+
+        if data.startswith("th_edit:"):
+            parts_th = data.split(":", 3)
+            if len(parts_th) != 4:
+                self._answer_callback(callback_id)
+                return
+            _, code, field, old_val_str = parts_th
+            try:
+                old_val = int(old_val_str)
+            except ValueError:
+                old_val = 0
+            from data.db import get_watchlist
+            stock_name = next((s["name"] for s in get_watchlist() if s["code"] == code), code)
+            from notifications.telegram import _FIELD_LABELS
+            label = _FIELD_LABELS.get(field, field)
+            with self._lock:
+                self._waiting_threshold_edit = {"code": code, "name": stock_name, "field": field, "old": old_val}
+            self._answer_callback(callback_id, f"{label} 새 값을 입력하세요.")
+            self._send(
+                f"*{stock_name}* `{label}` 새 값을 입력해 주세요. (현재 제안: `{old_val:,}`)\n숫자만 입력:",
+                reply_markup={"inline_keyboard": [[
+                    {"text": "❌ 취소", "callback_data": f"th_reject:{code}:{field}"},
+                ]]}
+            )
+            return
+
+        if data.startswith("th_reject:"):
+            parts_th = data.split(":", 2)
+            if len(parts_th) == 3:
+                _, code, field = parts_th
+                from notifications.telegram import _FIELD_LABELS
+                label = _FIELD_LABELS.get(field, field)
+                self._answer_callback(callback_id, f"{label} 변경 제외됨")
+                self._update_threshold_keyboard(code, field)
+            else:
+                self._answer_callback(callback_id)
+            with self._lock:
+                self._waiting_threshold_edit = None
+            return
+
+        if data.startswith("th_reject_all:"):
+            code = data.split(":", 1)[1]
+            self._answer_callback(callback_id, "임계값 변경 전체 취소됨")
+            proposal = _threshold_proposals.pop(code, None)
+            if proposal:
+                self._remove_inline_keyboard(proposal["msg_id"])
+            with self._lock:
+                self._waiting_threshold_edit = None
+            self._send("❌ 임계값 변경 제안을 모두 취소했습니다.")
+            return
+
+        parts = data.split(":", 3)
         if len(parts) < 3:
             self._answer_callback(callback_id)
             return
-        action, code, name = parts
+        action, code = parts[0], parts[1]
+        # name에 signal_id가 붙어 있을 수 있음: "한국전력:5" → split으로 분리
+        name_sid = parts[2] if len(parts) > 2 else ""
+        extra = parts[3] if len(parts) > 3 else ""
+        # extra가 숫자면 signal_id, 아니면 name의 일부 (하위호환)
+        if extra.isdigit():
+            name, _signal_id = name_sid, int(extra)
+        else:
+            name, _signal_id = (name_sid + (":" + extra if extra else "")), None
 
         if action == "hold":
             self._answer_callback(callback_id, "홀드 유지.")
             try:
-                from data.db import shorten_cooldowns_for_stock
+                from data.db import shorten_cooldowns_for_stock, update_signal_action
                 cnt = shorten_cooldowns_for_stock(code)
                 logger.info(f"[bot] 홀드({name}) — 쿨다운 {cnt}건 단축 (원래의 25%)")
+                if _signal_id is not None:
+                    update_signal_action(_signal_id, "홀드")
             except Exception as e:
-                logger.warning(f"[bot] 쿨다운 단축 실패: {e}")
+                logger.warning(f"[bot] 홀드 처리 실패: {e}")
             self._send(f"⏸ *{name}* 홀드 유지.\n_(신호 유지 시 조건별 쿨다운의 25% 후 재알림)_")
         elif action in ("buy_market", "buy_limit", "sell_market", "sell_limit"):
             if not ALLOW_TRADE:
@@ -336,12 +499,15 @@ class TelegramBot:
                         pass
                 with self._lock:
                     self._waiting_price = {"order_type": "1" if order_action == "buy" else "2",
-                                           "code": code, "name": name}
+                                           "code": code, "name": name, "signal_id": _signal_id}
                 price_hint = f" (현재가: {cur_prc:,}원)" if cur_prc else ""
                 self._answer_callback(callback_id, f"{side}(지정가) 가격을 입력해 주세요.")
                 self._send(
                     f"*{name}* {side} (지정가) — 주문 가격을 입력해 주세요.{price_hint}\n"
-                    f"(숫자만, 예: `{cur_prc or 50000}`)"
+                    f"(숫자만, 예: `{cur_prc or 50000}`)",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "❌ 취소", "callback_data": "cancel_order"},
+                    ]]}
                 )
             else:
                 # 시장가: 수량 입력 요청
@@ -351,11 +517,17 @@ class TelegramBot:
                         "price_type": "market",
                         "code": code,
                         "name": name,
+                        "signal_id": _signal_id,
                     })
                     queue_len = len(self._waiting_qty_queue)
                 self._answer_callback(callback_id, f"{side}(시장가) 수량을 입력해 주세요.")
                 if queue_len == 1:
-                    self._send(f"*{name}* {side} (시장가) — 수량을 입력해 주세요.\n(숫자만, 예: `100`)")
+                    self._send(
+                        f"*{name}* {side} (시장가) — 수량을 입력해 주세요.\n(숫자만, 예: `100`)",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "❌ 취소", "callback_data": "cancel_order"},
+                        ]]}
+                    )
                 else:
                     self._send(
                         f"*{name}* {side}(시장가) 대기열 추가 ({queue_len}번째)\n"
@@ -364,10 +536,52 @@ class TelegramBot:
         else:
             self._answer_callback(callback_id)
 
+    def _apply_threshold_change(self, callback_id: str, code: str, field: str, new_val: int) -> None:
+        """임계값 변경 적용 + 전략 노트 저장 (전환조건 텍스트를 detail로 사용)."""
+        from data.db import update_stock_field, get_watchlist, save_strategy_note
+        from notifications.telegram import _FIELD_LABELS
+        stock_name = next((s["name"] for s in get_watchlist() if s["code"] == code), code)
+        label = _FIELD_LABELS.get(field, field)
+        ok = update_stock_field(code, field, new_val)
+        if ok:
+            # 전환조건 텍스트를 detail로 — 없으면 기본 메시지
+            condition_text = (_threshold_proposals.get(code) or {}).get("condition_text", "")
+            save_strategy_note(
+                category="watchlist",
+                summary=f"{stock_name} {label} → {new_val:,} (AI 전환조건 적용)",
+                detail=condition_text or f"AI 홀드 전환조건에 따라 {field}={new_val} 적용",
+            )
+            val_str = str(new_val) if isinstance(new_val, float) else f"{new_val:,}"
+            self._answer_callback(callback_id, f"{label} {val_str} 적용 완료")
+            self._send(f"✅ *{stock_name}* `{label}` → `{val_str}` 으로 변경 완료\n_(전략 노트 기록됨)_")
+            logger.info(f"[bot] 임계값 변경: {code} {field}={new_val}")
+        else:
+            self._answer_callback(callback_id, "변경 실패")
+            self._send(f"❌ `{label}` 변경 실패 — 종목 코드를 확인해 주세요.")
+
     # ── 명령 처리 ──────────────────────────────────────────────────────────
 
     def _handle(self, text: str) -> None:
         text = text.strip()
+
+        # ── "취소" 텍스트 입력 → 전체 흐름 종료 ─────────────────────────
+        if text in ("취소", "취소", "/cancel"):
+            self._cmd_cancel()
+            return
+
+        # ── 임계값 수정 입력 대기 처리 ──────────────────────────────────
+        with self._lock:
+            wth = self._waiting_threshold_edit
+        if wth and text.isdigit():
+            new_val = int(text)
+            if new_val <= 0:
+                self._send("❌ 값은 양의 정수여야 합니다. 다시 입력해 주세요.")
+                return
+            with self._lock:
+                self._waiting_threshold_edit = None
+            self._apply_threshold_change("", wth["code"], wth["field"], new_val)
+            self._update_threshold_keyboard(wth["code"], wth["field"])
+            return
 
         # ── 지정가 입력 대기 처리 (수량 큐보다 먼저 확인) ──────────────
         with self._lock:
@@ -379,18 +593,28 @@ class TelegramBot:
                 return
             with self._lock:
                 self._waiting_price = None
-                self._waiting_qty_queue.append({
-                    "action": "buy" if wp["order_type"] == "1" else "sell",
-                    "price_type": "limit",
-                    "limit_price": limit_price,
-                    "code": wp["code"],
-                    "name": wp["name"],
-                })
+                pre_qty = wp.get("qty")  # rec 버튼으로 온 경우 수량 pre-stored
             side = "매수" if wp["order_type"] == "1" else "매도"
-            self._send(
-                f"*{wp['name']}* {side} (지정가 {limit_price:,}원) — 수량을 입력해 주세요.\n"
-                f"(숫자만, 예: `100`)"
-            )
+            if pre_qty:
+                # 추천수량 pre-stored → 수량 입력 생략, 바로 주문 확인으로
+                self._cmd_order(wp["order_type"], wp["code"], str(pre_qty), price_type="limit", limit_price=limit_price, signal_id=wp.get("signal_id"))
+            else:
+                # 일반 지정가 → 수량 입력 단계로
+                with self._lock:
+                    self._waiting_qty_queue.append({
+                        "action": "buy" if wp["order_type"] == "1" else "sell",
+                        "price_type": "limit",
+                        "limit_price": limit_price,
+                        "code": wp["code"],
+                        "name": wp["name"],
+                    })
+                self._send(
+                    f"*{wp['name']}* {side} (지정가 {limit_price:,}원) — 수량을 입력해 주세요.\n"
+                    f"(숫자만, 예: `100`)",
+                    reply_markup={"inline_keyboard": [[
+                        {"text": "❌ 취소", "callback_data": "cancel_order"},
+                    ]]}
+                )
             return
 
         # ── 수량 대기 큐 처리 ────────────────────────────────────────────
@@ -405,7 +629,7 @@ class TelegramBot:
             price_type = wq.get("price_type", "market")
 
             limit_price = wq.get("limit_price", 0)
-            self._cmd_order(order_type, wq["code"], str(qty), price_type=price_type, limit_price=limit_price)
+            self._cmd_order(order_type, wq["code"], str(qty), price_type=price_type, limit_price=limit_price, signal_id=wq.get("signal_id"))
             if remaining:
                 next_wq = remaining[0]
                 next_side = "매수" if next_wq["action"] == "buy" else "매도"
@@ -477,6 +701,7 @@ class TelegramBot:
                     "📈 *매수* — 종목명 또는 코드를 입력하세요.",
                     reply_markup={"inline_keyboard": [[
                         {"text": "🔍 종목 검색", "switch_inline_query_current_chat": ""},
+                        {"text": "❌ 취소", "callback_data": "cancel_order"},
                     ]]}
                 )
         elif cmd == "/sell":
@@ -489,6 +714,7 @@ class TelegramBot:
                     "📉 *매도* — 종목명 또는 코드를 입력하세요.",
                     reply_markup={"inline_keyboard": [[
                         {"text": "🔍 종목 검색", "switch_inline_query_current_chat": ""},
+                        {"text": "❌ 취소", "callback_data": "cancel_order"},
                     ]]}
                 )
         elif cmd == "/confirm":
@@ -554,7 +780,7 @@ class TelegramBot:
             f"✅ `/confirm` — 실행 | ❌ `/cancel` — 취소"
         )
 
-    def _cmd_order(self, order_type: str, name_or_code: str, qty_str: str, price_type: str = "market", limit_price: int = 0) -> None:
+    def _cmd_order(self, order_type: str, name_or_code: str, qty_str: str, price_type: str = "market", limit_price: int = 0, signal_id: int | None = None) -> None:
         if not ALLOW_TRADE:
             self._send(
                 "🔒 매매 실행이 비활성화되어 있습니다.\n"
@@ -635,7 +861,7 @@ class TelegramBot:
                 pass
 
         with self._lock:
-            self._pending = _PendingOrder(code, stock_name, order_type, qty, price_type=price_type, limit_price=exec_prc)
+            self._pending = _PendingOrder(code, stock_name, order_type, qty, price_type=price_type, limit_price=exec_prc, signal_id=signal_id)
 
         confirm_markup = {
             "inline_keyboard": [[
@@ -698,6 +924,21 @@ class TelegramBot:
             )
             logger.info(f"[bot] {order.side_label} 주문 완료: {order.stock_name} {order.qty}주 → 주문번호 {ord_no}")
 
+            # 체결 후 해당 종목 쿨다운 리셋 — 새 포지션 기준으로 신호 재시작
+            try:
+                from data.db import reset_cooldowns_for_stock, update_signal_action, set_add_cooldown_after_trade
+                cnt = reset_cooldowns_for_stock(order.stock_code)
+                logger.info(f"[bot] 체결 후 쿨다운 리셋: {order.stock_name} {cnt}건")
+                # 매수 후 60분간 add/both 신호 억제 (직후 물타기 신호 노이즈 방지)
+                if order.order_type == "1":
+                    add_cnt = set_add_cooldown_after_trade(order.stock_code, suppress_minutes=60)
+                    logger.info(f"[bot] 매수 후 add 신호 억제 설정: {order.stock_name} {add_cnt}건 (60분)")
+                if order.signal_id is not None:
+                    action_label = "매수" if order.order_type == "1" else "매도"
+                    update_signal_action(order.signal_id, action_label)
+            except Exception:
+                pass
+
             # 전략 노트 기록
             try:
                 from data.db import save_strategy_note
@@ -721,6 +962,7 @@ class TelegramBot:
             self._waiting_stock_input = None
             self._waiting_qty_queue.clear()
             self._waiting_price = None
+            self._waiting_threshold_edit = None
 
         if ws and ws["cmd"] == "price":
             self._send("💰 현재가 조회 모드 종료.")
@@ -768,18 +1010,17 @@ class TelegramBot:
                 avg = str(h.get("avg_prc") or h.get("pchs_avg_pric") or "")
                 cur = str(h.get("cur_prc") or h.get("prpr") or "")
 
+                qty_i = int(qty_raw.replace(",", "").lstrip("0") or "0")
                 try:
-                    avg_i = abs(int(str(avg).replace(",", "")))
-                    cur_i = abs(int(str(cur).replace(",", "")))
-                    # 앞 0 제거 후 정수 변환
-                    qty_i = int(qty_raw.replace(",", "").lstrip("0") or "0")
+                    avg_i = abs(int(str(avg).replace(",", "") or "0"))
+                    cur_i = abs(int(str(cur).replace(",", "") or "0"))
                     pl_pct = ((cur_i - avg_i) / avg_i * 100) if avg_i else 0
                     lines.append(
                         f"• *{name}* (`{code}`)\n"
                         f"  {qty_i:,}주 | 평균 {avg_i:,}원 → {cur_i:,}원 ({pl_pct:+.1f}%)"
                     )
                 except Exception:
-                    lines.append(f"• *{name}* (`{code}`) {qty_raw}주")
+                    lines.append(f"• *{name}* (`{code}`) {qty_i:,}주")
 
             self._send("\n".join(lines))
         except Exception as e:
