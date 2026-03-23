@@ -527,8 +527,10 @@ def main():
     start_bot_thread(kiwoom_client=kiwoom)
 
     interval_min = max(1, interval // 60)
+    _trade_env = "모의투자" if kiwoom._is_mock else "실전투자"
+    _trade_mode = "자동매매" if AUTO_TRADE else "수동(알림)"
     logger.info(f"워커 시작 - {interval}초 간격으로 실행 (평일 08:00~18:00)")
-    send_message("✅ Quant Trading 워커가 시작되었습니다.")
+    send_message(f"✅ 워커 시작 [{_trade_env} | {_trade_mode}]")
 
     def auto_sync():
         logger.info("포트폴리오 자동 동기화")
@@ -590,7 +592,11 @@ if __name__ == "__main__":
         logger.info("=== 테스트 모드 ===")
 
     from data.db import DB_PATH as _db_path
-    logger.info(f"환경 파일: {_env_file}")
-    logger.info(f"DB: {_db_path}")
-    logger.info(f"모드: {'자동매매' if AUTO_TRADE else '수동(알림)'}")
+    _trade_env = "모의투자" if kiwoom._is_mock else "실전투자"
+    _trade_mode = "자동매매" if AUTO_TRADE else "수동(알림)"
+    logger.info(f"========== 워커 초기화 ==========")
+    logger.info(f"환경: {_trade_env} | 모드: {_trade_mode}")
+    logger.info(f"ENV: {_env_file}")
+    logger.info(f"DB:  {_db_path}")
+    logger.info(f"==================================")
     main()
