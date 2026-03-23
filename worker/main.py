@@ -431,6 +431,13 @@ def run_check():
     use_claude = _WORKER_CONFIG.get("use_claude_api", True)
     holdings = get_portfolio()
 
+    deposit = 0
+    try:
+        deposit_info = kiwoom.get_deposit()
+        deposit = deposit_info.get("order_available", 0)
+    except Exception as e:
+        logger.warning(f"예수금 조회 실패: {e}")
+
     kospi = kiwoom.get_market_index("kospi")
     time.sleep(1)
     kosdaq = kiwoom.get_market_index("kosdaq")
@@ -456,7 +463,7 @@ def run_check():
             if use_claude:
                 try:
                     sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
-                    claude_opinion = get_trade_opinion(signal, holdings, kospi, kosdaq, sector, signal.recent_trades)
+                    claude_opinion = get_trade_opinion(signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit)
                     logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")

@@ -526,6 +526,7 @@ def get_trade_opinion(
     kosdaq: dict,
     sector: dict,
     recent_trades: list[dict] | None = None,
+    deposit: int = 0,
 ) -> str:
     holding_detail, portfolio_text = _fmt_portfolio(holdings, signal.stock_code)
     conditions_text = "\n".join(f"    - {c}" for c in signal.triggered_conditions)
@@ -603,7 +604,7 @@ def get_trade_opinion(
 • 근거3: (1~2문장)
 [주문시장] KRX or NXT or SOR — 한 줄 이유 (홀드이면 이 줄 생략. 모의투자는 KRX만 허용)
 [주문방식] 시장가 or 지정가 — 이유 한 문장 (홀드이면 이 줄 생략)
-[추천수량] N주 — 포트폴리오 대비 5~15% 비중 기준, 현재가로 계산 (홀드이면 이 줄 생략. 포트폴리오 정보 없으면 생략)
+[추천수량] N주 (약 XXX만원) — 주문가능금액 내에서, 포트폴리오 대비 5~15% 비중 기준. 주문가능금액 초과 금지. (홀드이면 이 줄 생략. 포트폴리오/예수금 정보 없으면 생략)
 [전환조건] 홀드 시 매수/매도 전환 트리거 명시 (홀드가 아니면 이 줄 생략)
 [임계값] 홀드 시만, 변경 권고 임계값을 field=value 형식으로 파이프(|) 구분 (허용: rsi_oversold/rsi_overbought/rsi_oversold_intraday/volume_surge_ratio/target_price/stop_loss_price). 예: rsi_oversold=35 | volume_surge_ratio=1.5 | stop_loss_price=32000 — 없으면 이 줄 생략
 
@@ -660,6 +661,7 @@ def get_trade_opinion(
 
 ## 보유 현황
 - 해당 종목: {holding_detail}
+- 주문가능금액: {f'{deposit:,}원' if deposit else '조회 불가'}
 - 포트폴리오 전체:
 {portfolio_text}
 

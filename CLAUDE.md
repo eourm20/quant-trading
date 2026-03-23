@@ -23,6 +23,7 @@ DB(portfolio 테이블)는 동기화 시점의 스냅샷이므로 현재가·수
 | 일봉 차트 | `ka10081` | N일 OHLCV |
 | 계좌 잔고/보유 종목 | `kt00018` | 실시간 잔고 |
 | 주문 체결 내역 | `kt00007` | 당일 체결 |
+| 예수금/주문가능금액 | `kt00001` | `qry_tp=3` → `ord_alow_amt` |
 
 트리거 예시:
 - "지금 XX 얼마야?", "현재가 알려줘"
@@ -49,6 +50,21 @@ DB(portfolio 테이블)는 동기화 시점의 스냅샷이므로 현재가·수
 - "전략 어떻게 가져가면 돼?"
 - "지금 시장 어떻게 봐?"
 - 종목 매매 근거를 물을 때
+
+### 매수 수량 제안 시 예수금 기반 계산
+
+매수 수량을 제안하거나 매매 전략을 수립할 때는 반드시 `kiwoom_execute_api`로 예수금(`kt00001`, `qry_tp=3`)을 조회하여 **주문가능금액(`ord_alow_amt`)** 기준으로 수량을 계산한다.
+
+**수량 계산 원칙:**
+- 포트폴리오 평가액 대비 5~15% 비중 기준으로 산출하되, **주문가능금액을 절대 초과하지 않음**
+- 주문가능금액이 부족하면 매수 가능 최대 수량을 명시하고, 비중 목표 미달임을 안내
+- 수량 제안 시 `N주 (약 XXX만원)` 형태로 금액도 함께 표시
+
+트리거 예시:
+- "몇 주 사면 돼?", "수량 어떻게 잡을까?"
+- 종목 분석 후 편입 제안 시
+- 신호 수신 후 매수 검토 시
+- "XX 매수하자" 등 매매 실행 맥락
 
 ---
 
@@ -241,17 +257,81 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 
 ## 주요 구성
 
-- DART 공시 조회: `data/dart_client.py` — 신호 발생 시 자동 공시 조회, AI 판단에 포함
-  - MCP 도구: `dart_disclosures` / `dart_company_info` / `dart_financial` / `dart_shareholders` / `dart_periodic_report` / `dart_major_event`
-- 종목/조건 설정: DB (`data/trading.db`, SQLite) — MCP 도구로 실시간 반영
+- MCP 서버: `kiwoom_mcp/kiwoom_mcp/server.py` — 모든 MCP 도구를 단일 서버(`kiwoom-mcp`)로 제공
+- 종목/조건 설정: DB (`data/trading_real.db`, SQLite) — MCP 도구로 실시간 반영
+- DB 모듈: `data/db.py` — 신호 로그, watchlist, 전략 노트 등 DB CRUD
 - 포트폴리오 동기화: `worker/portfolio_sync.py`
 - 리포트 조회: `worker/report.py`
 - 외부 API 클라이언트: `worker/clients/` (키움 경량, DART 경량, 뉴스) / `kiwoom_mcp/kiwoom_mcp/` (키움 풀, DART 풀)
 - 뉴스 검색: `worker/clients/news_client.py` — 네이버 뉴스 API, AI 판단에 뉴스 컨텍스트 제공
 - 자동 스크리닝: `worker/stock_analyzer.py` — 장 마감 후 유망 종목 자동 발굴 (워커 전용)
-- 신호 로그: `data/db.py`
 - 텔레그램 알림: `notifications/telegram.py` (인라인 버튼 포함)
 - 텔레그램 봇 주문: `notifications/telegram_bot.py`
+
+## MCP 도구 전체 목록 (`kiwoom_mcp/kiwoom_mcp/server.py`)
+
+### 키움 API (조회/매매)
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `kiwoom_execute_api` | 키움 REST API 직접 호출 (조회/매매) | `api_id`, `body`, `approve_trade`, `approval_note` |
+| `kiwoom_execute_realtime` | 키움 실시간 웹소켓 조회 (체결 등) | `api_id`, `item`/`items`, `type_code`/`type_codes` |
+| `kiwoom_auto_call` | 자연어 질문 → API 자동 추론·실행 파이프라인 | `question`, `api_id`, `body_overrides`, `dry_run` |
+
+### 키움 카탈로그 (API 스펙 검색)
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `kiwoom_catalog_get` | API 코드로 카탈로그 항목 조회 | `code` (예: `ka10081`) |
+| `kiwoom_catalog_search` | 키워드/카테고리로 카탈로그 검색 | `query`, `kind` (all/rest/realtime/common) |
+| `kiwoom_catalog_recommend_for_question` | 자연어 질문에 적합한 API 추천 | `question`, `limit` |
+| `kiwoom_extract_api_spec` | PDF에서 API 요청 스펙 추출 | `api_id`, `pdf_path` |
+
+### 퀀트 리포트/전략
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `quant_report` | 현황 조회 (신호/포트폴리오/매매/전략/전체) | `type` (signals/portfolio/trades/strategy/all), `days`, `limit` |
+| `quant_strategy_log` | 전략 결정 기록 + 텔레그램 발송 | `category` (trade/watchlist/general), `summary`, `detail` |
+| `quant_portfolio_sync` | 키움 → DB 포트폴리오 동기화 | — |
+| `quant_cooldown_reset` | 매매 후 쿨다운 리셋 | `stock_code`, `reset_all` |
+
+### 관심종목 (watchlist)
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `quant_watchlist_read` | 모니터링 종목 전체 조회 (보유 여부 포함) | — |
+| `quant_watchlist_update` | 종목 조건 수정 (목표가/손절가/RSI 등) | `stock_code`, `field`, `value` |
+| `quant_watchlist_add` | 모니터링 종목 추가 | `code`, `name`, `conditions` (JSON) |
+| `quant_watchlist_delete` | 모니터링 종목 삭제 | `stock_code` |
+
+### 신호 조건 (conditions_def)
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `quant_conditions_list` | 시그널 조건 타입 전체 조회 | — |
+| `quant_condition_add` | 새 시그널 조건 추가 | `id`, `name`, `evaluator`, `param`, `cooldown_minutes`, `message`, `signal_type` |
+| `quant_condition_update` | 시그널 조건 수정 | `id`, `name`, `cooldown_minutes`, `message`, `signal_type` 등 |
+| `quant_condition_remove` | 시그널 조건 삭제 | `id` |
+
+### 신호 로그/전략 노트 관리
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `quant_signal_log_delete` | 신호 로그 삭제 | `signal_id` / `stock_code` / `before_date` / `delete_all` |
+| `quant_strategy_note_update` | 전략 노트 수정 | `note_id`, `summary`, `detail`, `category` |
+| `quant_strategy_note_delete` | 전략 노트 삭제 | `note_id` / `delete_all` |
+
+### DART 공시
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `dart_disclosures` | 종목별 공시 목록 조회 | `stock_code`, `days`, `pblntf_ty` |
+| `dart_company_info` | 기업개황 (대표자/업종/설립일 등) | `stock_code` |
+| `dart_financial` | 재무정보 (주요계정/전체/지표) | `stock_code`, `detail` (summary/all/index) |
+| `dart_shareholders` | 지분공시 (대량보유/임원) | `stock_code`, `type` (major/executive) |
+| `dart_periodic_report` | 정기보고서 주요정보 (28종) | `stock_code`, `report_type` |
+| `dart_major_event` | 주요사항보고서 (36종) | `stock_code`, `event_type` |
 
 ---
 
@@ -270,13 +350,15 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 3. `dart_disclosures` / `dart_financial`로 공시+재무 조회
 4. 편입 조건 5가지 (눌림목/저평가/테마미반영/실적개선/잠재성장) 중 2가지 이상 충족 여부 평가
 5. 편입 적합 시: 목표가, 손절가, horizon, RSI 기준값 + 각 근거 제안
-6. 사용자 확인 후 `quant_watchlist_add`로 관심종목 등록
+6. `kiwoom_execute_api`로 예수금(`kt00001`) 조회 → 주문가능금액 기반 매수 추천수량 제안 (N주, 약 XXX만원)
+7. 사용자 확인 후 `quant_watchlist_add`로 관심종목 등록
 
 ### 종목 추천 요청 시 (막연한 요청)
 1. `quant_report(type="portfolio")` + `quant_report(type="strategy")`로 현재 상태 확인
-2. 포트폴리오 편중/현금 비중/전략 방향 분석
-3. 키움 API로 후보 탐색: `ka10023`(거래량 급증) / `ka10027`(등락률) / `ka10035`(외인 순매수)
-4. 후보별 간단 분석 후 편입 적합성 평가 → 사용자에게 제안
+2. `kiwoom_execute_api`로 예수금(`kt00001`) 조회 → 투자 가능 금액 파악
+3. 포트폴리오 편중/현금 비중/전략 방향 분석
+4. 키움 API로 후보 탐색: `ka10023`(거래량 급증) / `ka10027`(등락률) / `ka10035`(외인 순매수)
+5. 후보별 간단 분석 후 편입 적합성 평가 + 주문가능금액 기반 수량 제안 → 사용자에게 제안
 
 > **자동 모드 참고** (`worker/stock_analyzer.py`):
 > - 장중 10:00, 13:00 — 거래량 급증 종목 경량 스캔 → 텔레그램 알림만 (watchlist 추가 안 함)
