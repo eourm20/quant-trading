@@ -28,7 +28,7 @@ if _ANTHROPIC_KEY:
 elif _OPENAI_KEY:
     from openai import OpenAI
     _ai_client = OpenAI(api_key=_OPENAI_KEY)
-    _AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    _AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
     _AI_BACKEND = "openai"
 else:
     _ai_client = None
