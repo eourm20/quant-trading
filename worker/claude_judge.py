@@ -209,7 +209,7 @@ if _ANTHROPIC_KEY:
 elif _OPENAI_KEY:
     from openai import OpenAI
     _client = OpenAI(api_key=_OPENAI_KEY)
-    MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
     _BACKEND = "openai"
 else:
     raise RuntimeError("ANTHROPIC_API_KEY 또는 OPENAI_API_KEY 중 하나를 .env에 설정하세요.")
