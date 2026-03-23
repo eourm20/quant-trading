@@ -398,7 +398,7 @@ def upsert_portfolio(holdings: list[dict]):
                 continue
             conn.execute(
                 """
-                INSERT INTO portfolio
+                INSERT OR REPLACE INTO portfolio
                     (stock_code, stock_name, quantity, avg_price, current_price,
                      eval_amount, profit_loss, profit_rate, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
