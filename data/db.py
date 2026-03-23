@@ -7,7 +7,12 @@ import os
 import sqlite3
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "trading.db")
+_default_db = os.path.join(os.path.dirname(__file__), "trading.db")
+_env_db = os.getenv("DB_PATH")
+if _env_db and not os.path.isabs(_env_db):
+    # 상대경로는 프로젝트 루트(data/ 의 부모) 기준으로 해석
+    _env_db = os.path.join(os.path.dirname(__file__), '..', _env_db)
+DB_PATH = _env_db or _default_db
 
 
 def get_conn() -> sqlite3.Connection:

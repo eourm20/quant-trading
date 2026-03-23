@@ -19,7 +19,17 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+# --env 인자를 imports 전에 미리 파싱 (모듈 레벨 코드가 올바른 환경변수를 읽도록)
+_project_root = os.path.join(os.path.dirname(__file__), '..')
+_pre_parser = argparse.ArgumentParser(add_help=False)
+_pre_parser.add_argument("--env", type=str, default=None)
+_pre_args, _ = _pre_parser.parse_known_args()
+if _pre_args.env:
+    _env_path = os.path.join(_project_root, _pre_args.env) if not os.path.isabs(_pre_args.env) else _pre_args.env
+    os.environ["ENV_FILE"] = _env_path
+
+_env_file = os.getenv("ENV_FILE", os.path.join(_project_root, '.env'))
+load_dotenv(dotenv_path=_env_file, override=True)
 
 from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
@@ -33,6 +43,7 @@ from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_a
                      update_signal_result, update_stock_field, save_strategy_note,
                      get_cooldown, set_cooldown, get_last_signal_date, delete_stock)
 
+_log_prefix = os.getenv("LOG_PREFIX", "worker")
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
 os.makedirs(log_dir, exist_ok=True)
 
@@ -41,7 +52,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.handlers.TimedRotatingFileHandler(
-            os.path.join(log_dir, "worker.log"),
+            os.path.join(log_dir, f"{_log_prefix}.log"),
             when="midnight",
             backupCount=1,
             encoding="utf-8",
@@ -571,10 +582,15 @@ def main():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", action="store_true", help="장 시간 체크 무시하고 즉시 실행")
+    parser.add_argument("--env", type=str, default=None, help=".env 파일 경로 (예: .env.real)")
     args = parser.parse_args()
 
     if args.test:
         TEST_MODE = True
         logger.info("=== 테스트 모드 ===")
 
+    from data.db import DB_PATH as _db_path
+    logger.info(f"환경 파일: {_env_file}")
+    logger.info(f"DB: {_db_path}")
+    logger.info(f"모드: {'자동매매' if AUTO_TRADE else '수동(알림)'}")
     main()

@@ -5,9 +5,11 @@
 *.log
 .venv/
 .env
+.env.*
 .vscode/
 .pytest_cache/
 scripts/
 logs/
 trading.db
+trading_real.db
 .claude/
