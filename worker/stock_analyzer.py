@@ -368,11 +368,13 @@ def run_intraday_scan():
         logger.info("[장중 스캔] 프리필터 후 후보 없음")
         return
 
-    logger.info(f"[장중 스캔] 후보 {len(filtered)}개 → AI 분석 시작")
+    ai_target = filtered[:15]
+    logger.info(f"[장중 스캔] 프리필터 통과 {len(filtered)}개 중 {len(ai_target)}개 → AI 분석 시작")
 
     added = []
     pending = []
-    for cand in filtered[:15]:  # 최대 15개
+    result_counts = {}  # 판정별 집계
+    for cand in ai_target:
         try:
             analysis = _analyze_candidate(
                 cand["stock_code"], cand["stock_name"],
@@ -381,6 +383,7 @@ def run_intraday_scan():
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")
             reason = str(analysis.get("reason", "") or "").replace("\n", " ").strip()
+            result_counts[rec] = result_counts.get(rec, 0) + 1
             logger.info(
                 f"[장중 스캔] {cand['stock_name']} ({cand['stock_code']}) "
                 f"→ {rec} (R/R={rr})"
@@ -441,12 +444,13 @@ def run_intraday_scan():
         except Exception as e:
             logger.error(f"[장중 스캔] {cand['stock_name']} 분석 실패: {e}")
 
+    # AI 분석 집계
+    counts_str = ", ".join(f"{k}={v}" for k, v in sorted(result_counts.items()))
+    logger.info(f"[장중 스캔] AI 분석 완료 ({len(ai_target)}개): {counts_str}")
     if added:
         logger.info(f"[장중 스캔] {len(added)}개 자동 등록: {', '.join(added)}")
     if pending:
         logger.info(f"[장중 스캔] {len(pending)}개 승인 대기")
-    if not added and not pending:
-        logger.info("[장중 스캔] 적합 종목 없음")
 
 
 # ═══════════════════════════ 스크리닝 AI 시스템 프롬프트 (캐싱) ═══════════════════════════
@@ -1077,11 +1081,13 @@ def run_daily_screening():
         logger.info("[스크리닝] 프리필터 후 후보 없음")
         return
 
+    logger.info(f"[스크리닝] 후보 {len(candidates)}개 → AI 분석 시작")
+
     added = []
     pending = []
+    result_counts = {}  # 판정별 집계
     for cand in candidates:
         try:
-            logger.debug(f"[스크리닝] 분석 중: {cand['stock_name']} ({cand['stock_code']})")
             analysis = _analyze_candidate(
                 cand["stock_code"],
                 cand["stock_name"],
@@ -1091,9 +1097,10 @@ def run_daily_screening():
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")
             reason = str(analysis.get("reason", "") or "").replace("\n", " ").strip()
-            logger.debug(
-                f"[스크리닝] 분석 결과: {cand['stock_name']} ({cand['stock_code']}) "
-                f"→ {rec} (R/R={rr}) 사유: {reason[:140]}"
+            result_counts[rec] = result_counts.get(rec, 0) + 1
+            logger.info(
+                f"[스크리닝] {cand['stock_name']} ({cand['stock_code']}) "
+                f"→ {rec} (R/R={rr})"
             )
 
             # RAG용: 모든 스크리닝 결과 저장 (관심종목 등록/보류/부적합 모두)
@@ -1162,15 +1169,15 @@ def run_daily_screening():
         except Exception as e:
             logger.error(f"[스크리닝] {cand['stock_name']} 분석 실패: {e}")
 
-    # 결과 로그
+    # AI 분석 집계
+    counts_str = ", ".join(f"{k}={v}" for k, v in sorted(result_counts.items()))
+    logger.info(f"[스크리닝] AI 분석 완료 ({len(candidates)}개): {counts_str}")
     if added:
         summary = f"자동 스크리닝: {', '.join(added)} 관심종목 등록"
         save_strategy_note("watchlist", summary, summary)
         logger.info(f"[스크리닝] {len(added)}개 종목 자동 등록 완료")
     if pending:
         logger.info(f"[스크리닝] {len(pending)}개 종목 사용자 승인 대기 중")
-    if not added and not pending:
-        logger.info("[스크리닝] 적합 종목 없음")
 
 
 # 수동 모드에서 사용자 승인 대기 중인 스크리닝 결과
