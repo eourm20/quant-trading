@@ -336,7 +336,16 @@ def check_removal_candidates():
         if last_signal_dt:
             days_since = (datetime.now() - last_signal_dt).days
         else:
-            days_since = 999
+            # 신호 이력 없으면 등록일 기준 (등록일도 없으면 삭제 안 함)
+            created_at = stock.get("created_at", "")
+            if created_at:
+                try:
+                    created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                    days_since = (datetime.now() - created_dt).days
+                except ValueError:
+                    continue
+            else:
+                continue
 
         if days_since >= INACTIVE_DAYS:
             delete_stock(code)

@@ -76,6 +76,10 @@ def init_db():
             conn.execute("ALTER TABLE watchlist ADD COLUMN horizon TEXT NOT NULL DEFAULT '중기'")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,11 +298,12 @@ def get_watchlist() -> list[dict]:
 
 
 def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO watchlist (code, name, enabled, conditions) VALUES (?,?,?,?) "
+            "INSERT INTO watchlist (code, name, enabled, conditions, created_at) VALUES (?,?,?,?,?) "
             "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, conditions=excluded.conditions",
-            (code, name, int(enabled), json.dumps(conditions, ensure_ascii=False))
+            (code, name, int(enabled), json.dumps(conditions, ensure_ascii=False), now)
         )
         conn.commit()
 
