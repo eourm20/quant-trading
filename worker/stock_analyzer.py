@@ -102,8 +102,11 @@ def _repair_screening_json(raw_text: str) -> str:
 def _screen_candidates() -> list[dict]:
     """키움 API로 유망 종목 후보 수집. 기존 watchlist 종목은 제외.
 
+    소스 우선순위: HTS 조건검색 → 조용한 축적 → 외인 순매수 → 거래량 급증 → 등락률 하위
+    HTS 후보는 source_tier="hts" 태그 → 프리필터 완화 적용.
+
     Returns:
-        [{stock_code, stock_name, source}, ...]  최대 30개
+        [{stock_code, stock_name, source, source_tier}, ...]  최대 50개
     """
     from worker.clients.kiwoom_client import KiwoomClient
     from data.db import get_watchlist
@@ -112,83 +115,73 @@ def _screen_candidates() -> list[dict]:
     existing_codes = {s["code"] for s in get_watchlist()}
 
     candidates = []
+    seen_codes: set[str] = set()
 
-    def _extract(items, source, limit=20):
+    def _add(code: str, name: str, source: str, tier: str = "general"):
+        if code and len(code) == 6 and code not in existing_codes and code not in seen_codes:
+            seen_codes.add(code)
+            candidates.append({"stock_code": code, "stock_name": name, "source": source, "source_tier": tier})
+
+    def _extract(items, source, tier="general", limit=20):
         for item in items[:limit]:
             code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
             name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
-            if code and code not in existing_codes and len(code) == 6:
-                if not any(c["stock_code"] == code for c in candidates):
-                    candidates.append({"stock_code": code, "stock_name": name, "source": source})
+            _add(code, name, source, tier)
 
-    # 1. 거래량 급증 종목 (ka10023)
+    # ── 1순위: HTS 조건검색 (이미 필터링된 양질 후보) ──
     try:
-        _extract(kiwoom.get_volume_surge(), "거래량 급증", 20)
+        logger.info("[추천스캔][HTS] 조건검색 호출 시작")
+        cond_stocks = kiwoom.run_all_quant_conditions()
+        logger.info(f"[추천스캔][HTS] 조건검색 반환: {len(cond_stocks)}종목")
+        if cond_stocks:
+            source_count: dict[str, int] = {}
+            for item in cond_stocks:
+                src = str(item.get("source", "")).replace("조건검색:", "").strip()
+                if src:
+                    source_count[src] = source_count.get(src, 0) + 1
+            logger.info(f"[HTS-TRACE] 조건별: {source_count}")
+            for item in cond_stocks:
+                _add(item["stock_code"], item.get("stock_name", ""), item.get("source", "조건검색"), "hts")
+        else:
+            logger.warning("[추천스캔][HTS] 조건검색 결과 0건")
     except Exception as e:
-        logger.warning(f"거래량 급증 조회 실패: {e}")
+        logger.warning(f"HTS 조건검색 실패: {e}")
+
+    hts_count = len(candidates)
+    time.sleep(1)
+
+    # ── 2순위: 조용한 축적 (외인 순매수 + 주가 횡보) ──
+    try:
+        quiet = kiwoom.get_quiet_accumulation(change_threshold=3.0, max_results=15)
+        _extract(quiet, "조용한 축적", "general", 15)
+    except Exception as e:
+        logger.warning(f"조용한 축적 조회 실패: {e}")
 
     time.sleep(1)
 
-    # 2. 전일대비 등락률 하위 — 눌림목 후보 (ka10027)
+    # ── 3순위: 외인 연속 순매수 (ka10035) ──
     try:
-        _extract(kiwoom.get_decline_rank(), "눌림목 후보", 20)
-    except Exception as e:
-        logger.warning(f"등락률 하위 조회 실패: {e}")
-
-    time.sleep(1)
-
-    # 3. 외인 연속 순매수 상위 (ka10035)
-    try:
-        _extract(kiwoom.get_foreign_net_buy(), "외인 순매수", 10)
+        _extract(kiwoom.get_foreign_net_buy(), "외인 순매수", "general", 10)
     except Exception as e:
         logger.warning(f"외인 순매수 조회 실패: {e}")
 
     time.sleep(1)
 
-    # 4. HTS 조건검색 (ka10171 → ka10172, WebSocket)
+    # ── 4순위: 거래량 급증 (ka10023) — 보조 ──
     try:
-        logger.info("[추천스캔][HTS] 조건검색 호출 시작 (ka10171 -> ka10172)")
-        condition_list = kiwoom.get_condition_list()
-        quant_conditions = [c for c in condition_list if str(c.get("name", "")).startswith("퀀트_")]
-        logger.info(
-            f"[HTS-TRACE] ka10171_total={len(condition_list)} quant_prefix={len(quant_conditions)}"
-        )
-        condition_list = kiwoom.get_condition_list()
-        quant_conditions = [c for c in condition_list if str(c.get("name", "")).startswith("퀀트_")]
-        logger.info(
-            f"[HTS-TRACE] ka10171_total={len(condition_list)} quant_prefix={len(quant_conditions)}"
-        )
-        cond_stocks = kiwoom.run_all_quant_conditions()
-        logger.info(f"[추천스캔][HTS] 조건검색 반환 종목 수: {len(cond_stocks)}")
-        if cond_stocks:
-            source_count = {}
-            for item in cond_stocks:
-                source = str(item.get("source", ""))
-                source_name = source.replace("조건검색:", "").strip() if source else ""
-                if source_name:
-                    source_count[source_name] = source_count.get(source_name, 0) + 1
-            logger.info(f"[HTS-TRACE] ka10172_by_condition={source_count}")
-            source_names = sorted(
-                {
-                    str(item.get("source", "")).replace("조건검색:", "").strip()
-                    for item in cond_stocks
-                    if item.get("source")
-                }
-            )
-            logger.info(
-                f"[추천스캔][HTS] 사용된 조건식 수: {len(source_names)} "
-                f"(샘플: {', '.join(source_names[:5])})"
-            )
-        else:
-            logger.warning("[추천스캔][HTS] 조건검색 결과가 0건입니다.")
-        for item in cond_stocks:
-            code = item["stock_code"]
-            if code not in existing_codes and not any(c["stock_code"] == code for c in candidates):
-                candidates.append(item)
+        _extract(kiwoom.get_volume_surge(), "거래량 급증", "general", 15)
     except Exception as e:
-        logger.warning(f"HTS 조건검색 실패: {e}")
+        logger.warning(f"거래량 급증 조회 실패: {e}")
 
-    logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견")
+    time.sleep(1)
+
+    # ── 5순위: 등락률 하위 (ka10027) — 보조 ──
+    try:
+        _extract(kiwoom.get_decline_rank(), "눌림목 후보", "general", 15)
+    except Exception as e:
+        logger.warning(f"등락률 하위 조회 실패: {e}")
+
+    logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견 (HTS {hts_count}개 우선)")
     return candidates[:50]
 
 
@@ -244,8 +237,11 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -15% → 제외")
                 continue
 
-            if not lightweight:
-                # 풀 모드: 일봉 데이터로 RSI + MA 체크
+            # HTS 후보는 이미 조건식으로 필터링됨 → RSI/데드크로스 체크 생략
+            is_hts = cand.get("source_tier") == "hts"
+
+            if not lightweight and not is_hts:
+                # 풀 모드: 일봉 데이터로 RSI + MA 체크 (비-HTS 후보만)
                 time.sleep(1)  # ka10081 호출 전 대기
                 daily = kiwoom.get_daily_ohlcv(code, period=25)
                 closes = []
@@ -521,7 +517,10 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 
 {_SCREENING_KNOWLEDGE}
 
-## 편입 조건 5가지 (2가지 이상 충족 필요)
+## 편입 조건 5가지
+- 2가지 이상 충족: 강한 편입 후보
+- 1가지 강한 충족 + 다른 조건 부분 충족(근접하거나 일부 지표 해당): 편입 가능
+- 1가지만 약하게 충족: 보류
 1. **눌림목**: 상승 추세 중 조정 구간에 진입한 종목
    - MA20 지지선 근처 (현재가가 MA20 ± 3% 이내)
    - RSI 38~50 구간 (과매도 진입 또는 진입 직전)
@@ -564,8 +563,9 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 ## 목표가·손절가 설정 기준
 - 목표가: 피보나치 확장 127.2~161.8% 또는 직전 고점 저항선 기준
 - 손절가: 평단 대비 -5~-10%. 최소한 직전 지지선 아래로 설정
-- R/R 2:1 이상 확보 필수 (목표 수익폭 ≥ 손절 손실폭 × 2)
-- R/R 2:1 미만이면 편입 보류 권고
+- R/R 1.5:1 이상 확보 필수 (목표 수익폭 ≥ 손절 손실폭 × 1.5)
+- R/R 1.5:1 미만이면 편입 보류 권고
+- R/R 2:1 이상이면 우선 편입 대상
 
 ## RSI 임계값 설정 기준
 - rsi_oversold: 일봉 RSI14 기준. 종목 변동성에 따라 38~43 범위.
@@ -656,7 +656,8 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 판단 원칙:
 - 수치 기반 판단만 허용. "느낌", "분위기"로 판단 금지.
 - 데이터 부족 시 해당 조건은 "평가 불가"로 처리하고, 나머지 조건으로 판단.
-- 보수적으로 판단. 확실하지 않으면 "보류".
+- 균형 잡힌 시각으로 판단. 명확한 부적합 사유가 없고 1개 이상 강한 편입 조건이 있으면 편입 고려.
+- 데이터 부족만으로 보류하지 말 것. 확인 가능한 조건들로 판단.
 - 관심종목 등록 시 반드시 목표가·손절가·R/R을 수치로 제시.
 - 각 임계값과 조건 활성화의 설정 근거를 반드시 한 줄로 명시.
 - target_price, stop_loss_price는 관심종목 등록 시 반드시 활성화.
@@ -901,12 +902,12 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
                 repaired_block = _extract_json_block(repaired) or repaired.strip()
                 result = json.loads(repaired_block)
 
-            # R/R 2:1 미만이면 관심종목 등록 → 보류로 강제 변환
+            # R/R 1.5:1 미만이면 관심종목 등록 → 보류로 강제 변환
             rr = result.get("rr_ratio", 0)
-            if result.get("recommendation") == "관심종목 등록" and rr and float(rr) < 2.0:
-                logger.info(f"[스크리닝] {stock_name}: R/R {rr} < 2.0 → 보류로 변환")
+            if result.get("recommendation") == "관심종목 등록" and rr and float(rr) < 1.5:
+                logger.info(f"[스크리닝] {stock_name}: R/R {rr} < 1.5 → 보류로 변환")
                 result["recommendation"] = "보류"
-                result["reason"] = f"R/R {rr}:1 미달 (2:1 이상 필요). " + result.get("reason", "")
+                result["reason"] = f"R/R {rr}:1 미달 (1.5:1 이상 필요). " + result.get("reason", "")
             # RAG용 컨텍스트 첨부
             result["_current_price"] = current_price
             result["_dart_summary"] = dart_text or None

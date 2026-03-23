@@ -472,6 +472,32 @@ class KiwoomClient:
         )
         return payload.get("for_cont_nettrde_upper") or payload.get("output") or []
 
+    def get_quiet_accumulation(self, change_threshold: float = 3.0, max_results: int = 15) -> list[dict]:
+        """조용한 축적 종목: 외인 순매수 상위 중 등락률 ±threshold% 이내.
+
+        외인이 꾸준히 사고 있지만 주가는 아직 횡보하는 종목을 찾는다.
+        """
+        foreign_stocks = self.get_foreign_net_buy()
+        result = []
+        for item in foreign_stocks:
+            code = str(item.get("stk_cd") or item.get("shtn_iscd") or "").strip()
+            if not code or len(code) != 6:
+                continue
+            try:
+                time.sleep(0.5)
+                price_data = self.get_current_price(code)
+                change_str = str(price_data.get("flu_rt") or price_data.get("prdy_ctrt") or "0")
+                change_pct = abs(float(change_str.replace(",", "").replace("+", "").replace("-", "")))
+                if change_pct <= change_threshold:
+                    item["_change_pct"] = change_pct
+                    result.append(item)
+                    if len(result) >= max_results:
+                        break
+            except Exception:
+                continue
+        logger.info(f"[조용한축적] 외인순매수 {len(foreign_stocks)}개 중 등락률 ±{change_threshold}% 이내: {len(result)}개")
+        return result
+
     # ── HTS 조건검색 (WebSocket) ──────────────────────────────────
 
     def _ws_url(self) -> str:
@@ -480,111 +506,139 @@ class KiwoomClient:
             return "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
         return "wss://api.kiwoom.com:10000/api/dostk/websocket"
 
-    async def _ws_request(self, api_id: str, body: dict) -> dict:
-        """WebSocket으로 단일 요청 후 응답 수신."""
+    async def _ws_condition_search(self) -> list[dict]:
+        """단일 WebSocket 연결에서 LOGIN → ka10171 → ka10172 순차 실행.
+
+        키움 WebSocket은 같은 연결에서 ka10171(목록) 호출 후
+        ka10172(검색)를 해야 정상 동작한다.
+        """
         import websockets
         import json as _json
-
-        token = self._get_token()
-        headers = {
-            "api-id": api_id,
-            "authorization": f"Bearer {token}",
-        }
-        message = {**body, "_headers": headers}
-
-        # websockets 라이브러리는 헤더를 연결 시 전달
-        async with websockets.connect(
-            self._ws_url(),
-            additional_headers={
-                "api-id": api_id,
-                "authorization": f"Bearer {token}",
-            },
-        ) as ws:
-            await ws.send(_json.dumps(body))
-            response = await ws.recv()
-            return _json.loads(response)
-
-    def get_condition_list(self) -> list[dict]:
-        """HTS 조건검색 목록 조회 (ka10171).
-        Returns: [{"seq": "0", "name": "퀀트_눌림목"}, ...]
-        """
         import asyncio
 
-        try:
-            result = asyncio.run(self._ws_request("ka10171", {"trnm": "CNSRLST"}))
-            data = result.get("data", [])
-            # data: [["0", "조건명1"], ["1", "조건명2"], ...]
+        token = self._get_token()
+
+        async with websockets.connect(self._ws_url()) as ws:
+            # ── 1) LOGIN ──
+            await ws.send(_json.dumps({"trnm": "LOGIN", "token": token}))
+            login_resp = _json.loads(await ws.recv())
+            logger.debug(f"[WS] LOGIN: code={login_resp.get('return_code')}")
+            if login_resp.get("return_code") != 0:
+                logger.warning(f"[WS] LOGIN 실패: {login_resp}")
+                return []
+
+            # ── 2) ka10171 — 조건 목록 조회 ──
+            await ws.send(_json.dumps({"trnm": "CNSRLST"}))
+            list_resp = _json.loads(await ws.recv())
+            logger.debug(f"[조건검색] ka10171 return_code={list_resp.get('return_code')}")
+            data = list_resp.get("data", [])
+
             conditions = []
             for item in data:
                 if isinstance(item, list) and len(item) >= 2:
                     conditions.append({"seq": item[0], "name": item[1]})
                 elif isinstance(item, dict):
                     conditions.append({"seq": item.get("seq", ""), "name": item.get("name", "")})
-            logger.debug(f"[조건검색] 목록 {len(conditions)}개 조회")
+
+            quant_conditions = [c for c in conditions if c["name"].startswith("퀀트_")]
+            logger.info(f"[조건검색] 목록 {len(conditions)}개, 퀀트_ {len(quant_conditions)}개: {[c['name'] for c in quant_conditions]}")
+
+            if not quant_conditions:
+                logger.info("[조건검색] '퀀트_' 조건식 없음 (전체: %s)", [c["name"] for c in conditions[:10]])
+                return []
+
+            # ── 3) ka10172 — 각 조건 실행 (같은 연결) ──
+            all_stocks = []
+            seen_codes: set[str] = set()
+
+            for cond in quant_conditions:
+                req = {
+                    "trnm": "CNSRREQ",
+                    "seq": cond["seq"],
+                    "search_type": "0",
+                    "stex_tp": "K",
+                    "cont_yn": "N",
+                    "next_key": "",
+                }
+                await ws.send(_json.dumps(req))
+
+                # 비동기 응답: 첫 recv는 ACK일 수 있음. data가 올 때까지 최대 5회 수신
+                resp_data = []
+                for attempt in range(5):
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                        resp = _json.loads(raw)
+                        logger.debug(
+                            f"[조건검색] ka10172 '{cond['name']}' recv#{attempt}: "
+                            f"keys={list(resp.keys())} trnm={resp.get('trnm')}"
+                            f"{' data_len=' + str(len(resp['data'])) if 'data' in resp and isinstance(resp.get('data'), list) else ''}"
+                        )
+                        if "data" in resp and resp["data"]:
+                            resp_data = resp["data"]
+                            break
+                        # return_code 에러면 중단
+                        if resp.get("return_code") and resp["return_code"] != 0:
+                            logger.warning(f"[조건검색] ka10172 에러: {resp.get('return_msg')}")
+                            break
+                    except asyncio.TimeoutError:
+                        logger.debug(f"[조건검색] ka10172 '{cond['name']}' recv#{attempt}: timeout")
+                        break
+
+                logger.info(f"[조건검색] '{cond['name']}' → {len(resp_data)}건")
+                for item in resp_data:
+                    if not isinstance(item, dict):
+                        continue
+                    code = str(item.get("9001", "")).replace("A", "").strip()
+                    name = str(item.get("302", "")).strip()
+                    if code and len(code) == 6 and code not in seen_codes:
+                        seen_codes.add(code)
+                        all_stocks.append({
+                            "stock_code": code,
+                            "stock_name": name,
+                            "source": f"조건검색:{cond['name']}",
+                        })
+                await asyncio.sleep(1)  # rate limit
+
+            logger.info(f"[조건검색] 퀀트 조건 {len(quant_conditions)}개 → {len(all_stocks)}종목")
+            return all_stocks
+
+    def get_condition_list(self) -> list[dict]:
+        """HTS 조건검색 목록 조회 (ka10171). 단독 호출용."""
+        import asyncio
+        import json as _json
+
+        try:
+            async def _query():
+                import websockets
+                token = self._get_token()
+                async with websockets.connect(self._ws_url()) as ws:
+                    await ws.send(_json.dumps({"trnm": "LOGIN", "token": token}))
+                    await ws.recv()
+                    await ws.send(_json.dumps({"trnm": "CNSRLST"}))
+                    return _json.loads(await ws.recv())
+
+            result = asyncio.run(_query())
+            data = result.get("data", [])
+            conditions = []
+            for item in data:
+                if isinstance(item, list) and len(item) >= 2:
+                    conditions.append({"seq": item[0], "name": item[1]})
+                elif isinstance(item, dict):
+                    conditions.append({"seq": item.get("seq", ""), "name": item.get("name", "")})
+            logger.info(f"[조건검색] 목록 {len(conditions)}개 조회: {[c['name'] for c in conditions[:10]]}")
             return conditions
         except Exception as e:
             logger.warning(f"조건검색 목록 조회 실패: {e}")
             return []
 
-    def run_condition_search(self, seq: str) -> list[dict]:
-        """HTS 조건검색 실행 (ka10172).
-        Args:
-            seq: 조건식 일련번호 (get_condition_list에서 획득)
-        Returns: [{"stock_code": "005930", "stock_name": "삼성전자", "price": 75000}, ...]
+    def run_all_quant_conditions(self) -> list[dict]:
+        """'퀀트_' 접두어가 붙은 모든 조건식을 단일 WebSocket 연결에서 실행.
+        Returns: [{"stock_code", "stock_name", "source": "조건검색:조건명"}, ...]
         """
         import asyncio
 
-        stex = "K"  # 조건검색은 항상 KRX
         try:
-            result = asyncio.run(self._ws_request("ka10172", {
-                "trnm": "CNSRREQ",
-                "seq": seq,
-                "search_type": "0",
-                "stex_tp": stex,
-                "cont_yn": "N",
-                "next_key": "",
-            }))
-
-            data = result.get("data", [])
-            stocks = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                code = str(item.get("9001", "")).replace("A", "").strip()
-                name = str(item.get("302", "")).strip()
-                price = abs(int(str(item.get("10", "0")).strip() or "0"))
-                if code and len(code) == 6:
-                    stocks.append({"stock_code": code, "stock_name": name, "price": price})
-            logger.debug(f"[조건검색] seq={seq} → {len(stocks)}종목")
-            return stocks
+            return asyncio.run(self._ws_condition_search())
         except Exception as e:
-            logger.warning(f"조건검색 실행 실패 (seq={seq}): {e}")
+            logger.warning(f"HTS 조건검색 실패: {e}")
             return []
-
-    def run_all_quant_conditions(self) -> list[dict]:
-        """'퀀트_' 접두어가 붙은 모든 조건식을 실행하여 종목 수집.
-        Returns: [{"stock_code", "stock_name", "source": "조건식명"}, ...]
-        """
-        conditions = self.get_condition_list()
-        quant_conditions = [c for c in conditions if c["name"].startswith("퀀트_")]
-
-        if not quant_conditions:
-            logger.debug("[조건검색] '퀀트_' 조건식 없음")
-            return []
-
-        all_stocks = []
-        seen_codes = set()
-        for cond in quant_conditions:
-            stocks = self.run_condition_search(cond["seq"])
-            for s in stocks:
-                if s["stock_code"] not in seen_codes:
-                    seen_codes.add(s["stock_code"])
-                    all_stocks.append({
-                        "stock_code": s["stock_code"],
-                        "stock_name": s["stock_name"],
-                        "source": f"조건검색:{cond['name']}",
-                    })
-            time.sleep(1)  # API rate limit
-
-        logger.info(f"[조건검색] 퀀트 조건 {len(quant_conditions)}개 → {len(all_stocks)}종목")
-        return all_stocks
