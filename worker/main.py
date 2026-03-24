@@ -113,22 +113,27 @@ def _maybe_save_hold_conditions(signal, opinion: str):
             condition_text = stripped[len("[전환조건]"):].strip()
         elif stripped.startswith("[임계값]"):
             content = stripped[len("[임계값]"):].strip()
-            allowed = {"rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "volume_surge_ratio", "target_price", "stop_loss_price"}
-            for match in re.finditer(r"(\w+)\s*=\s*(\d+(?:\.\d+)?)", content):
-                field, value_str = match.group(1), match.group(2)
-                if field in allowed:
-                    # volume_surge_ratio는 소수점 유지, 나머지는 정수
-                    new_val = float(value_str) if field == "volume_surge_ratio" else int(float(value_str))
-                    # 현재 watchlist 값 조회
-                    from data.db import get_watchlist
-                    stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
-                    old_val = 0
-                    if stock:
-                        import json as _json
-                        cond_data = _json.loads(stock.get("conditions", "{}")) if isinstance(stock.get("conditions"), str) else stock.get("conditions", {})
-                        old_val = int(cond_data.get(field) or 0)
-                    if new_val != old_val:  # 실제 변경이 있는 경우만 포함
-                        threshold_changes.append({"field": field, "old": old_val, "new": new_val})
+            # 전략 원칙상 자동 제안 허용 필드만 포함
+            # - stop_loss_price/target_price: 진입 시 확정, AI 자동 변경 금지
+            # - rsi_oversold: 빈번한 변경 금지 (신호 빈도 조절 목적 차단)
+            allowed = {"rsi_overbought", "rsi_oversold_intraday", "volume_surge_ratio"}
+            for match in re.finditer(r"(\w+)\s*=\s*([\d,]+(?:\.\d+)?)", content):
+                field, value_str = match.group(1), match.group(2).replace(",", "")
+                if field not in allowed:
+                    logger.warning(f"[{signal.stock_name}] 임계값 허용되지 않은 필드 무시: {field}={value_str}")
+                    continue
+                # volume_surge_ratio는 소수점 유지, 나머지는 정수
+                new_val = float(value_str) if field == "volume_surge_ratio" else int(float(value_str))
+                # 현재 watchlist 값 조회
+                from data.db import get_watchlist
+                stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
+                old_val = 0
+                if stock:
+                    import json as _json
+                    cond_data = _json.loads(stock.get("conditions", "{}")) if isinstance(stock.get("conditions"), str) else stock.get("conditions", {})
+                    old_val = int(cond_data.get(field) or 0)
+                if new_val != old_val:  # 실제 변경이 있는 경우만 포함
+                    threshold_changes.append({"field": field, "old": old_val, "new": new_val})
 
     # 전략 노트는 임계값이 실제로 적용될 때만 저장됨 (_apply_threshold_change 참고)
     if threshold_changes:

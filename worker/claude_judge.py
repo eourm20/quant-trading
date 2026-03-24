@@ -482,7 +482,8 @@ def _fmt_signal_history(stock_code: str, signal_type: str = "") -> str:
             dt = str(r["created_at"])[:10]
             price = r["current_price"]
             opinion = str(r["claude_opinion"] or "")
-            verdict = next((tag for tag in ["[매수]", "[매도]", "[홀드]"] if tag in opinion), "?")
+            first_line = opinion.strip().splitlines()[0] if opinion.strip() else ""
+            verdict = next((tag for tag in ["[매수]", "[매도]", "[홀드]"] if tag in first_line), "?")
             action = r.get("action") or ""
             result = r.get("result_pct")
             result_str = f"{result:+.1f}%" if result is not None else "집계 중"
@@ -510,7 +511,8 @@ def _fmt_last_ai_decision(stock_code: str) -> str:
             return "오늘 없음"
         dt = str(row["created_at"])[11:16]
         opinion = str(row["claude_opinion"] or "")
-        verdict = next((tag for tag in ["[매수]", "[매도]", "[홀드]"] if tag in opinion), "")
+        first_line = opinion.strip().splitlines()[0] if opinion.strip() else ""
+        verdict = next((tag for tag in ["[매수]", "[매도]", "[홀드]"] if tag in first_line), "")
         # 첫 줄은 verdict 태그 자체이므로 두 번째 줄(첫 번째 근거)을 표시
         lines = [l.strip() for l in opinion.strip().splitlines() if l.strip() and not l.strip().startswith("[")]
         summary = lines[0][:80] if lines else ""
@@ -549,6 +551,31 @@ def get_trade_opinion(
                 add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 현재가 대비 {gap_pct:.1f}% 위"
             else:
                 add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 이미 트리거 이하 ({abs(gap_pct):.1f}% 초과)"
+
+    # watchlist 현재 설정값 조회
+    _wl_settings_text = ""
+    try:
+        from data.db import get_watchlist
+        import json as _json
+        _stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
+        if _stock:
+            _cond = _json.loads(_stock.get("conditions", "{}")) if isinstance(_stock.get("conditions"), str) else _stock.get("conditions", {})
+            _settings = []
+            for _f, _label in [
+                ("target_price", "목표가"),
+                ("stop_loss_price", "손절가"),
+                ("rsi_oversold", "RSI 과매도"),
+                ("rsi_overbought", "RSI 과매수"),
+                ("rsi_oversold_intraday", "RSI 과매도(분봉)"),
+                ("volume_surge_ratio", "거래량 배율"),
+            ]:
+                _v = _cond.get(_f)
+                if _v is not None:
+                    _settings.append(f"{_label}: {_v} ({_f})")
+            if _settings:
+                _wl_settings_text = "\n- 현재 임계값 설정: " + " / ".join(_settings)
+    except Exception:
+        pass
 
     # 목표가·손절가 R/R 계산
     tp = getattr(signal, "target_price", None) or None
@@ -593,6 +620,7 @@ def get_trade_opinion(
 - add 신호: 보유 중 추가매수 타이밍 검토. 평단 낮추기 효과와 리스크를 함께 판단. 오늘 신규 진입 종목이면 홀드 권고.
 - both 신호: 미보유면 entry 기준, 보유 중이면 exit 기준으로 분기 판단.
 - 홀드 판단 시: 구체적인 전환 트리거를 수치로 명시할 것.
+- [임계값] 변경 원칙: 기존 설정값 유지가 기본이며, 대부분의 홀드에서 [임계값] 줄은 생략해야 정상. 변경 제안 시 반드시 근거를 근거 항목에 명시. 기존값 대비 ±3 초과 변경 금지 (예: 기존 rsi_overbought=65이면 62~68 범위만 허용).
 - 시장 전반 하락은 entry 신호의 홀드 근거가 되기 어려움. R/R 기준 우선.
 - 섹터 등락률 -2% 이상 하락 중이면 entry 신호를 신중하게 볼 것.
 - 섹터 등락률 +1% 이상이면 exit 신호(익절)를 신중하게 볼 것.
@@ -606,7 +634,7 @@ def get_trade_opinion(
 [주문방식] 시장가 or 지정가 — 이유 한 문장 (홀드이면 이 줄 생략)
 [추천수량] N주 (약 XXX만원) — 주문가능금액 내에서, 포트폴리오 대비 5~15% 비중 기준. 주문가능금액 초과 금지. (홀드이면 이 줄 생략. 포트폴리오/예수금 정보 없으면 생략)
 [전환조건] 홀드 시 매수/매도 전환 트리거 명시 (홀드가 아니면 이 줄 생략)
-[임계값] 홀드 시만, 변경 권고 임계값을 field=value 형식으로 파이프(|) 구분 (허용: rsi_oversold/rsi_overbought/rsi_oversold_intraday/volume_surge_ratio/target_price/stop_loss_price). 예: rsi_oversold=35 | volume_surge_ratio=1.5 | stop_loss_price=32000 — 없으면 이 줄 생략
+[임계값] 홀드 시만, 기존 설정이 구조적으로 부적합할 때만 변경 제안. field=value 형식, 파이프(|) 구분 (허용: rsi_overbought/rsi_oversold_intraday/volume_surge_ratio | 금지: rsi_oversold/stop_loss_price/target_price). 기존값 대비 ±3 초과 변경 금지. 예: volume_surge_ratio=1.5 — 변경 불필요하면 이 줄 반드시 생략
 
 마크다운 헤더(#, ##) 사용 금지. 총 250단어 이내."""
 
@@ -639,7 +667,7 @@ def get_trade_opinion(
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 
 ## 종목 전략 설정
-- {rr_text}{add_trigger_text}
+- {rr_text}{add_trigger_text}{_wl_settings_text}
 
 ## 직전 AI 판단 (오늘)
 - {last_ai_text}

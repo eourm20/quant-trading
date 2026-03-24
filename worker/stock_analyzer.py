@@ -667,6 +667,7 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 - 균형 잡힌 시각으로 판단. 명확한 부적합 사유가 없고 1개 이상 강한 편입 조건이 있으면 편입 고려.
 - 데이터 부족만으로 보류하지 말 것. 확인 가능한 조건들로 판단.
 - 관심종목 등록 시 반드시 목표가·손절가·R/R을 수치로 제시.
+- target_price, stop_loss_price는 반드시 원(KRW) 단위 정수로 출력. 예: 51000 (O), 51 (X), 5.1만 (X), "51,000" (X)
 - 각 임계값과 조건 활성화의 설정 근거를 반드시 한 줄로 명시.
 - target_price, stop_loss_price는 관심종목 등록 시 반드시 활성화.
 - 단기 종목이 아니면 rsi_oversold_intraday 비활성화.
@@ -908,7 +909,11 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
                 # 1차 파싱 실패 시 JSON 정규화 재요청 후 재시도
                 repaired = _repair_screening_json(ai_text)
                 repaired_block = _extract_json_block(repaired) or repaired.strip()
-                result = json.loads(repaired_block)
+                try:
+                    result = json.loads(repaired_block)
+                except Exception:
+                    logger.warning(f"JSON 파싱 최종 실패: {repaired_block[:200]}")
+                    raise
 
             # R/R 1.5:1 미만이면 관심종목 등록 → 보류로 강제 변환
             rr = result.get("rr_ratio", 0)
@@ -966,6 +971,15 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
             val = cond_info.get("value")
             if val is None:
                 val = analysis.get(cond_id, 0)
+            # 콤마 제거 + 숫자 변환 (AI가 "51,000" 형태로 출력할 수 있음)
+            _int_fields = {"target_price", "stop_loss_price", "cci_oversold", "cci_overbought"}
+            try:
+                val = float(str(val).replace(",", "").strip())
+                if cond_id in _int_fields:
+                    val = int(val)
+            except (ValueError, TypeError):
+                logger.warning(f"[스크리닝] {stock_name} {cond_id}={val} 숫자 변환 실패 → 무시")
+                continue
             conditions[cond_id] = val
         elif cond_id in flag_fields:
             conditions[cond_id] = True
@@ -1022,8 +1036,8 @@ def _format_screening_alert(stock_name: str, stock_code: str, source: str, analy
         f"{reason}",
         f"",
         f"📌 *제안 전략*",
-        f"• 목표가 {target_price:,}원 — {analysis.get('target_price_reason', '')}",
-        f"• 손절가 {stop_loss_price:,}원 — {analysis.get('stop_loss_price_reason', '')}",
+        f"• 목표가 {f'{target_price:,}원' if target_price else '미설정'} — {analysis.get('target_price_reason', '')}",
+        f"• 손절가 {f'{stop_loss_price:,}원' if stop_loss_price else '미설정'} — {analysis.get('stop_loss_price_reason', '')}",
         f"• RSI 과매도 {rsi_oversold} — {analysis.get('rsi_oversold_reason', '')}",
         f"• RSI 과매수 {rsi_overbought} — {analysis.get('rsi_overbought_reason', '')}",
         f"• {analysis.get('horizon', '중기')} — {analysis.get('horizon_reason', '')}",
