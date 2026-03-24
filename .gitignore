@@ -13,3 +13,4 @@ logs/
 trading.db
 trading_real.db
 .claude/
+.dart_cache/
