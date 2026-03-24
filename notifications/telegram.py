@@ -15,7 +15,10 @@ TELEGRAM_MAX_LEN = 4000  # 실제 한도 4096, 여유 두고 4000
 
 
 def _post(text: str, parse_mode: str | None = "Markdown", reply_markup: dict | None = None) -> bool:
+    import logging
+    _logger = logging.getLogger(__name__)
     if not BOT_TOKEN or not CHAT_ID:
+        _logger.warning("[텔레그램] BOT_TOKEN 또는 CHAT_ID 미설정 — 알림 건너뜀")
         return False
     payload: dict = {"chat_id": CHAT_ID, "text": text}
     if parse_mode:
@@ -28,8 +31,11 @@ def _post(text: str, parse_mode: str | None = "Markdown", reply_markup: dict | N
             json=payload,
             timeout=10,
         )
+        if resp.status_code != 200:
+            _logger.warning(f"[텔레그램] 발송 실패: status={resp.status_code} body={resp.text[:200]}")
         return resp.status_code == 200
-    except Exception:
+    except Exception as e:
+        _logger.warning(f"[텔레그램] 발송 예외: {e}")
         return False
 
 

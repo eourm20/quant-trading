@@ -419,7 +419,9 @@ def run_intraday_scan():
 
             if auto_mode:
                 add_to_watchlist(cand["stock_code"], cand["stock_name"], analysis)
-                send_message(f"{alert_text}\n\n✅ *자동 관심종목 등록 완료*")
+                ok = send_message(f"{alert_text}\n\n✅ *자동 관심종목 등록 완료*")
+                if not ok:
+                    logger.warning(f"[장중 스캔] {cand['stock_name']} 텔레그램 알림 발송 실패")
                 added.append(cand["stock_name"])
                 if log_id:
                     try:
@@ -437,7 +439,9 @@ def run_intraday_scan():
                     "analysis": analysis,
                     "log_id": log_id,
                 }
-                send_message_with_inline_buttons(alert_text, buttons)
+                msg_id = send_message_with_inline_buttons(alert_text, buttons)
+                if msg_id is None:
+                    logger.warning(f"[장중 스캔] {cand['stock_name']} 텔레그램 버튼 알림 발송 실패")
                 pending.append(cand["stock_name"])
 
             time.sleep(2)
@@ -982,10 +986,14 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
 
     horizon = analysis.get("horizon", "중기")
 
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO watchlist (code, name, enabled, conditions, horizon) VALUES (?, ?, 1, ?, ?)",
-            (stock_code, stock_name, json.dumps(conditions, ensure_ascii=False), horizon),
+            "INSERT INTO watchlist (code, name, enabled, conditions, horizon, created_at) VALUES (?, ?, 1, ?, ?, ?) "
+            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, "
+            "conditions=excluded.conditions, horizon=excluded.horizon, "
+            "created_at=CASE WHEN watchlist.created_at = '' OR watchlist.created_at IS NULL THEN excluded.created_at ELSE watchlist.created_at END",
+            (stock_code, stock_name, json.dumps(conditions, ensure_ascii=False), horizon, now),
         )
         conn.commit()
 
@@ -1140,7 +1148,9 @@ def run_daily_screening():
             if auto_mode:
                 # 자동 모드: 즉시 등록 + 근거 포함 알림
                 add_to_watchlist(cand["stock_code"], cand["stock_name"], analysis)
-                send_message(f"{alert_text}\n\n✅ *자동 관심종목 등록 완료*")
+                ok = send_message(f"{alert_text}\n\n✅ *자동 관심종목 등록 완료*")
+                if not ok:
+                    logger.warning(f"[스크리닝] {cand['stock_name']} 텔레그램 알림 발송 실패")
                 added.append(cand["stock_name"])
                 if log_id:
                     try:
@@ -1162,7 +1172,9 @@ def run_daily_screening():
                     "analysis": analysis,
                     "log_id": log_id,
                 }
-                send_message_with_inline_buttons(alert_text, buttons)
+                msg_id = send_message_with_inline_buttons(alert_text, buttons)
+                if msg_id is None:
+                    logger.warning(f"[스크리닝] {cand['stock_name']} 텔레그램 버튼 알림 발송 실패")
                 pending.append(cand["stock_name"])
 
             time.sleep(2)  # API rate limit

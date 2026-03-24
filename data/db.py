@@ -302,7 +302,8 @@ def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO watchlist (code, name, enabled, conditions, created_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, conditions=excluded.conditions",
+            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, conditions=excluded.conditions, "
+            "created_at=CASE WHEN watchlist.created_at = '' OR watchlist.created_at IS NULL THEN excluded.created_at ELSE watchlist.created_at END",
             (code, name, int(enabled), json.dumps(conditions, ensure_ascii=False), now)
         )
         conn.commit()
