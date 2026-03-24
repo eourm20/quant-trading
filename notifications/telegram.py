@@ -40,7 +40,20 @@ def _post(text: str, parse_mode: str | None = "Markdown", reply_markup: dict | N
 
 
 def send_message(text: str) -> bool:
-    return _post(text)
+    if len(text) <= TELEGRAM_MAX_LEN:
+        return _post(text)
+    # 길이 초과 시 줄 단위로 분할 발송
+    lines = text.split("\n")
+    chunk = ""
+    ok = True
+    for line in lines:
+        if chunk and len(chunk) + len(line) + 1 > TELEGRAM_MAX_LEN:
+            ok = _post(chunk) and ok
+            chunk = ""
+        chunk = f"{chunk}\n{line}" if chunk else line
+    if chunk:
+        ok = _post(chunk) and ok
+    return ok
 
 
 def send_message_with_inline_buttons(text: str, buttons: list[list[dict]]) -> int | None:
