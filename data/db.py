@@ -52,8 +52,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS watchlist (
                 code       TEXT PRIMARY KEY,
                 name       TEXT NOT NULL,
-                enabled    INTEGER NOT NULL DEFAULT 1,
-                conditions TEXT NOT NULL DEFAULT '{}'
+                enabled    INTEGER NOT NULL DEFAULT 1
             )
         """)
         conn.execute("""
@@ -306,7 +305,11 @@ def init_db():
 def _migrate_watchlist_columns(conn):
     """conditions JSON → 개별 컬럼 마이그레이션 (1회성).
     JSON에 값이 있고 컬럼이 NULL이면 복사. 완료 후 conditions를 '{}'로 비움."""
-    rows = conn.execute("SELECT code, conditions FROM watchlist WHERE conditions != '{}'").fetchall()
+    # conditions 컬럼이 없으면 마이그레이션 불필요 (신규 DB)
+    try:
+        rows = conn.execute("SELECT code, conditions FROM watchlist WHERE conditions != '{}'").fetchall()
+    except Exception:
+        return  # conditions 컬럼 없음 — 신규 DB
     if not rows:
         return
     # 첫 번째 행에서 이미 컬럼에 값이 있는지 확인 (이미 마이그레이션 완료)
@@ -471,7 +474,7 @@ def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO watchlist (code, name, enabled, conditions, created_at) VALUES (?,?,?,'{}',?) "
+            "INSERT INTO watchlist (code, name, enabled, created_at) VALUES (?,?,?,?) "
             "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, "
             "created_at=CASE WHEN watchlist.created_at = '' OR watchlist.created_at IS NULL THEN excluded.created_at ELSE watchlist.created_at END",
             (code, name, int(enabled), now)
