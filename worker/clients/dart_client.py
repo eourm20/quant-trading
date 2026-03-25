@@ -11,11 +11,15 @@ import os
 import time
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 
-from worker import now_kst
+_KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))

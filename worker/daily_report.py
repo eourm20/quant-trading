@@ -2,8 +2,15 @@
 장 마감 후 일일 리포트 텔레그램 발송
 """
 
+from datetime import datetime, timezone, timedelta
+
 from data.db import get_today_signals, get_strategy_notes
-from worker import now_kst
+
+_KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 from notifications.telegram import send_message
 
 

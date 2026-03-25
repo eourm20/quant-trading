@@ -14,9 +14,13 @@ claude.ai에서 호출하거나 직접 실행 가능
 import argparse
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
-from worker import now_kst
+_KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

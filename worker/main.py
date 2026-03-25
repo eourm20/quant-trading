@@ -11,15 +11,21 @@ import logging.handlers
 import os
 import sys
 import time
-from datetime import datetime, time as dtime
-
-from worker import now_kst as _now_kst
+from datetime import datetime, time as dtime, timezone, timedelta as _td
 
 import yaml
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+_KST = timezone(_td(hours=9))
+
+
+def _now_kst() -> datetime:
+    """UTC/로컬 관계없이 항상 KST 현재 시각 반환 (naive — 기존 코드 호환)."""
+    return datetime.now(_KST).replace(tzinfo=None)
+
 
 # --env 인자를 imports 전에 미리 파싱 (모듈 레벨 코드가 올바른 환경변수를 읽도록)
 _project_root = os.path.join(os.path.dirname(__file__), '..')

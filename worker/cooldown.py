@@ -4,10 +4,15 @@
 장 시작(기본 08:30) 시 모든 쿨다운 초기화.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from data.db import get_cooldown, set_cooldown
-from worker import now_kst
+
+_KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 
 
 def filter_new_conditions(

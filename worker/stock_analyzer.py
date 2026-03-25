@@ -9,9 +9,13 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-from worker import now_kst
+_KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 
 from dotenv import load_dotenv
 
