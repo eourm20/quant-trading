@@ -593,18 +593,17 @@ def get_trade_opinion(
             else:
                 add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 이미 트리거 이하 ({abs(gap_pct):.1f}% 초과)"
 
-    # watchlist 현재 설정값 조회
+    # watchlist 현재 설정값 조회 + positions 포지션 관리 정보
     _wl_settings_text = ""
+    _position_text = ""
     try:
-        from data.db import get_watchlist
+        from data.db import get_watchlist, get_position
         import json as _json
         _stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
         if _stock:
             _cond = _json.loads(_stock.get("conditions", "{}")) if isinstance(_stock.get("conditions"), str) else _stock.get("conditions", {})
             _settings = []
             for _f, _label in [
-                ("target_price", "목표가"),
-                ("stop_loss_price", "손절가"),
                 ("rsi_oversold", "RSI 과매도"),
                 ("rsi_overbought", "RSI 과매수"),
                 ("rsi_oversold_intraday", "RSI 과매도(분봉)"),
@@ -615,10 +614,26 @@ def get_trade_opinion(
                     _settings.append(f"{_label}: {_v} ({_f})")
             if _settings:
                 _wl_settings_text = "\n- 현재 임계값 설정: " + " / ".join(_settings)
+
+        # 보유 종목이면 positions에서 포지션 관리 정보 조회
+        if signal.in_portfolio:
+            _pos = get_position(signal.stock_code)
+            if _pos:
+                _pos_items = []
+                if _pos.get("target_price"):
+                    _pos_items.append(f"목표가: {_pos['target_price']:,}원")
+                if _pos.get("stop_loss_price"):
+                    _pos_items.append(f"손절가: {_pos['stop_loss_price']:,}원")
+                if _pos.get("add_buy_price"):
+                    _pos_items.append(f"추가매수가: {_pos['add_buy_price']:,}원")
+                if _pos.get("mid_sell_price"):
+                    _pos_items.append(f"중간매도가: {_pos['mid_sell_price']:,}원")
+                if _pos_items:
+                    _position_text = "\n- 포지션 관리: " + " / ".join(_pos_items)
     except Exception:
         pass
 
-    # 목표가·손절가 R/R 계산
+    # 목표가·손절가 R/R 계산 (보유종목은 positions에서, 미보유는 signal에서)
     tp = getattr(signal, "target_price", None) or None
     sl = getattr(signal, "stop_loss_price", None) or None
     cur = signal.current_price
@@ -708,7 +723,7 @@ def get_trade_opinion(
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 
 ## 종목 전략 설정
-- {rr_text}{add_trigger_text}{_wl_settings_text}
+- {rr_text}{add_trigger_text}{_position_text}{_wl_settings_text}
 
 ## 직전 AI 판단 (오늘)
 - {last_ai_text}
@@ -766,3 +781,133 @@ def get_trade_opinion(
             ],
         )
         return response.choices[0].message.content
+
+
+def judge_position_values(
+    stock_code: str,
+    stock_name: str,
+    avg_price: int,
+    quantity: int,
+    current_price: int | None = None,
+) -> dict | None:
+    """매수 체결 후 AI가 포지션 관리값(목표가/손절가/추가매수가) 판단.
+    Returns: {"target_price": int, "stop_loss_price": int, "add_buy_price": int,
+              "target_reason": str, "stop_loss_reason": str, "add_buy_reason": str} or None
+    """
+    import json as _json
+    from worker.clients.kiwoom_client import KiwoomClient
+
+    try:
+        client = KiwoomClient()
+
+        # 현재가 조회
+        if not current_price:
+            price_data = client.get_current_price(stock_code)
+            current_price = _p(price_data.get("cur_prc") or price_data.get("stk_prpr") or price_data.get("prpr"))
+        if not current_price:
+            current_price = avg_price
+
+        # 90일 일봉 조회
+        daily_data = client.get_daily_ohlcv(stock_code, period=90)
+        close_prices, high_prices, low_prices = [], [], []
+        for d in daily_data:
+            cp = _p(d.get("cur_prc"))
+            hp = _p(d.get("high_pric"))
+            lp = _p(d.get("lwst_pric") or d.get("low_pric"))
+            if cp: close_prices.append(cp)
+            if hp: high_prices.append(hp)
+            if lp: low_prices.append(lp)
+
+        # 기술적 지표 요약
+        from worker.indicators import calculate_chart_summary
+        chart = calculate_chart_summary(
+            close_prices, high_prices, current_price,
+            low_prices=low_prices,
+        ) if len(close_prices) >= 20 else None
+
+        chart_text = ""
+        if chart:
+            parts = []
+            if chart.ma20: parts.append(f"MA20: {int(chart.ma20):,}")
+            if chart.support_level: parts.append(f"지지선: {int(chart.support_level):,}")
+            if chart.resistance_level: parts.append(f"저항선: {int(chart.resistance_level):,}")
+            if chart.bollinger_upper: parts.append(f"볼린저 상단: {int(chart.bollinger_upper):,}")
+            if chart.bollinger_lower: parts.append(f"볼린저 하단: {int(chart.bollinger_lower):,}")
+            if chart.trend: parts.append(f"추세: {chart.trend}")
+            if hasattr(chart, 'fibonacci') and chart.fibonacci:
+                fib = chart.fibonacci
+                if isinstance(fib, dict):
+                    fib_parts = [f"{k}: {v:,.0f}" for k, v in fib.items() if isinstance(v, (int, float)) and v > 0]
+                    if fib_parts:
+                        parts.append(f"피보나치: {', '.join(fib_parts[:4])}")
+            chart_text = " | ".join(parts)
+
+        # watchlist 설정 조회 (horizon 등)
+        from data.db import get_watchlist
+        wl_stock = next((s for s in get_watchlist() if s["code"] == stock_code), None)
+        horizon = wl_stock.get("horizon", "중기") if wl_stock else "중기"
+
+        system_prompt = """당신은 매수 체결 후 포지션 관리 값을 설정하는 퀀트 트레이딩 AI입니다.
+평단가, 차트 지표, 지지/저항선, 피보나치 레벨을 기반으로 합리적인 목표가·손절가·추가매수가를 산출하세요.
+
+## 원칙
+- 손절가: 평단가 대비 -5% ~ -10%. 직전 지지선 아래에 설정. 진입 후 변경 금지 원칙이므로 신중하게.
+- 목표가: R/R 비율 최소 2:1 이상. 피보나치 확장 127~161% 또는 직전 저항선 근처.
+- 추가매수가: 평단가 대비 -8% 근처. 지지선 부근. 물타기 1회 원칙.
+- horizon(단기/중기/장기)에 따라 목표/손절 폭 조절: 단기는 타이트하게, 장기는 여유있게.
+
+## 출력 형식 (JSON만, 설명 없이)
+{"target_price": 정수, "target_reason": "근거 한 줄", "stop_loss_price": 정수, "stop_loss_reason": "근거 한 줄", "add_buy_price": 정수, "add_buy_reason": "근거 한 줄"}"""
+
+        user_prompt = f"""## 매수 체결 정보
+- 종목: {stock_name} ({stock_code})
+- 평단가: {avg_price:,}원
+- 수량: {quantity}주
+- 현재가: {current_price:,}원
+- horizon: {horizon}
+
+## 차트 지표
+{chart_text or '데이터 부족'}
+
+## 최근 90일 가격 범위
+- 최고가: {max(high_prices[:20]):,}원 (20일)
+- 최저가: {min(low_prices[:20]):,}원 (20일)
+
+JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
+
+        if _BACKEND == "anthropic":
+            response = _client.messages.create(
+                model=MODEL,
+                max_tokens=300,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            text = response.content[0].text
+        else:
+            response = _client.chat.completions.create(
+                model=MODEL,
+                max_tokens=300,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            text = response.choices[0].message.content
+
+        # JSON 파싱
+        import re
+        json_match = re.search(r'\{[^}]+\}', text, re.DOTALL)
+        if json_match:
+            result = _json.loads(json_match.group())
+            # 정수 변환
+            for k in ("target_price", "stop_loss_price", "add_buy_price"):
+                if k in result:
+                    result[k] = int(float(str(result[k]).replace(",", "")))
+            return result
+
+        logger.warning(f"[{stock_name}] 포지션 AI 판단 JSON 파싱 실패: {text[:200]}")
+        return None
+
+    except Exception as e:
+        logger.error(f"[{stock_name}] 포지션 AI 판단 실패: {e}")
+        return None

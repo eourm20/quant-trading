@@ -447,9 +447,14 @@
           <td>종목코드, 이름, 조건 JSON</td>
         </tr>
         <tr>
-          <td>"목표가 XX원으로 바꿔줘"</td>
-          <td><code>quant_watchlist_update(code, "target_price", value)</code></td>
-          <td>종목코드, 필드명, 값</td>
+          <td>"목표가 XX원으로 바꿔줘" (보유종목)</td>
+          <td><code>quant_position_update(code, "target_price", value)</code></td>
+          <td>종목코드, 필드명, 값 (positions 테이블)</td>
+        </tr>
+        <tr>
+          <td>"포지션 관리 보여줘"</td>
+          <td><code>quant_positions_read()</code></td>
+          <td>- (보유종목 목표가/손절가/추가매수가)</td>
         </tr>
         <tr>
           <td>"이 종목 감시 해제해줘"</td>
@@ -548,14 +553,14 @@
           </div>
           <div class="arrow"></div>
           <div class="flow-row">
-            <div class="node node-db" style="min-width:180px;">편입 적합<small>목표가/손절가/horizon 제안</small></div>
+            <div class="node node-db" style="min-width:180px;">편입 적합<small>horizon + 신호 조건 제안 (목표가/손절가는 매수 후 확정)</small></div>
             <div class="node node-gray">보류<small>근거 제시</small></div>
             <div class="node node-gray">부적합<small>근거 제시</small></div>
           </div>
           <div class="arrow"></div>
           <div class="node node-mcp" style="min-width:300px;">
-            <strong>사용자 확인 후 watchlist 등록</strong>
-            <small>quant_watchlist_add(code, name, conditions)</small>
+            <strong>사용자 확인 후 watchlist 등록 (신호 조건만)</strong>
+            <small>quant_watchlist_add → 매수 후 positions 자동 생성</small>
           </div>
         </div>
       </div>
@@ -741,16 +746,18 @@
   <!-- ═══════════════════ MCP 도구 목록 ═══════════════════ -->
   <div id="tools" class="panel">
     <div class="section">
-      <h2>🔧 Quant MCP 도구 (17개)</h2>
+      <h2>🔧 Quant MCP 도구 (19개)</h2>
       <table>
         <tr><th>도구</th><th>설명</th><th>주요 파라미터</th></tr>
         <tr><td><code>quant_report</code></td><td>리포트 조회</td><td>type: signals|portfolio|trades|strategy|all</td></tr>
         <tr><td><code>quant_strategy_log</code></td><td>전략 노트 기록 + TG 발송</td><td>category, summary, detail</td></tr>
-        <tr><td><code>quant_portfolio_sync</code></td><td>포트폴리오 동기화</td><td>-</td></tr>
-        <tr><td><code>quant_watchlist_read</code></td><td>관심종목 조회</td><td>-</td></tr>
-        <tr><td><code>quant_watchlist_add</code></td><td>관심종목 추가</td><td>code, name, conditions (JSON)</td></tr>
-        <tr><td><code>quant_watchlist_update</code></td><td>관심종목 필드 수정</td><td>stock_code, field, value</td></tr>
+        <tr><td><code>quant_portfolio_sync</code></td><td>포트폴리오 + positions 동기화</td><td>-</td></tr>
+        <tr><td><code>quant_watchlist_read</code></td><td>관심종목 조회 (포지션 포함)</td><td>-</td></tr>
+        <tr><td><code>quant_watchlist_add</code></td><td>관심종목 추가 (신호 조건만)</td><td>code, name, conditions (JSON)</td></tr>
+        <tr><td><code>quant_watchlist_update</code></td><td>watchlist 필드 수정 (포지션 필드는 자동 라우팅)</td><td>stock_code, field, value</td></tr>
         <tr><td><code>quant_watchlist_delete</code></td><td>관심종목 삭제</td><td>stock_code</td></tr>
+        <tr style="background:#fff3cd;"><td><code>quant_positions_read</code></td><td>보유종목 포지션 관리 조회</td><td>- (목표가/손절가/추가매수가)</td></tr>
+        <tr style="background:#fff3cd;"><td><code>quant_position_update</code></td><td>포지션 필드 수정</td><td>stock_code, field, value</td></tr>
         <tr><td><code>quant_conditions_list</code></td><td>조건 정의 목록</td><td>-</td></tr>
         <tr><td><code>quant_condition_add</code></td><td>조건 추가</td><td>id, name, evaluator, param, ...</td></tr>
         <tr><td><code>quant_condition_update</code></td><td>조건 수정</td><td>id, name|cooldown|message|signal_type</td></tr>

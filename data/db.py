@@ -241,8 +241,85 @@ def init_db():
                 detail     TEXT NOT NULL DEFAULT ''
             )
         """)
+        # ── positions 테이블 (매수 후 포지션 관리용) ──
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS positions (
+                stock_code          TEXT PRIMARY KEY,
+                stock_name          TEXT NOT NULL,
+                avg_price           INTEGER NOT NULL DEFAULT 0,
+                quantity            INTEGER NOT NULL DEFAULT 0,
+                target_price        INTEGER NOT NULL DEFAULT 0,
+                stop_loss_price     INTEGER NOT NULL DEFAULT 0,
+                add_buy_price       INTEGER NOT NULL DEFAULT 0,
+                mid_sell_price      INTEGER NOT NULL DEFAULT 0,
+                rsi_oversold_add    INTEGER DEFAULT NULL,
+                bollinger_lower_break_add INTEGER DEFAULT NULL,
+                ma5_recovery_add    INTEGER DEFAULT NULL,
+                strategy_note       TEXT DEFAULT '',
+                created_at          TEXT NOT NULL DEFAULT '',
+                updated_at          TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        # positions 마이그레이션: 기존 보유종목 자동 생성
+        _migrate_positions(conn)
         conn.commit()
     _seed_conditions()
+
+
+def _migrate_positions(conn):
+    """기존 portfolio + watchlist 데이터로 positions 초기 생성 (1회성 마이그레이션)."""
+    pos_count = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+    port_count = conn.execute("SELECT COUNT(*) FROM portfolio").fetchone()[0]
+    if pos_count > 0 or port_count == 0:
+        return  # 이미 마이그레이션 완료이거나 포트폴리오 없음
+
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    holdings = conn.execute("SELECT * FROM portfolio").fetchall()
+    watchlist_map = {}
+    for row in conn.execute("SELECT code, conditions FROM watchlist").fetchall():
+        watchlist_map[row["code"]] = json.loads(row["conditions"])
+
+    for h in holdings:
+        code = h["stock_code"]
+        avg_price = h["avg_price"]
+        cond = watchlist_map.get(code, {})
+
+        # watchlist에 값이 있으면 가져오고, 없으면 평단가 기준 기본값
+        target_price = cond.get("target_price") or int(avg_price * 1.15) if avg_price else 0
+        stop_loss_price = cond.get("stop_loss_price") or int(avg_price * 0.93) if avg_price else 0
+
+        conn.execute(
+            """INSERT OR IGNORE INTO positions
+                (stock_code, stock_name, avg_price, quantity,
+                 target_price, stop_loss_price, add_buy_price,
+                 rsi_oversold_add, bollinger_lower_break_add, ma5_recovery_add,
+                 strategy_note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                code, h["stock_name"], avg_price, h["quantity"],
+                target_price, stop_loss_price,
+                int(avg_price * 0.92) if avg_price else 0,  # add_buy_price: 평단 -8%
+                cond.get("rsi_oversold_add") if isinstance(cond.get("rsi_oversold_add"), (int, float)) else None,
+                cond.get("bollinger_lower_break_add") if isinstance(cond.get("bollinger_lower_break_add"), (int, float)) else None,
+                cond.get("ma5_recovery_add") if isinstance(cond.get("ma5_recovery_add"), (int, float)) else None,
+                cond.get("strategy_note", ""),
+                now, now,
+            ),
+        )
+
+    # watchlist에서 positions로 이관된 필드 제거
+    _position_only_keys = {"target_price", "stop_loss_price"}
+    holding_codes = {h["stock_code"] for h in holdings}
+    for row in conn.execute("SELECT code, conditions FROM watchlist").fetchall():
+        cond = json.loads(row["conditions"])
+        keys_to_remove = _position_only_keys & set(cond.keys())
+        if keys_to_remove:
+            for k in keys_to_remove:
+                del cond[k]
+            conn.execute(
+                "UPDATE watchlist SET conditions = ? WHERE code = ?",
+                (json.dumps(cond, ensure_ascii=False), row["code"]),
+            )
 
 
 def _seed_conditions():
@@ -337,6 +414,114 @@ def delete_stock(code: str) -> bool:
         result = conn.execute("DELETE FROM watchlist WHERE code = ?", (code,))
         conn.commit()
     return result.rowcount > 0
+
+
+# ── positions (매수 후 포지션 관리) ────────────────────────────────────────
+
+def get_positions() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM positions ORDER BY rowid").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_position(stock_code: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM positions WHERE stock_code = ?", (stock_code,)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_position(
+    stock_code: str, stock_name: str, avg_price: int, quantity: int,
+    target_price: int = 0, stop_loss_price: int = 0,
+    add_buy_price: int = 0, mid_sell_price: int = 0,
+    **kwargs,
+):
+    """포지션 생성/갱신. kwargs로 rsi_oversold_add, bollinger_lower_break_add, ma5_recovery_add, strategy_note 전달 가능."""
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO positions
+                (stock_code, stock_name, avg_price, quantity,
+                 target_price, stop_loss_price, add_buy_price, mid_sell_price,
+                 rsi_oversold_add, bollinger_lower_break_add, ma5_recovery_add,
+                 strategy_note, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stock_code) DO UPDATE SET
+                stock_name=excluded.stock_name, avg_price=excluded.avg_price,
+                quantity=excluded.quantity, target_price=excluded.target_price,
+                stop_loss_price=excluded.stop_loss_price, add_buy_price=excluded.add_buy_price,
+                mid_sell_price=excluded.mid_sell_price,
+                rsi_oversold_add=excluded.rsi_oversold_add,
+                bollinger_lower_break_add=excluded.bollinger_lower_break_add,
+                ma5_recovery_add=excluded.ma5_recovery_add,
+                strategy_note=excluded.strategy_note,
+                updated_at=excluded.updated_at
+            """,
+            (
+                stock_code, stock_name, avg_price, quantity,
+                target_price, stop_loss_price, add_buy_price, mid_sell_price,
+                kwargs.get("rsi_oversold_add"),
+                kwargs.get("bollinger_lower_break_add"),
+                kwargs.get("ma5_recovery_add"),
+                kwargs.get("strategy_note", ""),
+                now, now,
+            ),
+        )
+        conn.commit()
+
+
+def update_position_field(stock_code: str, field: str, value) -> bool:
+    """포지션 단일 필드 수정."""
+    allowed = {
+        "target_price", "stop_loss_price", "add_buy_price", "mid_sell_price",
+        "rsi_oversold_add", "bollinger_lower_break_add", "ma5_recovery_add",
+        "strategy_note", "avg_price", "quantity",
+    }
+    if field not in allowed:
+        return False
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE positions SET {field} = ?, updated_at = ? WHERE stock_code = ?",
+            (value, now, stock_code),
+        )
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_position(stock_code: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM positions WHERE stock_code = ?", (stock_code,))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def create_position_from_trade(stock_code: str, stock_name: str, avg_price: int, quantity: int) -> bool:
+    """매수 체결 후 포지션 자동 생성. watchlist 조건에서 add 관련 값을 복사."""
+    with get_conn() as conn:
+        existing = conn.execute("SELECT stock_code FROM positions WHERE stock_code = ?", (stock_code,)).fetchone()
+        if existing:
+            return False  # 이미 존재
+
+        # watchlist에서 add 조건 복사
+        wl_row = conn.execute("SELECT conditions FROM watchlist WHERE code = ?", (stock_code,)).fetchone()
+        cond = json.loads(wl_row["conditions"]) if wl_row else {}
+
+        # 평단가 기준 기본값 계산
+        target_price = int(avg_price * 1.15) if avg_price else 0
+        stop_loss_price = int(avg_price * 0.93) if avg_price else 0
+        add_buy_price = int(avg_price * 0.92) if avg_price else 0
+
+    upsert_position(
+        stock_code, stock_name, avg_price, quantity,
+        target_price=target_price, stop_loss_price=stop_loss_price,
+        add_buy_price=add_buy_price,
+        rsi_oversold_add=cond.get("rsi_oversold_add") if isinstance(cond.get("rsi_oversold_add"), (int, float)) else None,
+        bollinger_lower_break_add=cond.get("bollinger_lower_break_add") if isinstance(cond.get("bollinger_lower_break_add"), (int, float)) else None,
+        ma5_recovery_add=cond.get("ma5_recovery_add") if isinstance(cond.get("ma5_recovery_add"), (int, float)) else None,
+        strategy_note=cond.get("strategy_note", ""),
+    )
+    return True
 
 
 # ── conditions_def ─────────────────────────────────────────────────────────

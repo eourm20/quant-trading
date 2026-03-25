@@ -39,7 +39,7 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 | reset_all_cooldowns | 1일 1회 | 09:00 | 장 시작 시 전 종목 쿨다운 초기화 |
 | sync (4개) | 2분~개별 | 08:30~18:05 | 포트폴리오 실시간 동기화 |
 | update_signal_results | 매 30분 | 09:00~18:00 | 신호 후 1/3/5/10일 수익률 자동 계산 |
-| check_trailing_stops | 매 30분 | 09:00~15:00 | 수익 구간 손절가 자동 상향 |
+| check_trailing_stops | 매 30분 | 09:00~15:00 | 수익 구간 손절가 자동 상향 (positions 테이블) |
 | check_inactive_stocks | 1일 1회 | 08:30 | 30일 미발동 종목 경고 |
 | check_removal_candidates | 매 30분 | 09:00~15:00 | 미보유 90일 미발동 자동 삭제 |
 | **run_intraday_scan** | 1일 2회 | 10:00, 13:00 | 장중 거래량 급증 경량 스캔 → 텔레그램 알림 |
@@ -91,7 +91,7 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 - 기존 watchlist 종목 제외 → 최대 30개 후보
 - 후보별 AI 분석: 차트 + DART + 뉴스 + 포트폴리오 + 시장환경
 - 편입 조건 5가지 중 2개 이상 충족 평가: 눌림목 / 저평가 / 테마미반영 / 실적개선 / 잠재성장
-- 자동 모드: watchlist 자동 추가 (목표가/손절가/RSI/horizon AI 설정 + 각 근거)
+- 자동 모드: watchlist 자동 추가 (RSI/horizon AI 설정 + 각 근거. 목표가/손절가는 매수 후 positions에서 관리)
 - 수동 모드: 텔레그램 알림 + [✅ 관심종목 등록] [❌ 패스] 버튼
 
 ### Claude Desktop 종목 추천 (수동)
@@ -140,13 +140,15 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 
 ## Claude Desktop (MCP 도구)
 
-### Quant MCP (15개)
+### Quant MCP (17개)
 | 도구 | 설명 |
 |------|------|
 | `quant_report` | 신호/포트폴리오/매매/전략 조회 |
 | `quant_strategy_log` | 전략 노트 기록 + 텔레그램 발송 |
-| `quant_portfolio_sync` | 포트폴리오 동기화 |
-| `quant_watchlist_read/add/update/delete` | 관심종목 CRUD |
+| `quant_portfolio_sync` | 포트폴리오 + positions 동기화 |
+| `quant_watchlist_read/add/update/delete` | 관심종목 CRUD (신호 감지 조건) |
+| `quant_positions_read` | 보유 종목 포지션 관리 조회 (목표가/손절가 등) |
+| `quant_position_update` | 포지션 필드 수정 |
 | `quant_conditions_list/add/update/remove` | 조건 정의 관리 |
 | `quant_signal_log_delete` | 신호 로그 삭제 |
 | `quant_strategy_note_update/delete` | 전략 노트 편집 |
@@ -212,7 +214,8 @@ quant_trading/
 
 | 테이블 | 용도 |
 |---|---|
-| `watchlist` | 모니터링 종목 + 조건값 (JSON) + horizon |
+| `watchlist` | 모니터링 종목 + 신호 감지 조건 (JSON) + horizon — 매수 전/후 공통 |
+| `positions` | 보유 종목 포지션 관리 (목표가/손절가/추가매수가 등) — 매수 후 자동 생성, 매도 후 자동 삭제 |
 | `conditions_def` | 시그널 조건 타입 29개 (평가 방식, 쿨다운, signal_type) |
 | `portfolio` | 보유 종목 현황 캐시 |
 | `trades` | 매매 내역 (30일) |

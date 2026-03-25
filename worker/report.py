@@ -33,6 +33,7 @@ from data.db import (
     get_portfolio_updated_at,
     get_trades,
     get_strategy_notes,
+    get_positions,
 )
 
 
@@ -72,6 +73,8 @@ def report_portfolio() -> str:
     if not holdings:
         return "📭 포트폴리오 없음 (동기화 필요: python worker/portfolio_sync.py)"
 
+    positions_map = {p["stock_code"]: p for p in get_positions()}
+
     total_eval = sum(h["eval_amount"] for h in holdings)
     total_profit = sum(h["profit_loss"] for h in holdings)
     total_cost = total_eval - total_profit
@@ -86,6 +89,18 @@ def report_portfolio() -> str:
             f"평단 {h['avg_price']:,}원 | 현재 {h['current_price']:,}원 | "
             f"{sign}{abs(rate):.2f}%"
         )
+        # 포지션 관리 정보 표시
+        pos = positions_map.get(h["stock_code"])
+        if pos:
+            pos_parts = []
+            if pos.get("target_price"):
+                tp_dist = (pos["target_price"] - h["current_price"]) / h["current_price"] * 100
+                pos_parts.append(f"목표 {pos['target_price']:,}원({tp_dist:+.1f}%)")
+            if pos.get("stop_loss_price"):
+                sl_dist = (pos["stop_loss_price"] - h["current_price"]) / h["current_price"] * 100
+                pos_parts.append(f"손절 {pos['stop_loss_price']:,}원({sl_dist:+.1f}%)")
+            if pos_parts:
+                lines.append(f"  └ {' | '.join(pos_parts)}")
     lines.append(
         f"\n▶ 합계: 평가 {total_eval:,}원 | "
         f"손익 {total_profit:+,}원 ({total_rate:+.1f}%)"

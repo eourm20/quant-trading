@@ -147,6 +147,12 @@ def check_stock(
     holding_codes = {str(h.get("stock_code", "")) for h in (holdings or [])}
     in_portfolio = code in holding_codes
 
+    # 보유 종목이면 positions 테이블에서 포지션 관리 데이터 로드
+    position_data = None
+    if in_portfolio:
+        from data.db import get_position
+        position_data = get_position(code)
+
     # 보유 여부에 따라 적용할 signal_type 결정
     # in_portfolio=True  → exit, both 조건만 평가
     # in_portfolio=False → entry, both 조건만 평가
@@ -213,6 +219,15 @@ def check_stock(
             except Exception as e:
                 logger.warning(f"[{name}] 5분봉 데이터 조회 실패: {e}")
 
+        # 보유 종목: positions 데이터를 조건 평가용에 merge
+        # target_price, stop_loss_price는 positions에서, 나머지는 watchlist에서
+        eval_cond = dict(cond)
+        if in_portfolio and position_data:
+            for pf in ("target_price", "stop_loss_price"):
+                pv = position_data.get(pf, 0)
+                if pv:
+                    eval_cond[pf] = pv
+
         triggered_msgs = []
         triggered_ids = []
         for cond_def in conditions:
@@ -221,7 +236,7 @@ def check_stock(
             # rsi_lte_intraday 조건은 단기 종목에만 평가
             if cond_def.get("evaluator") == "rsi_lte_intraday" and horizon != "단기":
                 continue
-            msg = _evaluate_condition(cond_def, cond, current_price, rsi, volume_ratio, chart, rsi_intraday)
+            msg = _evaluate_condition(cond_def, eval_cond, current_price, rsi, volume_ratio, chart, rsi_intraday)
             if msg:
                 triggered_msgs.append(msg)
                 triggered_ids.append(cond_def["id"])
@@ -240,6 +255,14 @@ def check_stock(
             from data.db import get_recent_trades_for_stock
             recent_trades = get_recent_trades_for_stock(code, days=3)
 
+            # 보유종목은 positions에서 목표가/손절가, 미보유는 0 (매수 전이므로 미설정)
+            if in_portfolio and position_data:
+                sig_target = position_data.get("target_price", 0)
+                sig_stop = position_data.get("stop_loss_price", 0)
+            else:
+                sig_target = 0
+                sig_stop = 0
+
             return Signal(
                 stock_code=code,
                 stock_name=name,
@@ -252,8 +275,8 @@ def check_stock(
                 sector_code=sector_code,
                 in_portfolio=in_portfolio,
                 signal_type=rep_signal_type,
-                target_price=cond.get("target_price") or 0,
-                stop_loss_price=cond.get("stop_loss_price") or 0,
+                target_price=sig_target,
+                stop_loss_price=sig_stop,
                 strategy_note=cond.get("strategy_note") or "",
                 horizon=horizon,
                 recent_trades=recent_trades,

@@ -41,7 +41,7 @@ load_dotenv(dotenv_path=_env_file, override=True)
 
 from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
-from worker.claude_judge import get_trade_opinion
+from worker.claude_judge import get_trade_opinion, judge_position_values
 from worker.cooldown import filter_new_conditions, mark_sent
 from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review
 from worker.portfolio_sync import sync_all
@@ -49,7 +49,8 @@ from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
                      update_signal_result, update_stock_field, save_strategy_note,
-                     get_cooldown, set_cooldown, get_last_signal_date, delete_stock)
+                     get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
+                     get_positions, get_position, update_position_field, create_position_from_trade)
 
 _log_prefix = os.getenv("LOG_PREFIX", "worker")
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
@@ -252,13 +253,15 @@ def check_trailing_stops():
     +10% → 손절가를 평단가 +5%로 상향
     +15% → 손절가를 평단가 +10%로 상향
     이미 설정된 손절가보다 낮으면 변경 안 함 (손절가는 항상 올리기만).
+    positions 테이블에서 손절가를 읽고 업데이트.
     """
     holdings = get_portfolio()
-    watchlist = {s["code"]: s for s in get_watchlist() if s.get("enabled")}
+    positions_map = {p["stock_code"]: p for p in get_positions()}
 
     for h in holdings:
         code = str(h.get("stock_code", ""))
-        if code not in watchlist:
+        pos = positions_map.get(code)
+        if not pos:
             continue
 
         avg_price = h.get("avg_price", 0)
@@ -266,9 +269,7 @@ def check_trailing_stops():
         if not avg_price or not current_price:
             continue
 
-        stock = watchlist[code]
-        cond = stock.get("conditions", {})
-        current_sl = cond.get("stop_loss_price") or 0
+        current_sl = pos.get("stop_loss_price") or 0
 
         profit_pct = (current_price - avg_price) / avg_price * 100
 
@@ -284,17 +285,17 @@ def check_trailing_stops():
         if candidate <= current_sl:
             continue
 
-        update_stock_field(code, "stop_loss_price", candidate)
+        update_position_field(code, "stop_loss_price", candidate)
         save_strategy_note(
             "watchlist",
-            f"{stock['name']} 손절가 트레일링 상향: {current_sl:,} → {candidate:,}원",
+            f"{pos['stock_name']} 손절가 트레일링 상향: {current_sl:,} → {candidate:,}원",
             f"수익률 {profit_pct:+.1f}% 도달, 평단 {avg_price:,}원 기준 자동 상향",
         )
         send_message(
-            f"📈 *{stock['name']}* 손절가 트레일링 상향\n"
+            f"📈 *{pos['stock_name']}* 손절가 트레일링 상향\n"
             f"수익률 *{profit_pct:+.1f}%* | {current_sl:,}원 → *{candidate:,}원*"
         )
-        logger.info(f"[트레일링] {stock['name']} 손절가 {current_sl:,} → {candidate:,}원 (수익률 {profit_pct:+.1f}%)")
+        logger.info(f"[트레일링] {pos['stock_name']} 손절가 {current_sl:,} → {candidate:,}원 (수익률 {profit_pct:+.1f}%)")
 
 
 def check_inactive_stocks():
@@ -440,14 +441,83 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
         reset_cooldowns_for_stock(signal.stock_code)
         if order_type == "1":
             set_add_cooldown_after_trade(signal.stock_code)
+            # 매수 후 포지션 자동 생성 (portfolio_sync에서 정확한 평단가로 갱신됨)
+            create_position_from_trade(signal.stock_code, signal.stock_name, signal.current_price, qty)
         if signal_id is not None:
             update_signal_action(signal_id, side)
         save_strategy_note("trade", f"{signal.stock_name} {qty}주 {side} (자동 매매)")
         from worker.portfolio_sync import sync_all as _sync
         _sync(kiwoom)
+
+        # 매수 후 AI 포지션 판단 (목표가/손절가/추가매수가 설정)
+        if order_type == "1":
+            _set_position_by_ai(signal.stock_code, signal.stock_name, signal.current_price, qty)
     except Exception as e:
         logger.error(f"[{signal.stock_name}] 자동 주문 실패: {e}")
         send_message(f"❌ 자동 주문 실패: *{signal.stock_name}* — `{e}`")
+
+
+def _set_position_by_ai(stock_code: str, stock_name: str, current_price: int, qty: int):
+    """매수 체결 후 AI가 포지션 관리값 판단 → positions 테이블 업데이트 + 텔레그램 알림."""
+    try:
+        # portfolio_sync로 갱신된 평단가 사용
+        from data.db import get_position
+        pos = get_position(stock_code)
+        avg_price = pos["avg_price"] if pos and pos.get("avg_price") else current_price
+
+        result = judge_position_values(stock_code, stock_name, avg_price, qty, current_price)
+        if not result:
+            logger.warning(f"[{stock_name}] AI 포지션 판단 실패 — 기본값 유지")
+            return
+
+        tp = result.get("target_price", 0)
+        sl = result.get("stop_loss_price", 0)
+        ab = result.get("add_buy_price", 0)
+
+        if tp:
+            update_position_field(stock_code, "target_price", tp)
+        if sl:
+            update_position_field(stock_code, "stop_loss_price", sl)
+        if ab:
+            update_position_field(stock_code, "add_buy_price", ab)
+
+        # 전략 노트 기록
+        detail_parts = []
+        if tp:
+            detail_parts.append(f"목표가 {tp:,}원 — {result.get('target_reason', '')}")
+        if sl:
+            detail_parts.append(f"손절가 {sl:,}원 — {result.get('stop_loss_reason', '')}")
+        if ab:
+            detail_parts.append(f"추가매수가 {ab:,}원 — {result.get('add_buy_reason', '')}")
+
+        save_strategy_note(
+            "watchlist",
+            f"{stock_name} 포지션 AI 설정 (평단 {avg_price:,}원)",
+            "\n".join(detail_parts),
+        )
+
+        # 텔레그램 알림
+        msg_lines = [f"📌 *{stock_name}* 포지션 AI 설정\n평단 *{avg_price:,}원* | {qty}주\n"]
+        if tp:
+            tp_pct = (tp - avg_price) / avg_price * 100
+            msg_lines.append(f"• 목표가 *{tp:,}원* ({tp_pct:+.1f}%) — {result.get('target_reason', '')}")
+        if sl:
+            sl_pct = (sl - avg_price) / avg_price * 100
+            msg_lines.append(f"• 손절가 *{sl:,}원* ({sl_pct:+.1f}%) — {result.get('stop_loss_reason', '')}")
+        if ab:
+            ab_pct = (ab - avg_price) / avg_price * 100
+            msg_lines.append(f"• 추가매수 *{ab:,}원* ({ab_pct:+.1f}%) — {result.get('add_buy_reason', '')}")
+        if tp and sl:
+            upside = (tp - avg_price) / avg_price * 100
+            downside = (avg_price - sl) / avg_price * 100
+            rr = upside / downside if downside else 0
+            msg_lines.append(f"\nR/R *{rr:.1f}:1*")
+
+        send_message("\n".join(msg_lines))
+        logger.info(f"[{stock_name}] AI 포지션 설정: 목표={tp:,} 손절={sl:,} 추매={ab:,}")
+
+    except Exception as e:
+        logger.error(f"[{stock_name}] AI 포지션 설정 실패: {e}")
 
 
 def run_check():

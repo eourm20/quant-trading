@@ -981,34 +981,41 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
     ai_conditions = analysis.get("enabled_conditions", {})
     conditions = {}
 
+    # 포지션 전용 필드 — watchlist에 넣지 않음 (매수 후 positions 테이블에서 관리)
+    _position_only_fields = {
+        "target_price", "stop_loss_price",
+        "rsi_oversold_add", "bollinger_lower_break_add", "ma5_recovery_add",
+    }
+
     # 값이 있는 조건 (임계값 설정)
     value_fields = {
-        "target_price", "stop_loss_price", "rsi_oversold", "rsi_overbought",
+        "rsi_oversold", "rsi_overbought",
         "rsi_oversold_intraday", "rsi_critical", "volume_surge_ratio",
         "cci_oversold", "cci_overbought",
     }
     # 불리언 조건 (활성화/비활성화만)
     flag_fields = {
         "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
-        "ma5_recovery", "ma5_recovery_add", "new_high_20d",
+        "ma5_recovery", "new_high_20d",
         "macd_golden_cross", "macd_death_cross",
         "bollinger_upper_break", "bollinger_lower_break",
-        "bollinger_lower_break_add", "bollinger_critical_below",
+        "bollinger_critical_below",
         "stochastic_golden_cross", "stochastic_death_cross",
         "ichimoku_golden_cross", "ichimoku_death_cross",
         "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
-        "rsi_oversold_add",
     }
 
     for cond_id, cond_info in ai_conditions.items():
         if not isinstance(cond_info, dict) or not cond_info.get("enabled"):
             continue
+        if cond_id in _position_only_fields:
+            continue  # 매수 후 positions에서 관리
         if cond_id in value_fields:
             val = cond_info.get("value")
             if val is None:
                 val = analysis.get(cond_id, 0)
             # 콤마 제거 + 숫자 변환 (AI가 "51,000" 형태로 출력할 수 있음)
-            _int_fields = {"target_price", "stop_loss_price", "cci_oversold", "cci_overbought"}
+            _int_fields = {"cci_oversold", "cci_overbought"}
             try:
                 val = float(str(val).replace(",", "").strip())
                 if cond_id in _int_fields:
@@ -1020,11 +1027,9 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
         elif cond_id in flag_fields:
             conditions[cond_id] = True
 
-    # AI가 enabled_conditions를 안 줬을 때 fallback
+    # AI가 enabled_conditions를 안 줬을 때 fallback (포지션 필드 제외)
     if not conditions:
         conditions = {
-            "target_price": analysis.get("target_price", 0),
-            "stop_loss_price": analysis.get("stop_loss_price", 0),
             "rsi_oversold": analysis.get("rsi_oversold", 40),
             "rsi_overbought": analysis.get("rsi_overbought", 65),
             "golden_cross": True,
@@ -1048,7 +1053,7 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
         conn.commit()
 
     logger.info(f"[관심종목 등록] {stock_name}({stock_code}) horizon={horizon} "
-                f"목표={analysis.get('target_price')} 손절={analysis.get('stop_loss_price')}")
+                f"조건수={len(conditions)} (목표가/손절가는 매수 후 positions에서 설정)")
     return True
 
 
@@ -1072,8 +1077,8 @@ def _format_screening_alert(stock_name: str, stock_code: str, source: str, analy
         f"{reason}",
         f"",
         f"📌 *제안 전략*",
-        f"• 목표가 {f'{target_price:,}원' if target_price else '미설정'} — {analysis.get('target_price_reason', '')}",
-        f"• 손절가 {f'{stop_loss_price:,}원' if stop_loss_price else '미설정'} — {analysis.get('stop_loss_price_reason', '')}",
+        f"• 목표가 {f'{target_price:,}원' if target_price else '미설정'} _(매수 후 확정)_ — {analysis.get('target_price_reason', '')}",
+        f"• 손절가 {f'{stop_loss_price:,}원' if stop_loss_price else '미설정'} _(매수 후 확정)_ — {analysis.get('stop_loss_price_reason', '')}",
         f"• RSI 과매도 {rsi_oversold} — {analysis.get('rsi_oversold_reason', '')}",
         f"• RSI 과매수 {rsi_overbought} — {analysis.get('rsi_overbought_reason', '')}",
         f"• {analysis.get('horizon', '중기')} — {analysis.get('horizon_reason', '')}",

@@ -1063,6 +1063,48 @@ class TelegramBot:
             except Exception:
                 pass
 
+            # 매수 후 포지션 자동 생성 + AI 판단
+            if order.order_type == "1":
+                try:
+                    from data.db import create_position_from_trade
+                    created = create_position_from_trade(order.stock_code, order.stock_name, 0, order.qty)
+                    if created:
+                        logger.info(f"[bot] 매수 후 포지션 생성: {order.stock_name}")
+                    # AI 포지션 판단 (별도 스레드로 비동기 실행)
+                    import threading
+                    def _ai_position():
+                        try:
+                            from worker.claude_judge import judge_position_values
+                            from data.db import update_position_field, save_strategy_note, get_position
+                            import time
+                            time.sleep(5)  # portfolio_sync 후 평단가 갱신 대기
+                            pos = get_position(order.stock_code)
+                            avg_price = pos["avg_price"] if pos and pos.get("avg_price") else 0
+                            result = judge_position_values(order.stock_code, order.stock_name, avg_price, order.qty)
+                            if result:
+                                for k in ("target_price", "stop_loss_price", "add_buy_price"):
+                                    if result.get(k):
+                                        update_position_field(order.stock_code, k, result[k])
+                                detail = "\n".join(
+                                    f"{k}: {result[k]:,}원 — {result.get(k.replace('_price','_reason'), result.get(k.replace('price','reason'), ''))}"
+                                    for k in ("target_price", "stop_loss_price", "add_buy_price") if result.get(k)
+                                )
+                                save_strategy_note("watchlist", f"{order.stock_name} 포지션 AI 설정", detail)
+                                tp = result.get("target_price", 0)
+                                sl = result.get("stop_loss_price", 0)
+                                ab = result.get("add_buy_price", 0)
+                                msg = f"📌 *{order.stock_name}* 포지션 AI 설정\n"
+                                if tp: msg += f"• 목표가 *{tp:,}원* — {result.get('target_reason', '')}\n"
+                                if sl: msg += f"• 손절가 *{sl:,}원* — {result.get('stop_loss_reason', '')}\n"
+                                if ab: msg += f"• 추가매수 *{ab:,}원* — {result.get('add_buy_reason', '')}"
+                                self._send(msg)
+                                logger.info(f"[bot] AI 포지션 설정: {order.stock_name} 목표={tp:,} 손절={sl:,}")
+                        except Exception as e:
+                            logger.error(f"[bot] AI 포지션 설정 실패: {e}")
+                    threading.Thread(target=_ai_position, daemon=True).start()
+                except Exception:
+                    pass
+
             # 전략 노트 기록
             try:
                 from data.db import save_strategy_note

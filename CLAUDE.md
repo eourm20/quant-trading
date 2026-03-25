@@ -98,7 +98,14 @@ DB(portfolio 테이블)는 동기화 시점의 스냅샷이므로 현재가·수
    - category: `"trade"`
    - summary: "종목명 N주 매수/매도"
    - detail: 대화에서 나온 매매 근거
-3. `quant_portfolio_sync` 도구로 포트폴리오 DB 동기화
+3. `quant_portfolio_sync` 도구로 포트폴리오 DB 동기화 (positions 테이블도 자동 생성/갱신)
+4. **매수 시** — `quant_portfolio_sync` 후 포지션 관리 값 AI 판단 + 사용자 확정:
+   - `quant_positions_read`로 자동 생성된 포지션 확인
+   - 차트 지표(일봉 90일), 지지/저항선, 피보나치 레벨을 직접 분석하여 목표가/손절가/추가매수가 제안
+   - 각 값의 설정 근거를 함께 안내 (예: "피보나치 161.8% 확장 기준 목표가 XX원")
+   - 원칙: 손절가 = 평단 -5~-10% + 직전 지지선 아래 / 목표가 = R/R ≥ 2:1 / 추가매수가 = 평단 -8% + 지지선 근처
+   - 사용자 확인 후 `quant_position_update`로 각 값 확정
+   - 자동모드(워커)/텔레그램 봇은 매수 체결 시 AI가 자동으로 판단·설정함
 
 ---
 
@@ -205,13 +212,17 @@ AI가 `[홀드]` 판단 + `[전환조건]` + `[임계값]`을 출력하면 워�
 | 요청 예시 | 도구 |
 |----------|------|
 | "관심종목 보여줘", "어떤 종목 보고 있어" | `quant_watchlist_read` |
-| "목표가/손절가/RSI 기준 바꿔줘" | `quant_watchlist_update(stock_code, field, value)` |
+| "RSI 기준 바꿔줘" (신호 조건) | `quant_watchlist_update(stock_code, field, value)` |
 | "이 종목도 모니터링해줘" | `quant_watchlist_add(code, name, conditions)` |
 | "이 종목 감시 목록에서 빼줘" | `quant_watchlist_delete(stock_code)` |
+| "목표가/손절가 바꿔줘" (보유종목) | `quant_position_update(stock_code, field, value)` |
+| "포지션 관리 정보 보여줘" | `quant_positions_read` |
 | "어떤 조건으로 신호 보내?" | `quant_conditions_list` |
 | "새 조건 추가해줘" | `quant_condition_add(...)` |
 | "조건 쿨다운/메시지/설명 바꿔줘" | `quant_condition_update(id, ...)` |
 | "조건 정의 삭제해줘" | `quant_condition_remove(id)` |
+
+> **주의**: 목표가/손절가/추가매수가 변경 시 — 보유 종목이면 `quant_position_update`, 미보유면 "매수 후 설정 가능"임을 안내.
 
 **신호 로그 (signals 테이블) — 실제 발생한 신호 이력**
 
@@ -259,7 +270,9 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 
 - MCP 서버: `kiwoom_mcp/kiwoom_mcp/server.py` — 모든 MCP 도구를 단일 서버(`kiwoom-mcp`)로 제공
 - 종목/조건 설정: DB (`data/trading_real.db`, SQLite) — MCP 도구로 실시간 반영
-- DB 모듈: `data/db.py` — 신호 로그, watchlist, 전략 노트 등 DB CRUD
+- DB 모듈: `data/db.py` — 신호 로그, watchlist, positions, 전략 노트 등 DB CRUD
+  - watchlist: 신호 감지 조건 (RSI, MA, 볼린저 등) — 매수 전/후 공통
+  - positions: 포지션 관리 (목표가, 손절가, 추가매수가 등) — 매수 후 전용, 매수 체결 시 자동 생성
 - 포트폴리오 동기화: `worker/portfolio_sync.py`
 - 리포트 조회: `worker/report.py`
 - 외부 API 클라이언트: `worker/clients/` (키움 경량, DART 경량, 뉴스) / `kiwoom_mcp/kiwoom_mcp/` (키움 풀, DART 풀)
@@ -296,14 +309,27 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 | `quant_portfolio_sync` | 키움 → DB 포트폴리오 동기화 | — |
 | `quant_cooldown_reset` | 매매 후 쿨다운 리셋 | `stock_code`, `reset_all` |
 
-### 관심종목 (watchlist)
+### 관심종목 (watchlist) — 매수 전 신호 감지용
 
 | 도구 | 설명 | 주요 파라미터 |
 |------|------|-------------|
-| `quant_watchlist_read` | 모니터링 종목 전체 조회 (보유 여부 포함) | — |
-| `quant_watchlist_update` | 종목 조건 수정 (목표가/손절가/RSI 등) | `stock_code`, `field`, `value` |
-| `quant_watchlist_add` | 모니터링 종목 추가 | `code`, `name`, `conditions` (JSON) |
+| `quant_watchlist_read` | 모니터링 종목 전체 조회 (보유 여부 + 포지션 포함) | — |
+| `quant_watchlist_update` | 종목 조건 수정 (RSI 등 신호 조건). 포지션 필드는 자동으로 positions 테이블로 라우팅 | `stock_code`, `field`, `value` |
+| `quant_watchlist_add` | 모니터링 종목 추가 (신호 감지 조건만. 목표가/손절가는 매수 후 positions에서 관리) | `code`, `name`, `conditions` (JSON) |
 | `quant_watchlist_delete` | 모니터링 종목 삭제 | `stock_code` |
+
+### 포지션 관리 (positions) — 매수 후 청산/추가매수 판단용
+
+| 도구 | 설명 | 주요 파라미터 |
+|------|------|-------------|
+| `quant_positions_read` | 보유 종목 포지션 관리 정보 조회 (목표가/손절가/추가매수가 등) | — |
+| `quant_position_update` | 포지션 필드 수정 | `stock_code`, `field`, `value` |
+
+> **watchlist vs positions 필드 구분**
+> - watchlist: `rsi_oversold`, `rsi_overbought`, `golden_cross`, `volume_surge_ratio` 등 — 신호 감지 조건
+> - positions: `target_price`, `stop_loss_price`, `add_buy_price`, `mid_sell_price`, `rsi_oversold_add`, `bollinger_lower_break_add`, `ma5_recovery_add` — 포지션 관리
+> - positions는 매수 체결 시 자동 생성 (기본값: 목표 +15%, 손절 -7%, 추가매수 -8%)
+> - 매도 후 portfolio_sync 시 자동 삭제
 
 ### 신호 조건 (conditions_def)
 

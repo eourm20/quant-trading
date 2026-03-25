@@ -681,15 +681,18 @@
     <div class="section">
       <h2>📦 관심종목 등록 시 설정되는 값</h2>
       <p style="font-size:13px;color:#666;margin-bottom:12px;">
-        AI가 29개 모니터링 조건 각각에 대해 <strong>활성화/비활성화 + 값 + 설정 근거</strong>를 판단합니다.
+        AI가 29개 모니터링 조건 각각에 대해 <strong>활성화/비활성화 + 값 + 설정 근거</strong>를 판단합니다.<br>
+        <strong>목표가/손절가/추가매수 조건</strong>은 watchlist에 넣지 않고, <strong>매수 체결 후 positions 테이블에서 평단가 기준으로 자동 생성</strong>됩니다.
       </p>
       <table>
         <tr><th>구분</th><th>필드</th><th>값</th><th>소스</th></tr>
-        <tr><td rowspan="5">임계값<br>(AI 제안 + 근거)</td><td>target_price</td><td>정수</td><td>피보나치 확장 127~161% / 직전 고점 저항선</td></tr>
-        <tr><td>stop_loss_price</td><td>정수</td><td>평단 -5~-10% / 직전 지지선 아래</td></tr>
-        <tr><td>rsi_oversold</td><td>38~43</td><td>종목 변동성 기반</td></tr>
+        <tr><td rowspan="3">watchlist 임계값<br>(스크리닝 시 설정)</td><td>rsi_oversold</td><td>38~43</td><td>종목 변동성 기반</td></tr>
         <tr><td>rsi_overbought</td><td>60~75</td><td>매매 기간(horizon) 기반</td></tr>
         <tr><td>volume_surge_ratio</td><td>1.5~3.0</td><td>종목 평균 거래량 대비</td></tr>
+        <tr><td rowspan="4" style="background:#fff3cd;">positions 임계값<br>(매수 후 자동 생성)</td><td>target_price</td><td>평단 +15%</td><td>매수 후 평단가 기준 자동 계산</td></tr>
+        <tr style="background:#fff3cd;"><td>stop_loss_price</td><td>평단 -7%</td><td>매수 후 평단가 기준 자동 계산</td></tr>
+        <tr style="background:#fff3cd;"><td>add_buy_price</td><td>평단 -8%</td><td>물타기 트리거 가격</td></tr>
+        <tr style="background:#fff3cd;"><td>mid_sell_price</td><td>-</td><td>중간 익절가 (필요 시 수동 설정)</td></tr>
         <tr><td rowspan="2">전략<br>(AI 제안 + 근거)</td><td>horizon</td><td>단기/중기/장기</td><td>종목 특성 + 진입 시점</td></tr>
         <tr><td>R/R ratio</td><td>≥ 2.0:1</td><td>목표가-손절가 기반 (미달 시 보류)</td></tr>
         <tr><td rowspan="2">조건 활성화<br>(AI 종목별 판단)</td><td>29개 모니터링 조건</td><td>true/false</td><td>종목 특성에 맞는 조건만 활성화 + 각 근거</td></tr>
