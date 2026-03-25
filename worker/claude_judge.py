@@ -561,6 +561,35 @@ def _fmt_last_ai_decision(stock_code: str) -> str:
         return "조회 실패"
 
 
+def _fmt_last_hold_condition(stock_code: str) -> str:
+    """해당 종목의 최근 7일 이내 홀드 전환조건 조회 (최신 1건)."""
+    try:
+        from data.db import get_conn
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT created_at, claude_opinion FROM signals "
+                "WHERE stock_code = ? AND created_at >= ? "
+                "AND claude_opinion IS NOT NULL AND claude_opinion LIKE '%[홀드]%' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (stock_code, cutoff),
+            ).fetchone()
+        if not row:
+            return ""
+        opinion = str(row["claude_opinion"] or "")
+        # [전환조건] 라인 추출
+        for line in opinion.splitlines():
+            if "[전환조건]" in line:
+                condition = line.split("[전환조건]", 1)[1].strip()
+                if condition:
+                    dt = str(row["created_at"])[:16]
+                    return f"- 이전 홀드 전환조건 ({dt}): {condition}"
+        return ""
+    except Exception:
+        return ""
+
+
 def get_trade_opinion(
     signal,
     holdings: list[dict],
@@ -574,6 +603,7 @@ def get_trade_opinion(
     conditions_text = "\n".join(f"    - {c}" for c in signal.triggered_conditions)
     trades_text = _fmt_trades(recent_trades or [], signal.signal_type)
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
+    hold_condition_text = _fmt_last_hold_condition(signal.stock_code)
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
     insights_text = _fmt_recent_insights()
 
@@ -725,6 +755,7 @@ def get_trade_opinion(
 
 ## 직전 AI 판단 (오늘)
 - {last_ai_text}
+{hold_condition_text}
 
 ## 과거 AI 판단 이력 — {signal.signal_type} 신호 기준 (최근 5건)
 {history_text}
