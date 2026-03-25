@@ -690,8 +690,14 @@
         <tr><td><code>trade</code></td><td>매매 근거 기록</td><td>매수/매도 실행 후</td></tr>
         <tr><td><code>watchlist</code></td><td>조건 변경 이유</td><td>목표가/손절가/RSI 변경 시</td></tr>
         <tr><td><code>general</code></td><td>전략 방향 기록</td><td>전략 수립/변경 시</td></tr>
-        <tr><td><code>daily_review</code></td><td>하루 복기 총평</td><td>장 마감 후 복기 시</td></tr>
+        <tr><td><code>daily_review</code></td><td>하루 복기 총평</td><td>장 마감 후 복기 시 (수동) / 매일 16:10 (자동)</td></tr>
       </table>
+      <div class="info" style="margin-top:12px;">
+        <strong>자동 복기 (워커):</strong> 자동 모드에서는 매일 16:10에 AI가 자동으로 일일 복기를 수행합니다.
+        복기 결과의 [적중률분석], [스크리닝평가], [개선제안] 섹션은 다음날 판단 AI와 스크리닝 AI의 프롬프트에 자동 주입되어
+        <strong>학습 피드백 루프</strong>를 형성합니다.
+        → <a href="5_auto_mode.html">자동 모드 가이드 — 일일 복기 탭</a> 참고
+      </div>
     </div>
 
     <div class="section">

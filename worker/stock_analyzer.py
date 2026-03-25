@@ -680,6 +680,33 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 - 불필요한 add 조건은 초기 등록 시 비활성화 (보유 전이므로)."""
 
 
+def _build_screening_insights() -> str:
+    """과거 스크리닝 성과 + 최근 daily review 중 스크리닝 관련 인사이트 (3줄 이내)."""
+    try:
+        from data.db import get_screening_accuracy, get_recent_daily_reviews
+        parts = []
+
+        acc = get_screening_accuracy(days=30)
+        if acc and acc.get("total", 0) >= 3:
+            parts.append(
+                f"30일 추천 {acc['total']}건: "
+                f"7일적중 {acc.get('hit_7d', 'N/A')}% (평균{acc.get('avg_7d', 'N/A')}%) / "
+                f"30일적중 {acc.get('hit_30d', 'N/A')}% (평균{acc.get('avg_30d', 'N/A')}%)"
+            )
+
+        reviews = get_recent_daily_reviews(limit=1)
+        if reviews:
+            detail = reviews[0].get("detail", "")
+            for line in detail.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[스크리닝평가]") or stripped.startswith("[개선제안]"):
+                    parts.append(stripped)
+
+        return "\n".join(parts) if parts else "데이터 부족"
+    except Exception:
+        return "조회 실패"
+
+
 # ═══════════════════════════ AI 편입 분석 ═══════════════════════════
 
 def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_text: str | None = None) -> dict:
@@ -880,7 +907,10 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
 {portfolio_context}
 
 ## 시장 환경
-{market_text}"""
+{market_text}
+
+## 과거 스크리닝 성과 (자기 보정용)
+{_build_screening_insights()}"""
 
     try:
         if _AI_BACKEND == "anthropic":
@@ -1251,3 +1281,144 @@ def handle_screening_callback(stock_code: str, action: str) -> str:
             except Exception:
                 pass
         return f"❌ {pending['stock_name']} 패스"
+
+
+# ═══════════════════════════ 일일 자동 복기 ═══════════════════════════
+
+
+def run_daily_review():
+    """장 마감 후 AI 자동 복기: 오늘 신호·매매·포트폴리오 분석 → 전략노트 저장 + 텔레그램."""
+    from data.db import (
+        get_today_signals, get_portfolio, get_trades,
+        get_verdict_accuracy, save_strategy_note, get_screening_accuracy,
+    )
+    from notifications.telegram import send_message
+
+    if not _ai_client:
+        logger.warning("[일일복기] AI 클라이언트 미설정 — 건너뜀")
+        return
+
+    today_str = now_kst().strftime("%Y-%m-%d")
+    logger.info(f"[일일복기] {today_str} 복기 시작")
+
+    # ── 데이터 수집 ──
+    signals = get_today_signals()
+    trades = get_trades(limit=30)
+    today_trades = [t for t in trades if str(t.get("executed_at", "")).startswith(today_str)]
+    portfolio = get_portfolio()
+    accuracy_14d = get_verdict_accuracy(days=14)
+    screening_acc = get_screening_accuracy(days=30)
+
+    # 신호 요약 (최대 15건, 핵심만)
+    signal_lines = []
+    for s in signals[:15]:
+        verdict = s.get("verdict") or "?"
+        name = s.get("stock_name", "")
+        price = s.get("current_price", 0)
+        conds = s.get("triggered_conditions", "")
+        r1d = s.get("result_1d")
+        result_str = f" | 1일후:{r1d:+.1f}%" if r1d is not None else ""
+        signal_lines.append(f"  {name} [{verdict}] {price:,}원 | {conds}{result_str}")
+
+    # 매매 요약
+    trade_lines = []
+    for t in today_trades[:10]:
+        trade_lines.append(
+            f"  {t.get('stock_name','')} {t.get('side','')} {t.get('quantity',0)}주 @ {t.get('price',0):,}원"
+        )
+
+    # 포트폴리오 요약
+    total_eval = sum(p.get("eval_amount", 0) for p in portfolio)
+    total_pl = sum(p.get("profit_loss", 0) for p in portfolio)
+    port_lines = []
+    for p in portfolio[:10]:
+        rate = p.get("profit_rate", 0)
+        port_lines.append(f"  {p.get('stock_name','')} {rate:+.1f}%")
+
+    # 적중률 요약
+    acc_lines = []
+    for v, a in accuracy_14d.items():
+        hit = a.get("hit_rate_3d")
+        avg3 = a.get("avg_3d")
+        acc_lines.append(f"  {v}: {a['count']}건, 적중률 {hit}%, 평균3일 {avg3:+.1f}%")
+
+    # 스크리닝 성과
+    scr_text = ""
+    if screening_acc:
+        scr_text = (
+            f"추천 {screening_acc['total']}건"
+            f" | 7일적중 {screening_acc.get('hit_7d', 'N/A')}%"
+            f" | 30일적중 {screening_acc.get('hit_30d', 'N/A')}%"
+        )
+
+    # ── AI 프롬프트 구성 (간결하게) ──
+    user_prompt = f"""## {today_str} 장 마감 복기 데이터
+
+### 오늘 신호 ({len(signals)}건)
+{chr(10).join(signal_lines) if signal_lines else "없음"}
+
+### 오늘 매매 ({len(today_trades)}건)
+{chr(10).join(trade_lines) if trade_lines else "없음"}
+
+### 포트폴리오 (평가액 {total_eval:,}원, 손익 {total_pl:+,}원)
+{chr(10).join(port_lines) if port_lines else "보유 없음"}
+
+### 최근 14일 AI 판정 적중률
+{chr(10).join(acc_lines) if acc_lines else "데이터 부족"}
+
+### 최근 30일 스크리닝 성과
+{scr_text or "데이터 부족"}
+
+위 데이터를 분석하여 아래 형식으로 하루 복기를 작성하세요.
+
+## 출력 형식 (엄격히 준수)
+[시장총평] 1~2문장
+[신호분석] 오늘 주요 신호와 AI 판정 평가 (2~3문장)
+[매매평가] 오늘 매매 실행 평가, 없으면 "매매 없음" (1~2문장)
+[적중률분석] 최근 판정별 적중률 분석, 오판 패턴이 있으면 지적 (2~3문장)
+[스크리닝평가] 종목 추천 성과 분석, 없으면 생략 (1~2문장)
+[내일주의] 내일 주의사항/확인할 포인트 (2~3개 bullet)
+[개선제안] AI 판단 개선을 위한 구체적 제안 (1~2개, 없으면 생략)
+
+총 300자 이내. 마크다운 헤더(#) 금지."""
+
+    system_prompt = (
+        "당신은 퀀트 트레이딩 시스템의 일일 복기 분석가입니다. "
+        "데이터 기반으로 냉정하게 평가하고, 구체적 개선점을 제시합니다. "
+        "감정적 표현 없이 수치 중심으로 작성하세요."
+    )
+
+    try:
+        if _AI_BACKEND == "anthropic":
+            response = _ai_client.messages.create(
+                model=_AI_MODEL,
+                max_tokens=600,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            review_text = response.content[0].text
+        else:
+            response = _ai_client.chat.completions.create(
+                model=_AI_MODEL,
+                max_tokens=600,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            review_text = response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"[일일복기] AI 호출 실패: {e}")
+        return
+
+    # ── 전략노트 저장 ──
+    summary = f"{today_str} 자동 복기"
+    save_strategy_note("daily_review", summary, review_text)
+    logger.info(f"[일일복기] 전략노트 저장 완료")
+
+    # ── 텔레그램 발송 (4000자 제한) ──
+    tg_text = f"📊 *{today_str} 일일 복기*\n\n{review_text}"
+    if len(tg_text) > 3900:
+        tg_text = tg_text[:3900] + "\n\n_(이하 생략)_"
+    send_message(tg_text)
+    logger.info(f"[일일복기] 텔레그램 발송 완료")

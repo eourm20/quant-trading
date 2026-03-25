@@ -494,6 +494,46 @@ def _fmt_signal_history(stock_code: str, signal_type: str = "") -> str:
         return "조회 실패"
 
 
+def _fmt_recent_insights() -> str:
+    """최근 daily review 인사이트 + 적중률 요약 (판단 AI 프롬프트 주입용).
+    프롬프트 토큰 절약을 위해 최대 5줄로 압축.
+    """
+    try:
+        from data.db import get_recent_daily_reviews, get_verdict_accuracy
+        # 최근 복기 1건 — 핵심만 추출
+        reviews = get_recent_daily_reviews(limit=1)
+        review_line = ""
+        if reviews:
+            detail = reviews[0].get("detail", "")
+            # [개선제안]과 [적중률분석] 줄만 추출
+            for line in detail.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("[적중률분석]") or stripped.startswith("[개선제안]"):
+                    review_line += stripped + "\n"
+            if not review_line:
+                # 없으면 첫 2줄
+                lines = [l.strip() for l in detail.splitlines() if l.strip()]
+                review_line = "\n".join(lines[:2])
+
+        # 최근 14일 적중률 요약 — 1줄
+        accuracy = get_verdict_accuracy(days=14)
+        acc_parts = []
+        for v in ["매수", "매도", "홀드"]:
+            a = accuracy.get(v)
+            if a and a["count"] >= 3:
+                acc_parts.append(f"{v} {a['count']}건 적중{a['hit_rate_3d']}% 평균{a['avg_3d']:+.1f}%")
+        acc_line = " / ".join(acc_parts) if acc_parts else ""
+
+        parts = []
+        if acc_line:
+            parts.append(f"14일 성과: {acc_line}")
+        if review_line:
+            parts.append(review_line.strip())
+        return "\n".join(parts) if parts else "데이터 부족"
+    except Exception:
+        return "조회 실패"
+
+
 def _fmt_last_ai_decision(stock_code: str) -> str:
     """오늘 해당 종목의 직전 AI 판단 조회."""
     try:
@@ -535,6 +575,7 @@ def get_trade_opinion(
     trades_text = _fmt_trades(recent_trades or [], signal.signal_type)
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
+    insights_text = _fmt_recent_insights()
 
     # add 신호: 물타기 트리거(평단 -8%)까지 거리
     add_trigger_text = ""
@@ -696,7 +737,10 @@ def get_trade_opinion(
 ## 시장 환경
 {_fmt_index(kospi, '코스피')}
 {_fmt_index(kosdaq, '코스닥')}
-{_fmt_sector(sector, signal.sector_code)}"""
+{_fmt_sector(sector, signal.sector_code)}
+
+## 최근 AI 판단 성과 (자기 보정용)
+{insights_text}"""
 
     if _BACKEND == "anthropic":
         response = _client.messages.create(

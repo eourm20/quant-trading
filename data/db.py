@@ -960,3 +960,94 @@ def delete_all_signals() -> int:
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM signals")
     return cur.rowcount
+
+
+# ── 일일 복기 / RAG 데이터 ─────────────────────────────────────────────────
+
+
+def get_verdict_accuracy(days: int = 14) -> dict:
+    """최근 N일간 AI 판정(verdict)별 적중률 통계.
+    result_1d/result_pct(3d)/result_5d 가 채워진 신호만 집계.
+    Returns: {verdict: {count, avg_1d, avg_3d, avg_5d, hit_rate_3d}}
+    """
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT verdict, result_1d, result_pct, result_5d
+               FROM signals
+               WHERE created_at >= ? AND verdict IS NOT NULL
+                 AND result_pct IS NOT NULL""",
+            (since,),
+        ).fetchall()
+    stats: dict = {}
+    for r in rows:
+        v = r["verdict"]
+        if v not in stats:
+            stats[v] = {"count": 0, "sum_1d": 0.0, "sum_3d": 0.0, "sum_5d": 0.0, "hit_3d": 0, "n_1d": 0, "n_5d": 0}
+        s = stats[v]
+        s["count"] += 1
+        r3 = r["result_pct"] or 0
+        s["sum_3d"] += r3
+        if v in ("매수", "홀드") and r3 > 0:
+            s["hit_3d"] += 1
+        elif v == "매도" and r3 < 0:
+            s["hit_3d"] += 1
+        if r["result_1d"] is not None:
+            s["sum_1d"] += r["result_1d"]
+            s["n_1d"] += 1
+        if r["result_5d"] is not None:
+            s["sum_5d"] += r["result_5d"]
+            s["n_5d"] += 1
+    result = {}
+    for v, s in stats.items():
+        result[v] = {
+            "count": s["count"],
+            "avg_1d": round(s["sum_1d"] / s["n_1d"], 2) if s["n_1d"] else None,
+            "avg_3d": round(s["sum_3d"] / s["count"], 2) if s["count"] else None,
+            "avg_5d": round(s["sum_5d"] / s["n_5d"], 2) if s["n_5d"] else None,
+            "hit_rate_3d": round(s["hit_3d"] / s["count"] * 100, 1) if s["count"] else None,
+        }
+    return result
+
+
+def get_recent_daily_reviews(limit: int = 3) -> list[dict]:
+    """최근 daily_review 전략 노트 조회 (판단 AI 프롬프트 주입용)."""
+    with get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT created_at, summary, detail FROM strategy_notes "
+                "WHERE category = 'daily_review' ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+
+def get_screening_accuracy(days: int = 30) -> dict:
+    """최근 N일 스크리닝 추천 종목의 성과 통계.
+    Returns: {total, hit_7d, hit_30d, avg_7d, avg_30d}
+    """
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        try:
+            rows = conn.execute(
+                """SELECT recommendation, result_7d, result_30d
+                   FROM screening_log
+                   WHERE created_at >= ? AND recommendation = '관심종목 등록'""",
+                (since,),
+            ).fetchall()
+        except Exception:
+            return {}
+    if not rows:
+        return {}
+    total = len(rows)
+    r7_vals = [r["result_7d"] for r in rows if r["result_7d"] is not None]
+    r30_vals = [r["result_30d"] for r in rows if r["result_30d"] is not None]
+    return {
+        "total": total,
+        "avg_7d": round(sum(r7_vals) / len(r7_vals), 2) if r7_vals else None,
+        "avg_30d": round(sum(r30_vals) / len(r30_vals), 2) if r30_vals else None,
+        "hit_7d": round(sum(1 for v in r7_vals if v > 0) / len(r7_vals) * 100, 1) if r7_vals else None,
+        "hit_30d": round(sum(1 for v in r30_vals if v > 0) / len(r30_vals) * 100, 1) if r30_vals else None,
+    }
