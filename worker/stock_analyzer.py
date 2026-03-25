@@ -1040,17 +1040,10 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
         }
 
     horizon = analysis.get("horizon", "중기")
+    conditions["horizon"] = horizon
 
-    now = now_kst().strftime("%Y-%m-%d %H:%M:%S")
-    with get_conn() as conn:
-        conn.execute(
-            "INSERT INTO watchlist (code, name, enabled, conditions, horizon, created_at) VALUES (?, ?, 1, ?, ?, ?) "
-            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, "
-            "conditions=excluded.conditions, horizon=excluded.horizon, "
-            "created_at=CASE WHEN watchlist.created_at = '' OR watchlist.created_at IS NULL THEN excluded.created_at ELSE watchlist.created_at END",
-            (stock_code, stock_name, json.dumps(conditions, ensure_ascii=False), horizon, now),
-        )
-        conn.commit()
+    from data.db import upsert_stock
+    upsert_stock(stock_code, stock_name, True, conditions)
 
     logger.info(f"[관심종목 등록] {stock_name}({stock_code}) horizon={horizon} "
                 f"조건수={len(conditions)} (목표가/손절가는 매수 후 positions에서 설정)")

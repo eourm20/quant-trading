@@ -598,10 +598,8 @@ def get_trade_opinion(
     _position_text = ""
     try:
         from data.db import get_watchlist, get_position
-        import json as _json
         _stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
         if _stock:
-            _cond = _json.loads(_stock.get("conditions", "{}")) if isinstance(_stock.get("conditions"), str) else _stock.get("conditions", {})
             _settings = []
             for _f, _label in [
                 ("rsi_oversold", "RSI 과매도"),
@@ -609,7 +607,7 @@ def get_trade_opinion(
                 ("rsi_oversold_intraday", "RSI 과매도(분봉)"),
                 ("volume_surge_ratio", "거래량 배율"),
             ]:
-                _v = _cond.get(_f)
+                _v = _stock.get(_f)
                 if _v is not None:
                     _settings.append(f"{_label}: {_v} ({_f})")
             if _settings:

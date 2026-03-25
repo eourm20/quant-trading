@@ -138,9 +138,7 @@ def _maybe_save_hold_conditions(signal, opinion: str):
                 stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
                 old_val = 0
                 if stock:
-                    import json as _json
-                    cond_data = _json.loads(stock.get("conditions", "{}")) if isinstance(stock.get("conditions"), str) else stock.get("conditions", {})
-                    old_val = int(cond_data.get(field) or 0)
+                    old_val = int(stock.get(field) or 0)
                 if new_val != old_val:  # 실제 변경이 있는 경우만 포함
                     threshold_changes.append({"field": field, "old": old_val, "new": new_val})
 

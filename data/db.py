@@ -86,6 +86,43 @@ def init_db():
             conn.execute("ALTER TABLE watchlist ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
         except Exception:
             pass
+        # ── watchlist 정규화: conditions JSON → 개별 컬럼 마이그레이션 ──
+        _WL_COLUMNS = [
+            # value fields
+            ("rsi_oversold", "INTEGER DEFAULT NULL"),
+            ("rsi_overbought", "INTEGER DEFAULT NULL"),
+            ("rsi_oversold_intraday", "INTEGER DEFAULT NULL"),
+            ("rsi_critical", "INTEGER DEFAULT NULL"),
+            ("volume_surge_ratio", "REAL DEFAULT NULL"),
+            ("cci_oversold", "INTEGER DEFAULT NULL"),
+            ("cci_overbought", "INTEGER DEFAULT NULL"),
+            # flag fields
+            ("golden_cross", "INTEGER DEFAULT NULL"),
+            ("death_cross", "INTEGER DEFAULT NULL"),
+            ("ma20_support_break", "INTEGER DEFAULT NULL"),
+            ("ma5_support_break", "INTEGER DEFAULT NULL"),
+            ("ma5_recovery", "INTEGER DEFAULT NULL"),
+            ("new_high_20d", "INTEGER DEFAULT NULL"),
+            ("macd_golden_cross", "INTEGER DEFAULT NULL"),
+            ("macd_death_cross", "INTEGER DEFAULT NULL"),
+            ("bollinger_upper_break", "INTEGER DEFAULT NULL"),
+            ("bollinger_lower_break", "INTEGER DEFAULT NULL"),
+            ("bollinger_critical_below", "INTEGER DEFAULT NULL"),
+            ("stochastic_golden_cross", "INTEGER DEFAULT NULL"),
+            ("stochastic_death_cross", "INTEGER DEFAULT NULL"),
+            ("ichimoku_golden_cross", "INTEGER DEFAULT NULL"),
+            ("ichimoku_death_cross", "INTEGER DEFAULT NULL"),
+            ("ichimoku_cloud_breakout", "INTEGER DEFAULT NULL"),
+            ("ichimoku_cloud_breakdown", "INTEGER DEFAULT NULL"),
+            # metadata
+            ("strategy_note", "TEXT DEFAULT ''"),
+        ]
+        for col, typedef in _WL_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
+        _migrate_watchlist_columns(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -266,6 +303,49 @@ def init_db():
     _seed_conditions()
 
 
+def _migrate_watchlist_columns(conn):
+    """conditions JSON → 개별 컬럼 마이그레이션 (1회성).
+    JSON에 값이 있고 컬럼이 NULL이면 복사. 완료 후 conditions를 '{}'로 비움."""
+    rows = conn.execute("SELECT code, conditions FROM watchlist WHERE conditions != '{}'").fetchall()
+    if not rows:
+        return
+    # 첫 번째 행에서 이미 컬럼에 값이 있는지 확인 (이미 마이그레이션 완료)
+    first = conn.execute("SELECT rsi_oversold FROM watchlist LIMIT 1").fetchone()
+    if first and first["rsi_oversold"] is not None:
+        return
+
+    _VALUE_FIELDS = {"rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
+                     "volume_surge_ratio", "cci_oversold", "cci_overbought"}
+    _FLAG_FIELDS = {"golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
+                    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+                    "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
+                    "stochastic_golden_cross", "stochastic_death_cross",
+                    "ichimoku_golden_cross", "ichimoku_death_cross",
+                    "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown"}
+    _ALL_FIELDS = _VALUE_FIELDS | _FLAG_FIELDS | {"strategy_note"}
+
+    for row in rows:
+        cond = json.loads(row["conditions"])
+        sets = []
+        vals = []
+        for field in _ALL_FIELDS:
+            val = cond.get(field)
+            if val is None:
+                continue
+            if field in _FLAG_FIELDS:
+                val = 1 if val else 0
+            elif field == "strategy_note":
+                val = str(val)
+            sets.append(f"{field} = ?")
+            vals.append(val)
+        if sets:
+            vals.append(row["code"])
+            conn.execute(f"UPDATE watchlist SET {', '.join(sets)} WHERE code = ?", vals)
+
+    # JSON 비우기
+    conn.execute("UPDATE watchlist SET conditions = '{}'")
+
+
 def _migrate_positions(conn):
     """기존 portfolio + watchlist 데이터로 positions 초기 생성 (1회성 마이그레이션)."""
     pos_count = conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0]
@@ -276,50 +356,30 @@ def _migrate_positions(conn):
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     holdings = conn.execute("SELECT * FROM portfolio").fetchall()
     watchlist_map = {}
-    for row in conn.execute("SELECT code, conditions FROM watchlist").fetchall():
-        watchlist_map[row["code"]] = json.loads(row["conditions"])
+    for row in conn.execute("SELECT code, strategy_note FROM watchlist").fetchall():
+        watchlist_map[row["code"]] = row["strategy_note"] or ""
 
     for h in holdings:
         code = h["stock_code"]
         avg_price = h["avg_price"]
-        cond = watchlist_map.get(code, {})
 
-        # watchlist에 값이 있으면 가져오고, 없으면 평단가 기준 기본값
-        target_price = cond.get("target_price") or int(avg_price * 1.15) if avg_price else 0
-        stop_loss_price = cond.get("stop_loss_price") or int(avg_price * 0.93) if avg_price else 0
+        target_price = int(avg_price * 1.15) if avg_price else 0
+        stop_loss_price = int(avg_price * 0.93) if avg_price else 0
 
         conn.execute(
             """INSERT OR IGNORE INTO positions
                 (stock_code, stock_name, avg_price, quantity,
                  target_price, stop_loss_price, add_buy_price,
-                 rsi_oversold_add, bollinger_lower_break_add, ma5_recovery_add,
                  strategy_note, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 code, h["stock_name"], avg_price, h["quantity"],
                 target_price, stop_loss_price,
-                int(avg_price * 0.92) if avg_price else 0,  # add_buy_price: 평단 -8%
-                cond.get("rsi_oversold_add") if isinstance(cond.get("rsi_oversold_add"), (int, float)) else None,
-                cond.get("bollinger_lower_break_add") if isinstance(cond.get("bollinger_lower_break_add"), (int, float)) else None,
-                cond.get("ma5_recovery_add") if isinstance(cond.get("ma5_recovery_add"), (int, float)) else None,
-                cond.get("strategy_note", ""),
+                int(avg_price * 0.92) if avg_price else 0,
+                watchlist_map.get(code, ""),
                 now, now,
             ),
         )
-
-    # watchlist에서 positions로 이관된 필드 제거
-    _position_only_keys = {"target_price", "stop_loss_price"}
-    holding_codes = {h["stock_code"] for h in holdings}
-    for row in conn.execute("SELECT code, conditions FROM watchlist").fetchall():
-        cond = json.loads(row["conditions"])
-        keys_to_remove = _position_only_keys & set(cond.keys())
-        if keys_to_remove:
-            for k in keys_to_remove:
-                del cond[k]
-            conn.execute(
-                "UPDATE watchlist SET conditions = ? WHERE code = ?",
-                (json.dumps(cond, ensure_ascii=False), row["code"]),
-            )
 
 
 def _seed_conditions():
@@ -368,45 +428,76 @@ def _seed_conditions():
 
 # ── watchlist ──────────────────────────────────────────────────────────────
 
+_WL_CONDITION_FIELDS = {
+    "rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
+    "volume_surge_ratio", "cci_oversold", "cci_overbought",
+    "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
+    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+    "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
+    "stochastic_golden_cross", "stochastic_death_cross",
+    "ichimoku_golden_cross", "ichimoku_death_cross",
+    "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
+    "strategy_note",
+}
+_WL_FLAG_FIELDS = {
+    "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
+    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+    "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
+    "stochastic_golden_cross", "stochastic_death_cross",
+    "ichimoku_golden_cross", "ichimoku_death_cross",
+    "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
+}
+
+
 def get_watchlist() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM watchlist ORDER BY rowid").fetchall()
     result = []
     for r in rows:
         d = dict(r)
-        d["conditions"] = json.loads(d["conditions"])
         d["enabled"] = bool(d["enabled"])
+        # flag 필드: 0/1 → bool 변환
+        for f in _WL_FLAG_FIELDS:
+            if f in d and d[f] is not None:
+                d[f] = bool(d[f])
+        # conditions 컬럼은 하위호환용 — 비어있으면 제거
+        d.pop("conditions", None)
         result.append(d)
     return result
 
 
 def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
+    """watchlist 종목 추가/갱신. conditions dict의 필드를 개별 컬럼으로 저장."""
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO watchlist (code, name, enabled, conditions, created_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, conditions=excluded.conditions, "
+            "INSERT INTO watchlist (code, name, enabled, conditions, created_at) VALUES (?,?,?,'{}',?) "
+            "ON CONFLICT(code) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, "
             "created_at=CASE WHEN watchlist.created_at = '' OR watchlist.created_at IS NULL THEN excluded.created_at ELSE watchlist.created_at END",
-            (code, name, int(enabled), json.dumps(conditions, ensure_ascii=False), now)
+            (code, name, int(enabled), now)
         )
+        # 개별 컬럼 업데이트
+        _updatable = _WL_CONDITION_FIELDS | {"horizon"}
+        for field, value in conditions.items():
+            if field not in _updatable:
+                continue
+            if field in _WL_FLAG_FIELDS:
+                value = 1 if value else 0
+            conn.execute(f"UPDATE watchlist SET {field} = ? WHERE code = ?", (value, code))
         conn.commit()
 
 
 def update_stock_field(code: str, field: str, value) -> bool:
-    """종목 최상위 필드(name, enabled) 또는 conditions 내부 필드 수정"""
+    """종목 필드 수정 — 모든 필드가 개별 컬럼."""
+    _all_fields = {"name", "enabled", "horizon"} | _WL_CONDITION_FIELDS
+    if field not in _all_fields:
+        return False
+    if field in _WL_FLAG_FIELDS:
+        value = 1 if value else 0
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM watchlist WHERE code = ?", (code,)).fetchone()
-        if not row:
-            return False
-        if field in ("name", "enabled", "horizon"):
-            conn.execute(f"UPDATE watchlist SET {field} = ? WHERE code = ?", (value, code))
-        else:
-            cond = json.loads(row["conditions"])
-            cond[field] = value
-            conn.execute("UPDATE watchlist SET conditions = ? WHERE code = ?",
-                         (json.dumps(cond, ensure_ascii=False), code))
+        cur = conn.execute(f"UPDATE watchlist SET {field} = ? WHERE code = ?", (value, code))
         conn.commit()
-    return True
+    return cur.rowcount > 0
 
 
 def delete_stock(code: str) -> bool:
@@ -503,9 +594,9 @@ def create_position_from_trade(stock_code: str, stock_name: str, avg_price: int,
         if existing:
             return False  # 이미 존재
 
-        # watchlist에서 add 조건 복사
-        wl_row = conn.execute("SELECT conditions FROM watchlist WHERE code = ?", (stock_code,)).fetchone()
-        cond = json.loads(wl_row["conditions"]) if wl_row else {}
+        # watchlist에서 strategy_note 복사
+        wl_row = conn.execute("SELECT strategy_note FROM watchlist WHERE code = ?", (stock_code,)).fetchone()
+        note = wl_row["strategy_note"] if wl_row and wl_row["strategy_note"] else ""
 
         # 평단가 기준 기본값 계산
         target_price = int(avg_price * 1.15) if avg_price else 0
@@ -516,10 +607,7 @@ def create_position_from_trade(stock_code: str, stock_name: str, avg_price: int,
         stock_code, stock_name, avg_price, quantity,
         target_price=target_price, stop_loss_price=stop_loss_price,
         add_buy_price=add_buy_price,
-        rsi_oversold_add=cond.get("rsi_oversold_add") if isinstance(cond.get("rsi_oversold_add"), (int, float)) else None,
-        bollinger_lower_break_add=cond.get("bollinger_lower_break_add") if isinstance(cond.get("bollinger_lower_break_add"), (int, float)) else None,
-        ma5_recovery_add=cond.get("ma5_recovery_add") if isinstance(cond.get("ma5_recovery_add"), (int, float)) else None,
-        strategy_note=cond.get("strategy_note", ""),
+        strategy_note=note,
     )
     return True
 

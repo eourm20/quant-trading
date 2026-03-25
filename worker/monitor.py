@@ -142,7 +142,7 @@ def check_stock(
 
     code = stock["code"]
     name = stock["name"]
-    cond = stock.get("conditions", {})
+    cond = stock  # 정규화: 조건 필드가 stock dict에 직접 포함
 
     holding_codes = {str(h.get("stock_code", "")) for h in (holdings or [])}
     in_portfolio = code in holding_codes
