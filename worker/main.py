@@ -13,6 +13,8 @@ import sys
 import time
 from datetime import datetime, time as dtime
 
+from worker import now_kst as _now_kst
+
 import yaml
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -85,7 +87,7 @@ _SESSIONS: dict[str, tuple[dtime, dtime]] = {
 
 def get_current_session() -> str | None:
     """현재 거래 가능 세션 반환. 장외 시간이면 None."""
-    now = datetime.now()
+    now = _now_kst()
     if now.weekday() >= 5:
         return None
     t = now.time()
@@ -158,8 +160,8 @@ def update_signal_results():
     ]
 
     for period_name, days_after, days_before, col_name in periods:
-        cutoff_from = (datetime.now() - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (datetime.now() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
         with get_conn() as conn:
             rows = conn.execute(
                 f"SELECT id, stock_code, stock_name, current_price FROM signals "
@@ -193,8 +195,8 @@ def update_screening_results():
     ]
 
     for period_name, days_after, days_before in periods:
-        cutoff_from = (datetime.now() - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (datetime.now() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
         col = "result_7d" if period_name == "7d" else "result_30d"
         with get_conn() as conn:
             rows = conn.execute(
@@ -289,7 +291,7 @@ def check_inactive_stocks():
         # 주 1회 알림 쿨다운 체크
         key = f"{code}:inactive_alert"
         last = get_cooldown(key)
-        if last and (datetime.now() - last).days < ALERT_INTERVAL_DAYS:
+        if last and (_now_kst() - last).days < ALERT_INTERVAL_DAYS:
             continue
 
         # 마지막 신호 날짜 조회
@@ -301,7 +303,7 @@ def check_inactive_stocks():
 
         last_signal = row["last_signal"] if row and row["last_signal"] else None
         if last_signal:
-            days_since = (datetime.now() - datetime.strptime(last_signal[:10], "%Y-%m-%d")).days
+            days_since = (_now_kst() - datetime.strptime(last_signal[:10], "%Y-%m-%d")).days
         else:
             days_since = 999
 
@@ -334,19 +336,19 @@ def check_removal_candidates():
         # ── 미보유 종목: 90일 미신호 → 삭제 ──────────────────────────
         key = f"{code}:removal_check"
         last = get_cooldown(key)
-        if last and (datetime.now() - last).days < ALERT_INTERVAL_DAYS:
+        if last and (_now_kst() - last).days < ALERT_INTERVAL_DAYS:
             continue
 
         last_signal_dt = get_last_signal_date(code)
         if last_signal_dt:
-            days_since = (datetime.now() - last_signal_dt).days
+            days_since = (_now_kst() - last_signal_dt).days
         else:
             # 신호 이력 없으면 등록일 기준 (등록일도 없으면 삭제 안 함)
             created_at = stock.get("created_at", "")
             if created_at:
                 try:
                     created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-                    days_since = (datetime.now() - created_dt).days
+                    days_since = (_now_kst() - created_dt).days
                 except ValueError:
                     continue
             else:

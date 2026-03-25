@@ -2,14 +2,14 @@
 장 마감 후 일일 리포트 텔레그램 발송
 """
 
-from datetime import datetime
 from data.db import get_today_signals, get_strategy_notes
+from worker import now_kst
 from notifications.telegram import send_message
 
 
 def send_daily_report():
     signals = get_today_signals()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_kst().strftime("%Y-%m-%d")
 
     lines = [f"📋 *{today} 일일 리포트*\n"]
 

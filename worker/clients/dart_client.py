@@ -11,9 +11,11 @@ import os
 import time
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import requests
+
+from worker import now_kst
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -45,7 +47,7 @@ def _load_corp_code_map() -> dict[str, str]:
     cache_date_file = os.path.join(_CACHE_DIR, "corp_code_date.txt")
 
     # 캐시가 오늘 날짜면 재사용
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_kst().strftime("%Y-%m-%d")
     if os.path.exists(cache_file) and os.path.exists(cache_date_file):
         with open(cache_date_file, "r") as f:
             cached_date = f.read().strip()
@@ -132,8 +134,8 @@ def get_disclosures(
         logger.debug(f"DART corp_code 없음: {stock_code}")
         return []
 
-    end_date = datetime.now().strftime("%Y%m%d")
-    bgn_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    end_date = now_kst().strftime("%Y%m%d")
+    bgn_date = (now_kst() - timedelta(days=days)).strftime("%Y%m%d")
 
     params = {
         "crtfc_key": DART_API_KEY,
@@ -236,8 +238,7 @@ def get_financial_summary_for_ai(stock_code: str) -> str:
     if not corp_code:
         return ""
 
-    from datetime import datetime
-    year = str(datetime.now().year - 1)
+    year = str(now_kst().year - 1)
 
     # 주요계정 조회
     try:

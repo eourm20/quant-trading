@@ -14,7 +14,9 @@ claude.ai에서 호출하거나 직접 실행 가능
 import argparse
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from worker import now_kst
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -31,7 +33,7 @@ from data.db import (
 
 
 def report_signals(days: int = 1) -> str:
-    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    since = (now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM signals WHERE created_at >= ? ORDER BY created_at DESC",

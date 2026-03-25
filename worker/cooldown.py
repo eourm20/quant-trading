@@ -4,8 +4,10 @@
 장 시작(기본 08:30) 시 모든 쿨다운 초기화.
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
+
 from data.db import get_cooldown, set_cooldown
+from worker import now_kst
 
 
 def filter_new_conditions(
@@ -16,7 +18,7 @@ def filter_new_conditions(
 ) -> tuple[list[str], list[str]]:
     """쿨다운이 지난 조건만 반환. 반환값: (new_ids, new_messages)"""
     cooldown_map = {c["id"]: c.get("cooldown_minutes", 60) for c in conditions}
-    now = datetime.now()
+    now = now_kst()
     new_ids, new_msgs = [], []
 
     for cid, msg in zip(triggered_ids, triggered_conditions):

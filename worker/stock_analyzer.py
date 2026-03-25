@@ -11,6 +11,8 @@ import re
 import time
 from datetime import datetime
 
+from worker import now_kst
+
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
@@ -353,7 +355,7 @@ def run_intraday_scan():
     for cand in candidates:
         key = f"intraday_scan:{cand['stock_code']}"
         last = get_cooldown(key)
-        if last and (datetime.now() - last).total_seconds() < 43200:  # 12시간
+        if last and (now_kst() - last).total_seconds() < 43200:  # 12시간
             continue
         set_cooldown(key)
         filtered.append(cand)
@@ -1000,7 +1002,7 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
 
     horizon = analysis.get("horizon", "중기")
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO watchlist (code, name, enabled, conditions, horizon, created_at) VALUES (?, ?, 1, ?, ?, ?) "
