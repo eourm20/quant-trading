@@ -143,8 +143,24 @@ def _maybe_save_hold_conditions(signal, opinion: str):
                 if new_val != old_val:  # 실제 변경이 있는 경우만 포함
                     threshold_changes.append({"field": field, "old": old_val, "new": new_val})
 
-    # 전략 노트는 임계값이 실제로 적용될 때만 저장됨 (_apply_threshold_change 참고)
-    if threshold_changes:
+    if not threshold_changes:
+        return
+
+    if AUTO_TRADE:
+        # 자동모드: 즉시 적용 + 전략 노트 저장 + 텔레그램 결과 알림
+        applied = []
+        for change in threshold_changes:
+            ok = update_stock_field(signal.stock_code, change["field"], change["new"])
+            if ok:
+                applied.append(f"{change['field']}: {change['old']} → {change['new']}")
+        if applied:
+            detail = f"AI 홀드 판단에 따른 임계값 자동 적용\n전환조건: {condition_text}\n변경: {', '.join(applied)}"
+            save_strategy_note("watchlist", f"{signal.stock_name} 임계값 자동 적용", detail)
+            from notifications.telegram import send_message
+            send_message(f"⚙️ *{signal.stock_name} 임계값 자동 적용*\n\n{chr(10).join(applied)}\n\n_전환조건: {condition_text}_")
+            logger.info(f"[{signal.stock_name}] 임계값 자동 적용: {applied}")
+    else:
+        # 수동모드: 텔레그램 버튼으로 사용자 승인 후 적용
         from notifications.telegram import send_threshold_proposal
         from notifications.telegram_bot import store_threshold_proposal
         msg_id = send_threshold_proposal(signal.stock_code, signal.stock_name, condition_text, threshold_changes)

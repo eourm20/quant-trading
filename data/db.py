@@ -5,7 +5,13 @@ SQLite 거래 로그 DB
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_KST = timezone(timedelta(hours=9))
+
+
+def _now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 
 _default_db = os.path.join(os.path.dirname(__file__), "trading.db")
 _env_db = os.getenv("DB_PATH")
@@ -298,7 +304,7 @@ def get_watchlist() -> list[dict]:
 
 
 def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO watchlist (code, name, enabled, conditions, created_at) VALUES (?,?,?,?,?) "
@@ -394,7 +400,7 @@ def remove_condition(cond_id: str) -> bool:
 
 def upsert_portfolio(holdings: list[dict]):
     """API 응답으로 포트폴리오 전체 갱신 (UPSERT)"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         # 기존 전체 삭제 후 재삽입 (잔량 0인 종목 자동 제거)
         conn.execute("DELETE FROM portfolio")
@@ -487,7 +493,7 @@ def get_trades(limit: int = 50) -> list[dict]:
 def get_recent_trades_for_stock(stock_code: str, days: int = 3) -> list[dict]:
     """특정 종목의 최근 N일 매매 이력 조회 (최신순)"""
     from datetime import timedelta
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cutoff = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
     with get_conn() as conn:
         try:
             rows = conn.execute(
@@ -519,7 +525,7 @@ def save_strategy_note(category: str, summary: str, detail: str = ""):
         )
         conn.execute(
             "INSERT INTO strategy_notes (created_at, category, summary, detail) VALUES (?, ?, ?, ?)",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), category, summary, detail),
+            (_now_kst().strftime("%Y-%m-%d %H:%M:%S"), category, summary, detail),
         )
         conn.commit()
 
@@ -609,7 +615,7 @@ def get_cooldown(key: str) -> datetime | None:
 
 
 def set_cooldown(key: str):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO cooldowns (key, last_sent_at) VALUES (?, ?) "
@@ -644,7 +650,7 @@ def set_add_cooldown_after_trade(stock_code: str, suppress_minutes: int = 60) ->
     from datetime import timedelta
     cond_map = {c["id"]: c.get("cooldown_minutes", 60) for c in get_conditions()
                 if c.get("signal_type") in ("add", "both")}
-    now = datetime.now()
+    now = _now_kst()
     count = 0
     with get_conn() as conn:
         for cond_id, cooldown_minutes in cond_map.items():
@@ -668,7 +674,7 @@ def shorten_cooldowns_for_stock(stock_code: str, ratio: float = 0.25, min_minute
     """
     from datetime import timedelta
     cond_map = {c["id"]: c["cooldown_minutes"] for c in get_conditions()}
-    now = datetime.now()
+    now = _now_kst()
     count = 0
     with get_conn() as conn:
         rows = conn.execute(
@@ -771,7 +777,7 @@ def save_signal(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                 signal.stock_code,
                 signal.stock_name,
                 signal.current_price,
@@ -865,7 +871,7 @@ def save_screening_log(
                  dart_summary, news_summary, market_snapshot, ai_response)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                 stock_code, stock_name, source, recommendation, reason,
                 json.dumps(met_conditions or [], ensure_ascii=False),
                 rr_ratio, current_price, indicator_snapshot,
@@ -913,7 +919,7 @@ def get_last_signal_date(stock_code: str) -> datetime | None:
 
 
 def get_today_signals() -> list[dict]:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = _now_kst().strftime("%Y-%m-%d")
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM signals WHERE created_at LIKE ? ORDER BY created_at DESC",

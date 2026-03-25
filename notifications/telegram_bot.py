@@ -17,7 +17,13 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta, time as dtime, timezone
+
+_KST = timezone(timedelta(hours=9))
+
+
+def _now_kst() -> datetime:
+    return datetime.now(_KST).replace(tzinfo=None)
 
 import httpx
 from dotenv import load_dotenv
@@ -48,7 +54,7 @@ _SESSION_LABELS = {
 
 
 def _get_order_session() -> str:
-    t = datetime.now().time()
+    t = _now_kst().time()
     for session, (start, end) in _SESSION_RANGES.items():
         if start <= t <= end:
             return session
