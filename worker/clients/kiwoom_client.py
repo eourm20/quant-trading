@@ -168,6 +168,7 @@ class KiwoomClient:
                 "stk_cd": stock_code,
                 "tic_scope": tic_scope,
                 "base_dt": today,
+                "upd_stkpc_tp": "0",
             },
         )
         rows = payload.get("stk_mnt_pole_chart_qry", [])
