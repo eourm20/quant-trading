@@ -30,15 +30,18 @@ if _ANTHROPIC_KEY:
     from anthropic import Anthropic
     _ai_client = Anthropic(api_key=_ANTHROPIC_KEY)
     _AI_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+    _AI_MODEL_MINI = os.getenv("CLAUDE_MODEL_MINI", "claude-haiku-4-5-20251001")
     _AI_BACKEND = "anthropic"
 elif _OPENAI_KEY:
     from openai import OpenAI
     _ai_client = OpenAI(api_key=_OPENAI_KEY)
     _AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+    _AI_MODEL_MINI = os.getenv("OPENAI_MODEL_MINI", "gpt-4.1-mini")
     _AI_BACKEND = "openai"
 else:
     _ai_client = None
     _AI_MODEL = ""
+    _AI_MODEL_MINI = ""
     _AI_BACKEND = ""
 
 
@@ -90,13 +93,13 @@ def _repair_screening_json(raw_text: str) -> str:
     )
     if _AI_BACKEND == "anthropic":
         response = _ai_client.messages.create(
-            model=_AI_MODEL,
+            model=_AI_MODEL_MINI,
             max_tokens=1200,
             messages=[{"role": "user", "content": repair_prompt}],
         )
         return response.content[0].text
     response = _ai_client.chat.completions.create(
-        model=_AI_MODEL,
+        model=_AI_MODEL_MINI,
         max_tokens=1200,
         messages=[{"role": "user", "content": repair_prompt}],
     )
@@ -201,9 +204,9 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
 
     제거 조건 (1개라도 해당 시 제외):
     - 시가총액 500억 미만
-    - 당일 등락률 +15% 초과 / -15% 미만
-    - (풀 모드만) RSI > 70
-    - (풀 모드만) 데드크로스 진행 중
+    - 당일 등락률 +10% 초과 / -10% 미만
+    - (풀 모드만) RSI > 65
+    - (풀 모드만) MA5 < MA20 (단순 역배열)
     """
     from worker.indicators import calculate_rsi, calculate_chart_summary
 
@@ -236,11 +239,11 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 change_pct = float(change_str)
             except Exception:
                 change_pct = 0
-            if change_pct > 15:
-                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +15% → 제외")
+            if change_pct > 10:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +10% → 제외")
                 continue
-            if change_pct < -15:
-                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -15% → 제외")
+            if change_pct < -10:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -10% → 제외")
                 continue
 
             # HTS 후보는 이미 조건식으로 필터링됨 → RSI/데드크로스 체크 생략
@@ -258,16 +261,15 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
 
                 if len(closes) >= 15:
                     rsi = calculate_rsi(closes)
-                    if rsi and rsi > 70:
-                        logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 70 → 제외")
+                    if rsi and rsi > 65:
+                        logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 65 → 제외")
                         continue
 
                 if len(closes) >= 20:
                     ma5 = sum(closes[:5]) / 5
                     ma20 = sum(closes[:20]) / 20
-                    ma20_prev = sum(closes[1:21]) / 20 if len(closes) >= 21 else ma20
-                    if ma5 < ma20 and ma20 < ma20_prev:
-                        logger.debug(f"[프리필터] {cand['stock_name']}: 데드크로스 진행 중 → 제외")
+                    if ma5 < ma20:
+                        logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20 역배열 → 제외")
                         continue
 
             passed.append(cand)
@@ -374,8 +376,8 @@ def run_intraday_scan():
         logger.info("[장중 스캔] 프리필터 후 후보 없음")
         return
 
-    ai_target = filtered[:15]
-    logger.info(f"[장중 스캔] 프리필터 통과 {len(filtered)}개 중 {len(ai_target)}개 → AI 분석 시작")
+    ai_target = filtered
+    logger.info(f"[장중 스캔] 프리필터 통과 {len(ai_target)}개 → AI 분석 시작")
 
     added = []
     pending = []
@@ -1389,7 +1391,7 @@ def run_daily_review():
     try:
         if _AI_BACKEND == "anthropic":
             response = _ai_client.messages.create(
-                model=_AI_MODEL,
+                model=_AI_MODEL_MINI,
                 max_tokens=600,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
@@ -1397,7 +1399,7 @@ def run_daily_review():
             review_text = response.content[0].text
         else:
             response = _ai_client.chat.completions.create(
-                model=_AI_MODEL,
+                model=_AI_MODEL_MINI,
                 max_tokens=600,
                 messages=[
                     {"role": "system", "content": system_prompt},

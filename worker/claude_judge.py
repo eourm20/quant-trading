@@ -205,11 +205,13 @@ if _ANTHROPIC_KEY:
     from anthropic import Anthropic
     _client = Anthropic(api_key=_ANTHROPIC_KEY)
     MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+    MODEL_MINI = os.getenv("CLAUDE_MODEL_MINI", "claude-haiku-4-5-20251001")
     _BACKEND = "anthropic"
 elif _OPENAI_KEY:
     from openai import OpenAI
     _client = OpenAI(api_key=_OPENAI_KEY)
     MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
+    MODEL_MINI = os.getenv("OPENAI_MODEL_MINI", "gpt-4.1-mini")
     _BACKEND = "openai"
 else:
     raise RuntimeError("ANTHROPIC_API_KEY 또는 OPENAI_API_KEY 중 하나를 .env에 설정하세요.")
@@ -741,6 +743,11 @@ def get_trade_opinion(
         logger.debug(f"뉴스 조회 실패: {e}")
 
     # ── 동적 유저 프롬프트 (신호별 데이터) ──
+    _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text != "공시 조회 불가" else ""
+    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text != "뉴스 조회 불가" else ""
+    _trades_section = f"\n## 최근 매매 이력 (3일)\n{trades_text}" if trades_text != "없음" else ""
+    _insights_section = f"\n## 최근 AI 판단 성과 (자기 보정용)\n{insights_text}" if insights_text not in ("데이터 부족", "조회 실패") else ""
+
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
 - 신호 유형: {signal_type_label}
@@ -759,18 +766,12 @@ def get_trade_opinion(
 
 ## 과거 AI 판단 이력 — {signal.signal_type} 신호 기준 (최근 5건)
 {history_text}
-
-## 최근 공시 (DART)
-{dart_text}
-
-## 최근 뉴스
-{news_text}
+{_dart_section}
+{_news_section}
 
 ## 차트 분석
 {_fmt_chart(signal)}
-
-## 최근 매매 이력 (3일)
-{trades_text}
+{_trades_section}
 
 ## 보유 현황
 - 해당 종목: {holding_detail}
@@ -782,9 +783,7 @@ def get_trade_opinion(
 {_fmt_index(kospi, '코스피')}
 {_fmt_index(kosdaq, '코스닥')}
 {_fmt_sector(sector, signal.sector_code)}
-
-## 최근 AI 판단 성과 (자기 보정용)
-{insights_text}"""
+{_insights_section}"""
 
     if _BACKEND == "anthropic":
         response = _client.messages.create(
@@ -906,7 +905,7 @@ JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
 
         if _BACKEND == "anthropic":
             response = _client.messages.create(
-                model=MODEL,
+                model=MODEL_MINI,
                 max_tokens=300,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
@@ -914,7 +913,7 @@ JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
             text = response.content[0].text
         else:
             response = _client.chat.completions.create(
-                model=MODEL,
+                model=MODEL_MINI,
                 max_tokens=300,
                 messages=[
                     {"role": "system", "content": system_prompt},
