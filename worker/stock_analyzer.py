@@ -199,16 +199,15 @@ def _screen_candidates() -> list[dict]:
 def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = False) -> list[dict]:
     """AI 분석 전에 명백히 부적합한 종목을 숫자 기반으로 제거.
 
-    lightweight=False (장 마감): ka10001 + ka10081로 시총/등락률/RSI/MA 체크
-    lightweight=True (장중): ka10001만으로 시총/등락률 체크 (빠르고 API 절약)
-
     제거 조건 (1개라도 해당 시 제외):
     - 시가총액 500억 미만
-    - 당일 등락률 +10% 초과 / -10% 미만
-    - (풀 모드만) RSI > 65
-    - (풀 모드만) MA5 < MA20 (단순 역배열)
+    - 당일 등락률 +7% 초과 / -10% 미만
+    - 일봉 RSI > 60 (HTS 후보 포함 전체 적용)
+    - MA5 < MA20 역배열 (HTS 후보 포함 전체 적용)
+    - 거래량 비율 10배 초과 (이미 급등 소진 구간)
+    - 3일 연속 양봉 (눌림목 아님)
     """
-    from worker.indicators import calculate_rsi, calculate_chart_summary
+    from worker.indicators import calculate_rsi
 
     passed = []
     time.sleep(1)  # 후보 수집 후 대기
@@ -233,44 +232,59 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 logger.debug(f"[프리필터] {cand['stock_name']}: 시총 {mkt_cap}억 < 500억 → 제외")
                 continue
 
-            # 등락률
+            # 등락률 (+7% 초과 제외)
             change_str = str(price_data.get("flu_rt") or price_data.get("prdy_ctrt") or "0").replace(",", "")
             try:
                 change_pct = float(change_str)
             except Exception:
                 change_pct = 0
-            if change_pct > 10:
-                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +10% → 제외")
+            if change_pct > 7:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +7% → 제외")
                 continue
             if change_pct < -10:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -10% → 제외")
                 continue
 
-            # HTS 후보는 이미 조건식으로 필터링됨 → RSI/데드크로스 체크 생략
-            is_hts = cand.get("source_tier") == "hts"
+            # 일봉 데이터로 RSI / MA / 거래량비율 / 연속양봉 체크 (HTS 포함 전체)
+            time.sleep(1)
+            daily = kiwoom.get_daily_ohlcv(code, period=25)
+            closes, volumes, opens = [], [], []
+            for d in daily:
+                cp = abs(int(str(d.get("cur_prc", "0")).replace(",", "") or "0"))
+                op = abs(int(str(d.get("opn_prc", "0")).replace(",", "") or "0"))
+                vol = abs(int(str(d.get("acc_trd_vol", "0")).replace(",", "") or "0"))
+                if cp:
+                    closes.append(cp)
+                    volumes.append(vol)
+                    opens.append(op)
 
-            if not lightweight and not is_hts:
-                # 풀 모드: 일봉 데이터로 RSI + MA 체크 (비-HTS 후보만)
-                time.sleep(1)  # ka10081 호출 전 대기
-                daily = kiwoom.get_daily_ohlcv(code, period=25)
-                closes = []
-                for d in daily:
-                    cp = abs(int(str(d.get("cur_prc", "0")).replace(",", "") or "0"))
-                    if cp:
-                        closes.append(cp)
+            # RSI > 60 제외
+            if len(closes) >= 15:
+                rsi = calculate_rsi(closes)
+                if rsi and rsi > 60:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 60 → 제외")
+                    continue
 
-                if len(closes) >= 15:
-                    rsi = calculate_rsi(closes)
-                    if rsi and rsi > 65:
-                        logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 65 → 제외")
-                        continue
+            # MA5 < MA20 역배열 제외
+            if len(closes) >= 20:
+                ma5 = sum(closes[:5]) / 5
+                ma20 = sum(closes[:20]) / 20
+                if ma5 < ma20:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20 역배열 → 제외")
+                    continue
 
-                if len(closes) >= 20:
-                    ma5 = sum(closes[:5]) / 5
-                    ma20 = sum(closes[:20]) / 20
-                    if ma5 < ma20:
-                        logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20 역배열 → 제외")
-                        continue
+            # 거래량 비율 10배 초과 제외
+            if len(volumes) >= 21:
+                avg_vol = sum(volumes[1:21]) / 20
+                if avg_vol > 0 and volumes[0] > avg_vol * 10:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > 10배 → 제외")
+                    continue
+
+            # 3일 연속 양봉 제외
+            if len(closes) >= 3 and len(opens) >= 3:
+                if all(closes[i] > opens[i] for i in range(3)):
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 3일 연속 양봉 → 제외")
+                    continue
 
             passed.append(cand)
             time.sleep(1)
