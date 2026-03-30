@@ -435,6 +435,21 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
             f"주문시장: *{order_market or '기본값'}*\n"
             f"주문번호: `{ord_no}`"
         )
+        # 모의투자: 체결내역 API 미지원 → trades 테이블에 직접 기록
+        if getattr(kiwoom, "_is_mock", False):
+            try:
+                from data.db import insert_trade_direct
+                insert_trade_direct(
+                    trade_id=ord_no,
+                    stock_code=signal.stock_code,
+                    stock_name=signal.stock_name,
+                    side=side,
+                    quantity=qty,
+                    price=0,  # 자동매매는 시장가
+                )
+            except Exception as _e:
+                logger.warning(f"[{signal.stock_name}] 모의투자 체결 DB 저장 실패: {_e}")
+
         from data.db import reset_cooldowns_for_stock, update_signal_action, save_strategy_note, set_add_cooldown_after_trade
         reset_cooldowns_for_stock(signal.stock_code)
         if order_type == "1":

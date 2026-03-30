@@ -1048,6 +1048,22 @@ class TelegramBot:
             )
             logger.info(f"[bot] {order.side_label} 주문 완료: {order.stock_name} {order.qty}주 → 주문번호 {ord_no}")
 
+            # 모의투자: 체결내역 API 미지원 → trades 테이블에 직접 기록
+            if getattr(self._kiwoom, "_is_mock", False):
+                try:
+                    from data.db import insert_trade_direct
+                    insert_trade_direct(
+                        trade_id=ord_no,
+                        stock_code=order.stock_code,
+                        stock_name=order.stock_name,
+                        side=order.side_label,
+                        quantity=order.qty,
+                        price=exec_price,
+                    )
+                    logger.info(f"[bot] 모의투자 체결 DB 저장: {order.stock_name} {order.qty}주 {order.side_label} (ord_no={ord_no})")
+                except Exception as e:
+                    logger.warning(f"[bot] 모의투자 체결 DB 저장 실패: {e}")
+
             # 체결 후 해당 종목 쿨다운 리셋 — 새 포지션 기준으로 신호 재시작
             try:
                 from data.db import reset_cooldowns_for_stock, update_signal_action, set_add_cooldown_after_trade

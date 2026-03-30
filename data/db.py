@@ -758,6 +758,35 @@ def upsert_trades(trades: list[dict]):
         conn.commit()
 
 
+def insert_trade_direct(
+    trade_id: str,
+    stock_code: str,
+    stock_name: str,
+    side: str,
+    quantity: int,
+    price: int,
+    executed_at: str = "",
+) -> None:
+    """주문 체결 직후 trades 테이블에 즉시 기록 (실거래/모의투자 공통).
+    trade_id = ord_no, price = 지정가(시장가는 0), fee/tax = 0으로 기록 후 수동 수정 가능."""
+    from datetime import datetime
+
+    if not executed_at:
+        executed_at = datetime.now().strftime("%Y-%m-%d")
+    amount = price * quantity
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO trades
+                (trade_id, executed_at, stock_code, stock_name, side,
+                 quantity, price, amount, fee, tax)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (trade_id, executed_at, stock_code, stock_name, side, quantity, price, amount),
+        )
+        conn.commit()
+
+
 def get_trades(limit: int = 50) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
