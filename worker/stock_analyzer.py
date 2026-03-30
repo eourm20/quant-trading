@@ -208,10 +208,10 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
     제거 조건 (1개라도 해당 시 제외):
     - 시가총액 500억 미만
     - 당일 등락률 +7% 초과 / -10% 미만
-    - 일봉 RSI > 60 (HTS 후보 포함 전체 적용)
-    - MA5 < MA20 역배열 (HTS 후보 포함 전체 적용)
+    - 일봉 RSI > 65
+    - MA5 < MA20 × 0.99 (1% 이상 역배열)
     - 거래량 비율 10배 초과 (이미 급등 소진 구간)
-    - 3일 연속 양봉 (눌림목 아님)
+    - 4일 연속 양봉 (과열)
     """
     from worker.indicators import calculate_rsi
 
@@ -264,19 +264,19 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     volumes.append(vol)
                     opens.append(op)
 
-            # RSI > 60 제외
+            # RSI > 65 제외
             if len(closes) >= 15:
                 rsi = calculate_rsi(closes)
-                if rsi and rsi > 60:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 60 → 제외")
+                if rsi and rsi > 65:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 65 → 제외")
                     continue
 
-            # MA5 < MA20 역배열 제외
+            # MA5 < MA20 × 0.99 역배열 제외 (1% 이상 역배열만)
             if len(closes) >= 20:
                 ma5 = sum(closes[:5]) / 5
                 ma20 = sum(closes[:20]) / 20
-                if ma5 < ma20:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20 역배열 → 제외")
+                if ma5 < ma20 * 0.99:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20×0.99 역배열 → 제외")
                     continue
 
             # 거래량 비율 10배 초과 제외
@@ -286,10 +286,10 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > 10배 → 제외")
                     continue
 
-            # 3일 연속 양봉 제외
-            if len(closes) >= 3 and len(opens) >= 3:
-                if all(closes[i] > opens[i] for i in range(3)):
-                    logger.debug(f"[프리필터] {cand['stock_name']}: 3일 연속 양봉 → 제외")
+            # 4일 연속 양봉 제외
+            if len(closes) >= 4 and len(opens) >= 4:
+                if all(closes[i] > opens[i] for i in range(4)):
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 4일 연속 양봉 → 제외")
                     continue
 
             passed.append(cand)
