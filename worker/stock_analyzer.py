@@ -126,10 +126,12 @@ def _screen_candidates() -> list[dict]:
     candidates = []
     seen_codes: set[str] = set()
 
-    def _add(code: str, name: str, source: str, tier: str = "general"):
+    def _add(code: str, name: str, source: str, tier: str = "general") -> bool:
         if code and len(code) == 6 and code not in existing_codes and code not in seen_codes:
             seen_codes.add(code)
             candidates.append({"stock_code": code, "stock_name": name, "source": source, "source_tier": tier})
+            return True
+        return False
 
     def _extract(items, source, tier="general", limit=20):
         for item in items[:limit]:
@@ -137,7 +139,7 @@ def _screen_candidates() -> list[dict]:
             name = str(item.get("hts_kor_isnm") or item.get("stk_nm") or "").strip()
             _add(code, name, source, tier)
 
-    # ── 1순위: HTS 조건검색 (이미 필터링된 양질 후보) ──
+    # ── 1순위: HTS 조건검색 최대 20개 ──
     try:
         logger.info("[추천스캔][HTS] 조건검색 호출 시작")
         cond_stocks = kiwoom.run_all_quant_conditions()
@@ -149,8 +151,12 @@ def _screen_candidates() -> list[dict]:
                 if src:
                     source_count[src] = source_count.get(src, 0) + 1
             logger.info(f"[HTS-TRACE] 조건별: {source_count}")
+            hts_added = 0
             for item in cond_stocks:
-                _add(item["stock_code"], item.get("stock_name", ""), item.get("source", "조건검색"), "hts")
+                if hts_added >= 20:
+                    break
+                if _add(item["stock_code"], item.get("stock_name", ""), item.get("source", "조건검색"), "hts"):
+                    hts_added += 1
         else:
             logger.warning("[추천스캔][HTS] 조건검색 결과 0건")
     except Exception as e:
@@ -159,16 +165,16 @@ def _screen_candidates() -> list[dict]:
     hts_count = len(candidates)
     time.sleep(1)
 
-    # ── 2순위: 조용한 축적 (외인 순매수 + 주가 횡보) ──
+    # ── 2순위: 조용한 축적 최대 10개 ──
     try:
-        quiet = kiwoom.get_quiet_accumulation(change_threshold=3.0, max_results=15)
-        _extract(quiet, "조용한 축적", "general", 15)
+        quiet = kiwoom.get_quiet_accumulation(change_threshold=3.0, max_results=10)
+        _extract(quiet, "조용한 축적", "general", 10)
     except Exception as e:
         logger.warning(f"조용한 축적 조회 실패: {e}")
 
     time.sleep(1)
 
-    # ── 3순위: 외인 연속 순매수 (ka10035) ──
+    # ── 3순위: 외인 연속 순매수 최대 10개 ──
     try:
         _extract(kiwoom.get_foreign_net_buy(), "외인 순매수", "general", 10)
     except Exception as e:
@@ -176,22 +182,22 @@ def _screen_candidates() -> list[dict]:
 
     time.sleep(1)
 
-    # ── 4순위: 거래량 급증 (ka10023) — 보조 ──
+    # ── 4순위: 거래량 급증 최대 5개 ──
     try:
-        _extract(kiwoom.get_volume_surge(), "거래량 급증", "general", 15)
+        _extract(kiwoom.get_volume_surge(), "거래량 급증", "general", 5)
     except Exception as e:
         logger.warning(f"거래량 급증 조회 실패: {e}")
 
     time.sleep(1)
 
-    # ── 5순위: 등락률 하위 (ka10027) — 보조 ──
+    # ── 5순위: 등락률 하위 최대 5개 ──
     try:
-        _extract(kiwoom.get_decline_rank(), "눌림목 후보", "general", 15)
+        _extract(kiwoom.get_decline_rank(), "눌림목 후보", "general", 5)
     except Exception as e:
         logger.warning(f"등락률 하위 조회 실패: {e}")
 
     logger.info(f"[스크리닝] 후보 {len(candidates)}개 발견 (HTS {hts_count}개 우선)")
-    return candidates[:50]
+    return candidates
 
 
 # ═══════════════════════════ 프리필터 (AI 분석 전) ═══════════════════════════
@@ -295,7 +301,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
             time.sleep(3)  # 429 회복 대기
 
     logger.info(f"[프리필터] {len(candidates)}개 → {len(passed)}개 통과")
-    return passed[:15]
+    return passed
 
 
 # ═══════════════════════════ 장중 스캔 ═══════════════════════════
@@ -358,11 +364,15 @@ def run_intraday_scan():
             )
         else:
             logger.warning("[장중스캔][HTS] 조건검색 결과가 0건입니다.")
+        hts_added = 0
         for item in cond_stocks:
+            if hts_added >= 20:
+                break
             code = item["stock_code"]
             if code not in existing_codes and code not in seen_codes:
                 seen_codes.add(code)
                 candidates.append(item)
+                hts_added += 1
     except Exception as e:
         logger.warning(f"장중 스캔 HTS 조건검색 실패: {e}")
 
