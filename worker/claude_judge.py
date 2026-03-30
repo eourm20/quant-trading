@@ -743,10 +743,13 @@ def get_trade_opinion(
         logger.debug(f"뉴스 조회 실패: {e}")
 
     # ── 동적 유저 프롬프트 (신호별 데이터) ──
-    _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text != "공시 조회 불가" else ""
-    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text != "뉴스 조회 불가" else ""
-    _trades_section = f"\n## 최근 매매 이력 (3일)\n{trades_text}" if trades_text != "없음" else ""
-    _insights_section = f"\n## 최근 AI 판단 성과 (자기 보정용)\n{insights_text}" if insights_text not in ("데이터 부족", "조회 실패") else ""
+    _skipped = []
+    _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text != "공시 조회 불가" else (_skipped.append("DART") or "")
+    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text != "뉴스 조회 불가" else (_skipped.append("뉴스") or "")
+    _trades_section = f"\n## 최근 매매 이력 (3일)\n{trades_text}" if trades_text != "없음" else (_skipped.append("매매이력") or "")
+    _insights_section = f"\n## 최근 AI 판단 성과 (자기 보정용)\n{insights_text}" if insights_text not in ("데이터 부족", "조회 실패") else (_skipped.append("AI성과") or "")
+    if _skipped:
+        logger.debug(f"[판단 프롬프트] 빈 섹션 제거: {', '.join(_skipped)}")
 
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
