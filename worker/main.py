@@ -43,7 +43,7 @@ from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
 from worker.claude_judge import get_trade_opinion, judge_position_values
 from worker.cooldown import filter_new_conditions, mark_sent
-from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review
+from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review, reassess_watchlist
 from worker.portfolio_sync import sync_all
 from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
@@ -685,6 +685,9 @@ def main():
     scheduler.add_job(check_trailing_stops, "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="trailing_stops")
+    scheduler.add_job(lambda: reassess_watchlist(kiwoom), "cron",
+                      day_of_week="mon-fri", hour=9, minute=15,
+                      id="reassess_watchlist")
     scheduler.add_job(check_inactive_stocks, "cron",
                       day_of_week="mon-fri", hour=8, minute=30,
                       id="inactive_alert")

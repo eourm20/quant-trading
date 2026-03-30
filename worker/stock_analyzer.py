@@ -1446,3 +1446,323 @@ def run_daily_review():
         tg_text = tg_text[:3900] + "\n\n_(이하 생략)_"
     send_message(tg_text)
     logger.info(f"[일일복기] 텔레그램 발송 완료")
+
+
+# ═══════════════════════════ watchlist 조건 재평가 ═══════════════════════════
+
+def _detect_regime(chart, rsi: float | None, current_price: int) -> dict:
+    """종합 지표 기반 레짐 감지.
+
+    Returns:
+        {
+            "trend": "uptrend" | "downtrend" | "sideways",
+            "volatility": "high" | "normal" | "low",
+            "momentum": "bullish" | "bearish" | "neutral",
+            "score": int,  # -100 ~ +100
+            "bandwidth": float | None,  # 볼린저 밴드폭 (%)
+        }
+    """
+    if chart is None:
+        return {"trend": "sideways", "volatility": "normal", "momentum": "neutral",
+                "score": 0, "bandwidth": None}
+
+    score = 0
+
+    # ── MA 정배열/역배열 (가중치 높음: 추세 핵심) ──
+    if chart.ma5 and chart.ma20:
+        ratio = chart.ma5 / chart.ma20
+        if ratio > 1.02:
+            score += 20  # 강한 정배열
+        elif ratio > 1.0:
+            score += 10  # 약한 정배열
+        elif ratio < 0.98:
+            score -= 20  # 강한 역배열
+        else:
+            score -= 10  # 약한 역배열
+
+    # ── RSI ──
+    if rsi is not None:
+        if rsi > 65:
+            score += 15
+        elif rsi > 50:
+            score += 5
+        elif rsi < 35:
+            score -= 15
+        elif rsi < 50:
+            score -= 5
+
+    # ── MACD ──
+    if chart.macd_line is not None and chart.macd_signal is not None:
+        if chart.macd_line > chart.macd_signal:
+            score += 10
+        else:
+            score -= 10
+
+    # ── 스토캐스틱 ──
+    if chart.stochastic_k is not None:
+        if chart.stochastic_k > 80:
+            score += 5
+        elif chart.stochastic_k < 20:
+            score -= 5
+
+    # ── CCI ──
+    if chart.cci is not None:
+        if chart.cci > 100:
+            score += 5
+        elif chart.cci < -100:
+            score -= 5
+
+    # ── 일목균형표 구름대 (가중치 높음: 중기 추세) ──
+    if chart.ichimoku_above_cloud:
+        score += 15
+    elif chart.ichimoku_below_cloud:
+        score -= 15
+
+    # ── OBV ──
+    if chart.obv_trend:
+        if "매수" in chart.obv_trend:
+            score += 5
+        elif "매도" in chart.obv_trend:
+            score -= 5
+
+    # ── 다이버전스 (추세 전환 신호) ──
+    if chart.rsi_divergence:
+        if "강세" in chart.rsi_divergence:
+            score += 10
+        elif "약세" in chart.rsi_divergence:
+            score -= 10
+    if chart.macd_divergence:
+        if "강세" in chart.macd_divergence:
+            score += 8
+        elif "약세" in chart.macd_divergence:
+            score -= 8
+
+    score = max(-100, min(100, score))
+
+    # ── 추세 판정 ──
+    if score >= 20:
+        trend = "uptrend"
+    elif score <= -20:
+        trend = "downtrend"
+    else:
+        trend = "sideways"
+
+    # ── 변동성 (볼린저 밴드폭) ──
+    bandwidth = None
+    volatility = "normal"
+    if chart.bollinger_upper and chart.bollinger_lower and chart.ma20 and chart.ma20 > 0:
+        bandwidth = (chart.bollinger_upper - chart.bollinger_lower) / chart.ma20 * 100
+        if bandwidth > 15:
+            volatility = "high"
+        elif bandwidth < 5:
+            volatility = "low"
+
+    # ── 모멘텀 ──
+    momentum = "neutral"
+    if chart.macd_line is not None and chart.macd_signal is not None and rsi is not None:
+        macd_diff = chart.macd_line - chart.macd_signal
+        if macd_diff > 0 and rsi > 50:
+            momentum = "bullish"
+        elif macd_diff < 0 and rsi < 50:
+            momentum = "bearish"
+
+    return {
+        "trend": trend,
+        "volatility": volatility,
+        "momentum": momentum,
+        "score": score,
+        "bandwidth": bandwidth,
+    }
+
+
+def _calculate_adjustments(regime: dict, stock: dict) -> dict:
+    """레짐 기반 조건 조정값 계산. 변경이 필요한 필드만 반환."""
+    trend = regime["trend"]
+    volatility = regime["volatility"]
+    horizon = stock.get("horizon", "중기")
+    adjustments = {}
+
+    # ── RSI 과매도 ──
+    cur = stock.get("rsi_oversold")
+    if cur is not None:
+        base = {"단기": 38, "장기": 42}.get(horizon, 40)
+        adj = 0
+        if trend == "uptrend":
+            adj += 2  # 상승 추세: 눌림 얕음
+        elif trend == "downtrend":
+            adj -= 3  # 하락 추세: 더 깊은 과매도 필요
+        if volatility == "high":
+            adj -= 2  # 고변동: 더 깊게
+        elif volatility == "low":
+            adj += 2  # 저변동: 더 좁게
+        ideal = max(30, min(48, base + adj))
+        if abs(ideal - cur) >= 3:
+            adjustments["rsi_oversold"] = ideal
+
+    # ── RSI 과매수 ──
+    cur = stock.get("rsi_overbought")
+    if cur is not None:
+        base = {"단기": 65, "장기": 70}.get(horizon, 67)
+        adj = 0
+        if trend == "uptrend":
+            adj += 3  # 상승 추세: 더 올라갈 수 있음
+        elif trend == "downtrend":
+            adj -= 3  # 하락 추세: 일찍 빠져야
+        if volatility == "high":
+            adj += 2
+        elif volatility == "low":
+            adj -= 2
+        ideal = max(55, min(80, base + adj))
+        if abs(ideal - cur) >= 3:
+            adjustments["rsi_overbought"] = ideal
+
+    # ── CCI 과매도 ──
+    cur = stock.get("cci_oversold")
+    if cur is not None:
+        base = -100
+        adj = 0
+        if trend == "downtrend":
+            adj -= 20
+        elif trend == "uptrend":
+            adj += 15
+        if volatility == "high":
+            adj -= 15
+        elif volatility == "low":
+            adj += 15
+        ideal = max(-200, min(-50, base + adj))
+        if abs(ideal - cur) >= 20:
+            adjustments["cci_oversold"] = ideal
+
+    # ── CCI 과매수 ──
+    cur = stock.get("cci_overbought")
+    if cur is not None:
+        base = 100
+        adj = 0
+        if trend == "uptrend":
+            adj += 20
+        elif trend == "downtrend":
+            adj -= 15
+        if volatility == "high":
+            adj += 15
+        elif volatility == "low":
+            adj -= 15
+        ideal = max(50, min(200, base + adj))
+        if abs(ideal - cur) >= 20:
+            adjustments["cci_overbought"] = ideal
+
+    # ── 거래량 급증 비율 ──
+    cur = stock.get("volume_surge_ratio")
+    if cur is not None:
+        if volatility == "high" and cur < 2.5:
+            adjustments["volume_surge_ratio"] = round(min(3.0, cur + 0.5), 1)
+        elif volatility == "low" and cur > 2.0:
+            adjustments["volume_surge_ratio"] = round(max(1.5, cur - 0.5), 1)
+
+    return adjustments
+
+
+def _parse_price_int(val) -> int:
+    """현재가/가격 문자열을 int로 파싱."""
+    try:
+        return abs(int(str(val or "0").replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def reassess_watchlist(kiwoom) -> None:
+    """장 시작 전 watchlist 미보유 종목 조건 재평가.
+
+    전일 대비 레짐(추세·변동성·모멘텀)이 변했으면 임계값 자동 조정.
+    RSI, MA, MACD, 볼린저, 스토캐스틱, CCI, 일목균형표, OBV, 다이버전스 종합 판단.
+    """
+    from data.db import get_watchlist, get_portfolio, update_stock_field
+    from worker.indicators import calculate_rsi, calculate_chart_summary
+
+    stocks = [s for s in get_watchlist() if s.get("enabled")]
+    held_codes = {str(h.get("stock_code", "")) for h in get_portfolio()}
+    targets = [s for s in stocks if s["code"] not in held_codes]
+
+    if not targets:
+        logger.info("[재평가] 미보유 watchlist 종목 없음 — 스킵")
+        return
+
+    logger.info(f"[재평가] 미보유 {len(targets)}개 종목 조건 재평가 시작")
+    changes = []
+
+    for stock in targets:
+        code = stock["code"]
+        name = stock["name"]
+        try:
+            price_data = kiwoom.get_current_price(code)
+            current_price = _parse_price_int(
+                price_data.get("cur_prc") or price_data.get("stk_prpr"))
+            if not current_price:
+                continue
+
+            time.sleep(1)
+            daily = kiwoom.get_daily_ohlcv(code, period=90)
+            closes, highs, lows, opens, vols = [], [], [], [], []
+            for d in daily:
+                c = _parse_price_int(d.get("cur_prc"))
+                h = _parse_price_int(d.get("high_pric"))
+                lo = _parse_price_int(d.get("lwst_pric") or d.get("low_pric"))
+                o = _parse_price_int(d.get("strt_pric") or d.get("opn_pric"))
+                v = _parse_price_int(d.get("trde_qty"))
+                if c:
+                    closes.append(c)
+                if h:
+                    highs.append(h)
+                if lo:
+                    lows.append(lo)
+                if o:
+                    opens.append(o)
+                if v:
+                    vols.append(v)
+
+            if len(closes) < 20:
+                continue
+
+            horizon = stock.get("horizon", "중기")
+            rsi_period = {"단기": 7, "장기": 21}.get(horizon, 14)
+            rsi = calculate_rsi(closes, period=rsi_period) if len(closes) >= rsi_period + 1 else None
+            chart = calculate_chart_summary(
+                closes, highs, current_price,
+                low_prices=lows, open_prices=opens, volumes=vols,
+            ) if len(closes) >= 5 else None
+
+            regime = _detect_regime(chart, rsi, current_price)
+            adjs = _calculate_adjustments(regime, stock)
+
+            if adjs:
+                for field, value in adjs.items():
+                    update_stock_field(code, field, value)
+                changes.append({
+                    "name": name, "code": code,
+                    "regime": regime, "adjustments": adjs,
+                })
+                adj_str = ", ".join(f"{k}: {stock.get(k)}→{v}" for k, v in adjs.items())
+                logger.info(f"[재평가] {name}: {regime['trend']}/{regime['volatility']} "
+                            f"(score={regime['score']}) → {adj_str}")
+
+            time.sleep(1)
+
+        except Exception as e:
+            logger.warning(f"[재평가] {name}: 실패 ({e})")
+            time.sleep(2)
+
+    # ── 결과 리포트 ──
+    if changes:
+        lines = [f"🔄 *watchlist 조건 재평가* ({len(changes)}개 조정)\n"]
+        for c in changes:
+            r = c["regime"]
+            trend_emoji = {"uptrend": "📈", "downtrend": "📉", "sideways": "➡️"}[r["trend"]]
+            adj_parts = []
+            for field, val in c["adjustments"].items():
+                adj_parts.append(f"`{field}` → {val}")
+            lines.append(f"{trend_emoji} *{c['name']}* ({r['trend']}, {r['volatility']})")
+            lines.append(f"  {', '.join(adj_parts)}")
+        msg = "\n".join(lines)
+        send_message(msg)
+        logger.info(f"[재평가] {len(changes)}개 종목 조정 완료")
+    else:
+        logger.info("[재평가] 조정 필요 종목 없음")
