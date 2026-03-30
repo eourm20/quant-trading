@@ -692,7 +692,7 @@ def main():
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="removal_check")
     scheduler.add_job(run_intraday_scan, "cron",
-                      day_of_week="mon-fri", hour="10,13", minute=0,
+                      day_of_week="mon-fri", hour=13, minute=30,
                       id="intraday_scan")
     scheduler.add_job(run_daily_screening, "cron",
                       day_of_week="mon-fri", hour=15, minute=40,
