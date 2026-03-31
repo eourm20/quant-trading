@@ -216,6 +216,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
     from worker.indicators import calculate_rsi
 
     passed = []
+    reject_counts = {"시총": 0, "등락률_상단": 0, "등락률_하단": 0, "RSI": 0, "MA역배열": 0, "거래량과열": 0, "연속양봉": 0}
     time.sleep(1)  # 후보 수집 후 대기
     for cand in candidates:
         code = cand["stock_code"]
@@ -236,6 +237,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 mkt_cap = 0
             if mkt_cap > 0 and mkt_cap < 500:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 시총 {mkt_cap}억 < 500억 → 제외")
+                reject_counts["시총"] += 1
                 continue
 
             # 등락률 (+7% 초과 제외)
@@ -246,9 +248,11 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 change_pct = 0
             if change_pct > 7:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +7% → 제외")
+                reject_counts["등락률_상단"] += 1
                 continue
             if change_pct < -10:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -10% → 제외")
+                reject_counts["등락률_하단"] += 1
                 continue
 
             # 일봉 데이터로 RSI / MA / 거래량비율 / 연속양봉 체크 (HTS 포함 전체)
@@ -269,6 +273,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 rsi = calculate_rsi(closes)
                 if rsi and rsi > 70:
                     logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 70 → 제외")
+                    reject_counts["RSI"] += 1
                     continue
 
             # MA5 < MA20 × 0.97 역배열 제외 (3% 이상 역배열만)
@@ -277,6 +282,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 ma20 = sum(closes[:20]) / 20
                 if ma5 < ma20 * 0.97:
                     logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20×0.97 역배열 → 제외")
+                    reject_counts["MA역배열"] += 1
                     continue
 
             # 거래량 비율 15배 초과 제외
@@ -284,12 +290,14 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 avg_vol = sum(volumes[1:21]) / 20
                 if avg_vol > 0 and volumes[0] > avg_vol * 15:
                     logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > 15배 → 제외")
+                    reject_counts["거래량과열"] += 1
                     continue
 
             # 5일 연속 양봉 제외
             if len(closes) >= 5 and len(opens) >= 5:
                 if all(closes[i] > opens[i] for i in range(5)):
                     logger.debug(f"[프리필터] {cand['stock_name']}: 5일 연속 양봉 → 제외")
+                    reject_counts["연속양봉"] += 1
                     continue
 
             passed.append(cand)
@@ -300,7 +308,8 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
             passed.append(cand)
             time.sleep(3)  # 429 회복 대기
 
-    logger.info(f"[프리필터] {len(candidates)}개 → {len(passed)}개 통과")
+    active = {k: v for k, v in reject_counts.items() if v > 0}
+    logger.info(f"[프리필터] {len(candidates)}개 → {len(passed)}개 통과 | 탈락 사유: {active}")
     return passed
 
 
