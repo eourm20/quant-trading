@@ -264,32 +264,32 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     volumes.append(vol)
                     opens.append(op)
 
-            # RSI > 65 제외
+            # RSI > 70 제외
             if len(closes) >= 15:
                 rsi = calculate_rsi(closes)
-                if rsi and rsi > 65:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 65 → 제외")
+                if rsi and rsi > 70:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 70 → 제외")
                     continue
 
-            # MA5 < MA20 × 0.99 역배열 제외 (1% 이상 역배열만)
+            # MA5 < MA20 × 0.97 역배열 제외 (3% 이상 역배열만)
             if len(closes) >= 20:
                 ma5 = sum(closes[:5]) / 5
                 ma20 = sum(closes[:20]) / 20
-                if ma5 < ma20 * 0.99:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20×0.99 역배열 → 제외")
+                if ma5 < ma20 * 0.97:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20×0.97 역배열 → 제외")
                     continue
 
-            # 거래량 비율 10배 초과 제외
+            # 거래량 비율 15배 초과 제외
             if len(volumes) >= 21:
                 avg_vol = sum(volumes[1:21]) / 20
-                if avg_vol > 0 and volumes[0] > avg_vol * 10:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > 10배 → 제외")
+                if avg_vol > 0 and volumes[0] > avg_vol * 15:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > 15배 → 제외")
                     continue
 
-            # 4일 연속 양봉 제외
-            if len(closes) >= 4 and len(opens) >= 4:
-                if all(closes[i] > opens[i] for i in range(4)):
-                    logger.debug(f"[프리필터] {cand['stock_name']}: 4일 연속 양봉 → 제외")
+            # 5일 연속 양봉 제외
+            if len(closes) >= 5 and len(opens) >= 5:
+                if all(closes[i] > opens[i] for i in range(5)):
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 5일 연속 양봉 → 제외")
                     continue
 
             passed.append(cand)
@@ -1583,19 +1583,16 @@ def _calculate_adjustments(regime: dict, stock: dict) -> dict:
     adjustments = {}
 
     # ── RSI 과매도 ──
+    # 하락장: 기준 올림 → 덜 빠져도 신호 → 더 일찍 잡힘
+    # 상승장: 기준 내림 → 더 깊이 빠져야 신호 → 노이즈 감소
+    # 횡보: 변경 없음 (신호 빈도 조절 목적 변경 금지 원칙 준수)
     cur = stock.get("rsi_oversold")
-    if cur is not None:
-        base = {"단기": 38, "장기": 42}.get(horizon, 40)
-        adj = 0
-        if trend == "uptrend":
-            adj += 2  # 상승 추세: 눌림 얕음
-        elif trend == "downtrend":
-            adj -= 3  # 하락 추세: 더 깊은 과매도 필요
-        if volatility == "high":
-            adj -= 2  # 고변동: 더 깊게
-        elif volatility == "low":
-            adj += 2  # 저변동: 더 좁게
-        ideal = max(30, min(48, base + adj))
+    if cur is not None and trend != "sideways":
+        base_floor = {"단기": 38, "장기": 42}.get(horizon, 40)  # 종목 유형별 하한
+        if trend == "downtrend":
+            ideal = min(45, cur + 3)  # 상한 45
+        else:  # uptrend
+            ideal = max(base_floor, cur - 3)  # 하한: horizon 기본값
         if abs(ideal - cur) >= 3:
             adjustments["rsi_oversold"] = ideal
 
@@ -1675,8 +1672,9 @@ def reassess_watchlist(kiwoom) -> None:
     전일 대비 레짐(추세·변동성·모멘텀)이 변했으면 임계값 자동 조정.
     RSI, MA, MACD, 볼린저, 스토캐스틱, CCI, 일목균형표, OBV, 다이버전스 종합 판단.
     """
-    from data.db import get_watchlist, get_portfolio, update_stock_field
+    from data.db import get_watchlist, get_portfolio, update_stock_field, save_strategy_note
     from worker.indicators import calculate_rsi, calculate_chart_summary
+    from notifications.telegram import send_message
 
     stocks = [s for s in get_watchlist() if s.get("enabled")]
     held_codes = {str(h.get("stock_code", "")) for h in get_portfolio()}
@@ -1763,6 +1761,17 @@ def reassess_watchlist(kiwoom) -> None:
             lines.append(f"  {', '.join(adj_parts)}")
         msg = "\n".join(lines)
         send_message(msg)
+
+        # 전략 로그 자동 기록 (A안: 시장 국면 자동 조정은 원칙 예외, 단 ±5 이내 + 로그 필수)
+        adj_summary = ", ".join(
+            f"{c['name']} {k}: {c['adjustments'][k]}"
+            for c in changes for k in c["adjustments"]
+        )
+        save_strategy_note(
+            category="watchlist",
+            summary=f"09:15 레짐 재평가 자동 조정 ({len(changes)}개 종목)",
+            detail=adj_summary,
+        )
         logger.info(f"[재평가] {len(changes)}개 종목 조정 완료")
     else:
         logger.info("[재평가] 조정 필요 종목 없음")
