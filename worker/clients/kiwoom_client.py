@@ -110,7 +110,7 @@ class KiwoomClient:
 
     def _post(self, path: str, api_id: str, body: dict) -> dict:
         url = f"{BASE_URL}/{path.lstrip('/')}"
-        for attempt in range(2):  # 401 토큰 만료 시 1회 재시도
+        for attempt in range(2):  # 토큰 만료 시 1회 재시도
             resp = self._post_with_retry(
                 url,
                 json_body=body,
@@ -125,6 +125,13 @@ class KiwoomClient:
             resp.raise_for_status()
             payload = resp.json()
             code = payload.get("return_code")
+            # return_code=3: 토큰 유효하지 않음 (8005) — 토큰 갱신 후 1회 재시도
+            if code in (3, "3") and attempt == 0:
+                msg = payload.get("return_msg", "")
+                self._token = None
+                self._token_expires_at = None
+                logger.warning(f"[{api_id}] return_code=3 ({msg}) — 토큰 갱신 후 재시도")
+                continue
             if code not in (None, 0, "0"):
                 raise RuntimeError(f"API 오류 [{api_id}] code={code} msg={payload.get('return_msg')}")
             return payload
