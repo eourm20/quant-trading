@@ -733,7 +733,8 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 ```json
 {{
     "recommendation": "관심종목 등록" 또는 "보류" 또는 "부적합",
-    "reason": "판단 근거 2~3문장",
+    "recommendation_type": "기술형" 또는 "이벤트형" 또는 "혼합형" 또는 "해당없음",
+    "reason": "판단 근거 1~3문장",
     "met_conditions": ["충족된 편입조건명"],
     "disqualifiers": ["부적합 사유 (있을 때만)"],
     "target_price": 목표가(정수),
@@ -756,6 +757,14 @@ _SCREENING_SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩
 
 판단 원칙:
 - 수치 기반 판단만 허용. "느낌", "분위기"로 판단 금지.
+- 관심종목 추천은 "지금 당장 매수"가 아니라 "모니터링 가치" 판단이다.
+- 기술형: 차트 구조, 추세, 거래량, RSI, 지지/저항이 좋아서 추적할 가치가 있는 종목.
+- 이벤트형: 뉴스/공시/재료가 강해서 추적할 가치가 있는 종목. 단, 이미 과열되었으면 보류 가능.
+- 혼합형: 기술적 매력과 이벤트 재료가 동시에 의미 있는 종목.
+- recommendation_type에 맞춰 어떤 조건을 중점 모니터링할지 enabled_conditions와 임계값에 반영할 것.
+- 기술형/혼합형에서는 차트·수급·리스크를 우선하고, 이벤트형에서만 뉴스/공시 비중을 높일 것.
+- 뉴스/공시는 실적 쇼크, 유상증자, 수주/계약, 거래정지, 규제, 소송 등 가격 영향이 큰 특수 상황일 때만 상위 근거로 반영.
+- 일반 기사, 테마성 기사, 반복 기사, 시장 해설은 보조 참고사항으로만 보고 과대평가하지 말 것.
 - 데이터 부족 시 해당 조건은 "평가 불가"로 처리하고, 나머지 조건으로 판단.
 - 균형 잡힌 시각으로 판단. 명확한 부적합 사유가 없고 1개 이상 강한 편입 조건이 있으면 편입 고려.
 - 데이터 부족만으로 보류하지 말 것. 확인 가능한 조건들로 판단.
@@ -1140,6 +1149,7 @@ def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
 def _format_screening_alert(stock_name: str, stock_code: str, source: str, analysis: dict) -> str:
     """스크리닝 결과를 텔레그램 알림 텍스트로 포맷."""
     reason = analysis.get("reason", "")
+    recommendation_type = analysis.get("recommendation_type", "해당없음")
     met_conditions = analysis.get("met_conditions", [])
     if not isinstance(met_conditions, list):
         met_conditions = []
@@ -1153,7 +1163,7 @@ def _format_screening_alert(stock_name: str, stock_code: str, source: str, analy
     lines = [
         f"🔍 *{stock_name}* ({stock_code}) — {source}",
         f"",
-        f"*[AI 분석]* {met} 충족. R/R {rr}:1",
+        f"*[AI 분석]* {met} 충족. R/R {rr}:1 / 유형: {recommendation_type}",
         f"{reason}",
         f"",
         f"📌 *제안 전략*",

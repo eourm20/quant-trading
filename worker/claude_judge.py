@@ -686,14 +686,23 @@ def get_trade_opinion(
         if avg_price and signal.current_price:
             if add_mode == "momentum_add":
                 premium_pct = (signal.current_price - avg_price) / avg_price * 100
-                add_trigger_text = f"\n- 반등 추매 구간: 평단 {avg_price:,}원 대비 현재가 +{premium_pct:.1f}%"
+                add_trigger_text = (
+                    f"\n- 이번 add 분류: momentum_add (물타기 아님, 반등 확인 후 추매)"
+                    f"\n- 반등 추매 구간: 평단 {avg_price:,}원 대비 현재가 +{premium_pct:.1f}%"
+                )
             else:
                 trigger_price = int(avg_price * 0.92)
                 gap_pct = (signal.current_price - trigger_price) / signal.current_price * 100
                 if gap_pct > 0:
-                    add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 현재가 대비 {gap_pct:.1f}% 위"
+                    add_trigger_text = (
+                        f"\n- 이번 add 분류: averaging_down (평단 하회 물타기)"
+                        f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 현재가 대비 {gap_pct:.1f}% 위"
+                    )
                 else:
-                    add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 이미 트리거 이하 ({abs(gap_pct):.1f}% 초과)"
+                    add_trigger_text = (
+                        f"\n- 이번 add 분류: averaging_down (평단 하회 물타기)"
+                        f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 이미 트리거 이하 ({abs(gap_pct):.1f}% 초과)"
+                    )
 
     # watchlist 현재 설정값 조회 + positions 포지션 관리 정보
     _wl_settings_text = ""
@@ -750,12 +759,17 @@ def get_trade_opinion(
         downside = (cur - sl) / cur * 100
         rr_text = f"목표가 미설정 / 손절가 {sl:,}원 ({-downside:.1f}%)"
 
-    signal_type_label = {
-        "entry": "entry — 신규 매수 타이밍 검토",
-        "exit":  "exit  — 매도·익절·손절 타이밍 검토",
-        "add":   "add   — 보유 중 추가매수(물타기) 검토",
-        "both":  "both  — 매수/매도 모두 해당",
-    }.get(signal.signal_type, signal.signal_type)
+    if signal.signal_type == "add":
+        if add_mode == "momentum_add":
+            signal_type_label = "add   — 보유 중 반등 확인 후 추가매수(momentum_add) 검토"
+        else:
+            signal_type_label = "add   — 보유 중 평단 하회 물타기(averaging_down) 검토"
+    else:
+        signal_type_label = {
+            "entry": "entry — 신규 매수 타이밍 검토",
+            "exit":  "exit  — 매도·익절·손절 타이밍 검토",
+            "both":  "both  — 매수/매도 모두 해당",
+        }.get(signal.signal_type, signal.signal_type)
 
     # ── 정적 시스템 프롬프트 (캐싱 대상) ──
     _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템에서 최종 매매 판단을 내리는 AI입니다.
@@ -784,19 +798,27 @@ def get_trade_opinion(
 - entry 신호: 매수 진입 타이밍 검토. 시장 하락은 더 좋은 진입가일 수 있음. R/R 2:1 이상이면 매수 긍정 검토.
 - exit 신호: 매도·익절·손절 타이밍 검토.
 - add 신호: 보유 중 추가매수 타이밍 검토. averaging_down은 평단 아래에서만, momentum_add는 평단 위 반등 확인일 때만 판단. 오늘 신규 진입 종목 홀드 권고는 averaging_down에 우선 적용.
+- momentum_add가 명시된 경우 이를 물타기로 재해석하지 말 것. "금일 이미 1회 물타기" 규칙을 momentum_add에 적용하면 오판이다.
 - both 신호: 미보유면 entry 기준, 보유 중이면 exit 기준으로 분기 판단.
 - 홀드 판단 시: 구체적인 전환 트리거를 수치로 명시할 것.
+- 근거 우선순위는 기술적 신호, 포지션 맥락, 리스크 관리가 먼저다.
+- 뉴스/공시는 실적 쇼크, 유상증자, 수주/계약, 거래정지, 규제, 소송 등 가격 영향이 큰 특수 상황일 때만 근거 1~3에 상위 반영할 것.
+- 일반 기사, 테마성 기사, 반복 기사, 시장 해설은 보조 참고사항으로만 보고 핵심 근거로 과대평가하지 말 것.
 - [임계값] 변경 원칙: 기존 설정값 유지가 기본이며, 대부분의 홀드에서 [임계값] 줄은 생략해야 정상. 변경 제안 시 반드시 근거를 근거 항목에 명시. 기존값 대비 ±3 초과 변경 금지 (예: 기존 rsi_overbought=65이면 62~68 범위만 허용).
 - 시장 전반 하락은 entry 신호의 홀드 근거가 될 수 없음. R/R 기준과 종목 자체 지표로만 판단.
-- 섹터·시장 하락 중에도 개별 종목의 뉴스·공시·기술적 모멘텀이 긍정적이면 매수 근거로 충분함.
+- 섹터·시장 하락 중에도 개별 종목의 기술적 모멘텀이 충분하고, 뉴스/공시가 중대한 호재일 때만 보조 강화 근거로 사용할 것.
 - 섹터 등락률은 참고 정보일 뿐, 홀드 판단의 주된 근거로 사용 금지.
 - 섹터 등락률 +1% 이상이면 exit 신호(익절)를 신중하게 볼 것.
 
 ## 출력 형식 (반드시 준수)
 [매수 or 매도 or 홀드]
-• 근거1: (1~2문장)
-• 근거2: (1~2문장)
-• 근거3: (1~2문장)
+• 근거는 최소 1개, 최대 3개만 작성
+• 각 근거는 1문장으로 짧게 작성
+• 가장 중요한 근거부터 순서대로 작성
+• 뉴스/공시는 가격 영향이 큰 특수 상황이 아니면 생략 가능
+• 근거1: (필수)
+• 근거2: (선택)
+• 근거3: (선택)
 [주문시장] KRX or NXT or SOR — 한 줄 이유 (홀드이면 이 줄 생략. 모의투자는 KRX만 허용)
 [주문방식] 시장가 or 지정가 — 이유 한 문장 (홀드이면 이 줄 생략)
 [추천수량] N주 (약 XXX만원) — 아래 순서로 계산 (위반 시 시스템에서 강제 차감됨):
