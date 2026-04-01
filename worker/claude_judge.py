@@ -432,7 +432,7 @@ def _fmt_sector(sector: dict, sector_code: str | None) -> str:
 def _fmt_portfolio(holdings: list[dict], stock_code: str) -> tuple[str, str]:
     """DB 캐시 기반 (보유상세, 포트폴리오전체) 반환"""
     if not holdings:
-        return "미보유 (DB 캐시 없음)", "동기화 필요"
+        return "미보유 (DB 캐시 없음)", "동기화 필요", 0
 
     holding_item: dict | None = None
     lines = []
