@@ -21,6 +21,14 @@ prefilter:
   volume_ratio_max: 15          # 거래량 비율 상단 제외 기준 (배)
   consecutive_candles: 5        # 연속 양봉 제외 기준 (일)
 
+  # 시장 상황별 자동 조정
+  market_bull_threshold: 2.0    # 강세장 기준 (KOSPI 또는 KOSDAQ 등락률 %)
+  market_bear_threshold: -2.0   # 약세장 기준 (KOSPI 또는 KOSDAQ 등락률 %)
+  bull_change_upper_add: 4.0    # 강세장 시 등락률 상단 +N% 완화
+  bull_consecutive_sub: 2       # 강세장 시 연속양봉 기준 -N일 완화
+  bear_change_lower_sub: 3.0    # 약세장 시 등락률 하단 -N% 완화 (더 하락한 종목 포함)
+  bear_rsi_max_add: 5.0         # 약세장 시 RSI 상단 +N 완화
+
 # KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)
 # 프리장(장전 시간외): 08:30~09:00  trde_tp=61  (exit/add/both 조건만)
 # 정규장:             09:00~15:30  trde_tp=0/3 (전체 조건)

@@ -223,6 +223,42 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
     """
     from worker.indicators import calculate_rsi
 
+    # ── 시장 상황 조회 → 임계값 동적 조정 ──
+    _pf = _PREFILTER_CONFIG
+    _change_upper    = float(_pf.get("change_upper", 7))
+    _change_lower    = float(_pf.get("change_lower", -10))
+    _rsi_max         = float(_pf.get("rsi_max", 70))
+    _ma_ratio        = float(_pf.get("ma_ratio", 0.97))
+    _vol_ratio_max   = float(_pf.get("volume_ratio_max", 15))
+    _consec          = int(_pf.get("consecutive_candles", 5))
+
+    _bull_thr  = float(_pf.get("market_bull_threshold", 2.0))
+    _bear_thr  = float(_pf.get("market_bear_threshold", -2.0))
+    _market_state = "normal"
+    try:
+        def _rate(d):
+            try: return float(str(d.get("flu_rt") or d.get("prdy_ctrt") or "0").replace(",", ""))
+            except: return 0.0
+        _kospi_rate  = _rate(kiwoom.get_market_index("kospi"))
+        time.sleep(0.5)
+        _kosdaq_rate = _rate(kiwoom.get_market_index("kosdaq"))
+        _market_rate = max(_kospi_rate, _kosdaq_rate)  # 둘 중 높은 쪽 기준
+        if _market_rate >= _bull_thr:
+            _market_state = "bull"
+            _change_upper += float(_pf.get("bull_change_upper_add", 4.0))
+            _consec        = max(1, _consec - int(_pf.get("bull_consecutive_sub", 2)))
+        elif _market_rate <= _bear_thr:
+            _market_state = "bear"
+            _change_lower -= float(_pf.get("bear_change_lower_sub", 3.0))
+            _rsi_max      += float(_pf.get("bear_rsi_max_add", 5.0))
+        logger.info(
+            f"[프리필터] 시장 상태: {_market_state} "
+            f"(KOSPI {_kospi_rate:+.1f}% / KOSDAQ {_kosdaq_rate:+.1f}%) → "
+            f"등락률 상단 {_change_upper:.0f}% / 연속양봉 {_consec}일 / RSI {_rsi_max:.0f}"
+        )
+    except Exception as _e:
+        logger.warning(f"[프리필터] 시장 지수 조회 실패, 기본값 사용: {_e}")
+
     passed = []
     reject_counts = {"시총": 0, "등락률_상단": 0, "등락률_하단": 0, "RSI": 0, "MA역배열": 0, "거래량과열": 0, "연속양봉": 0}
     time.sleep(1)  # 후보 수집 후 대기
@@ -249,14 +285,12 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 reject_counts["시총"] += 1
                 continue
 
-            # 등락률 제외
+            # 등락률 제외 (시장 상황 반영 동적 기준)
             change_str = str(price_data.get("flu_rt") or price_data.get("prdy_ctrt") or "0").replace(",", "")
             try:
                 change_pct = float(change_str)
             except Exception:
                 change_pct = 0
-            _change_upper = float(_PREFILTER_CONFIG.get("change_upper", 7))
-            _change_lower = float(_PREFILTER_CONFIG.get("change_lower", -10))
             if change_pct > _change_upper:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +{_change_upper}% → 제외")
                 reject_counts["등락률_상단"] += 1
@@ -279,8 +313,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     volumes.append(vol)
                     opens.append(op)
 
-            # RSI 상단 초과 제외
-            _rsi_max = float(_PREFILTER_CONFIG.get("rsi_max", 70))
+            # RSI 상단 초과 제외 (시장 상황 반영)
             if len(closes) >= 15:
                 rsi = calculate_rsi(closes)
                 if rsi and rsi > _rsi_max:
@@ -289,7 +322,6 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     continue
 
             # MA 역배열 제외
-            _ma_ratio = float(_PREFILTER_CONFIG.get("ma_ratio", 0.97))
             if len(closes) >= 20:
                 ma5 = sum(closes[:5]) / 5
                 ma20 = sum(closes[:20]) / 20
@@ -299,7 +331,6 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     continue
 
             # 거래량 비율 상단 초과 제외
-            _vol_ratio_max = float(_PREFILTER_CONFIG.get("volume_ratio_max", 15))
             if len(volumes) >= 21:
                 avg_vol = sum(volumes[1:21]) / 20
                 if avg_vol > 0 and volumes[0] > avg_vol * _vol_ratio_max:
@@ -307,8 +338,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     reject_counts["거래량과열"] += 1
                     continue
 
-            # 연속 양봉 제외
-            _consec = int(_PREFILTER_CONFIG.get("consecutive_candles", 5))
+            # 연속 양봉 제외 (시장 상황 반영)
             if len(closes) >= _consec and len(opens) >= _consec:
                 if all(closes[i] > opens[i] for i in range(_consec)):
                     logger.debug(f"[프리필터] {cand['stock_name']}: {_consec}일 연속 양봉 → 제외")
