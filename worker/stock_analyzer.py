@@ -445,10 +445,10 @@ def run_intraday_scan():
     filtered = []
     for cand in candidates:
         key = f"intraday_scan:{cand['stock_code']}"
-        last = get_cooldown(key)
-        if last and (now_kst() - last).total_seconds() < 43200:  # 12시간
+        next_allowed_at = get_cooldown(key)
+        if next_allowed_at and now_kst() < next_allowed_at:  # 12시간
             continue
-        set_cooldown(key)
+        set_cooldown(key, cooldown_minutes=12 * 60)
         filtered.append(cand)
 
     if not filtered:

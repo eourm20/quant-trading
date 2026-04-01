@@ -238,9 +238,28 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cooldowns (
                 key TEXT PRIMARY KEY,
-                last_sent_at TEXT NOT NULL
+                last_sent_at TEXT DEFAULT NULL,
+                next_allowed_at TEXT DEFAULT NULL
             )
         """)
+        cooldown_cols = {row[1] for row in conn.execute("PRAGMA table_info(cooldowns)").fetchall()}
+        if "next_allowed_at" not in cooldown_cols:
+            conn.execute("ALTER TABLE cooldowns ADD COLUMN next_allowed_at TEXT DEFAULT NULL")
+        if "last_sent_at" not in cooldown_cols:
+            conn.execute("ALTER TABLE cooldowns ADD COLUMN last_sent_at TEXT DEFAULT NULL")
+        legacy_rows = conn.execute(
+            "SELECT key, last_sent_at FROM cooldowns WHERE next_allowed_at IS NULL AND last_sent_at IS NOT NULL"
+        ).fetchall()
+        for row in legacy_rows:
+            try:
+                legacy_last = datetime.strptime(row["last_sent_at"], "%Y-%m-%d %H:%M:%S")
+                next_allowed = _infer_legacy_cooldown_until(row["key"], legacy_last)
+                conn.execute(
+                    "UPDATE cooldowns SET next_allowed_at = ? WHERE key = ?",
+                    (next_allowed.strftime("%Y-%m-%d %H:%M:%S"), row["key"]),
+                )
+            except ValueError:
+                pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS portfolio (
                 stock_code    TEXT PRIMARY KEY,
@@ -912,20 +931,44 @@ def delete_all_strategy_notes() -> int:
 def get_cooldown(key: str) -> datetime | None:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT last_sent_at FROM cooldowns WHERE key = ?", (key,)
+            "SELECT last_sent_at, next_allowed_at FROM cooldowns WHERE key = ?", (key,)
         ).fetchone()
     if row:
-        return datetime.strptime(row["last_sent_at"], "%Y-%m-%d %H:%M:%S")
+        next_allowed_at = row["next_allowed_at"]
+        if next_allowed_at:
+            return datetime.strptime(next_allowed_at, "%Y-%m-%d %H:%M:%S")
+        legacy_last = row["last_sent_at"]
+        if legacy_last:
+            return _infer_legacy_cooldown_until(key, datetime.strptime(legacy_last, "%Y-%m-%d %H:%M:%S"))
     return None
 
 
-def set_cooldown(key: str):
-    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+def get_cooldown_record(key: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT key, last_sent_at, next_allowed_at FROM cooldowns WHERE key = ?", (key,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "key": row["key"],
+        "last_sent_at": row["last_sent_at"],
+        "next_allowed_at": row["next_allowed_at"],
+    }
+
+
+def set_cooldown(key: str, cooldown_minutes: int = 0, sent_at: datetime | None = None):
+    sent_dt = sent_at or _now_kst()
+    next_dt = sent_dt + timedelta(minutes=max(0, cooldown_minutes))
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO cooldowns (key, last_sent_at) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET last_sent_at = excluded.last_sent_at",
-            (key, now),
+            "INSERT INTO cooldowns (key, last_sent_at, next_allowed_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET last_sent_at = excluded.last_sent_at, next_allowed_at = excluded.next_allowed_at",
+            (
+                key,
+                sent_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                next_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            ),
         )
         conn.commit()
 
@@ -946,13 +989,24 @@ def reset_cooldowns_for_stock(stock_code: str) -> int:
     return cur.rowcount
 
 
+def _infer_legacy_cooldown_until(key: str, legacy_last: datetime) -> datetime:
+    if key.startswith("intraday_scan:"):
+        return legacy_last + timedelta(hours=12)
+    if key.startswith("dip_buy:"):
+        return legacy_last + timedelta(hours=2)
+    if key.endswith(":inactive_alert") or key.endswith(":removal_check"):
+        return legacy_last + timedelta(days=7)
+
+    cond_id = key.split(":", 1)[1] if ":" in key else ""
+    cond_map = {c["id"]: c.get("cooldown_minutes", 60) for c in get_conditions()}
+    return legacy_last + timedelta(minutes=cond_map.get(cond_id, 60))
+
+
 def set_add_cooldown_after_trade(stock_code: str, suppress_minutes: int = 60) -> int:
     """매수 체결 후 add/both 조건 신호를 suppress_minutes 동안 억제.
-    last_sent_at = (now + suppress_minutes) - cooldown_minutes
-    → 해당 조건의 다음 발동 시각이 now + suppress_minutes가 되도록 설정.
+    → 해당 조건의 next_allowed_at이 now + suppress_minutes가 되도록 설정.
     반환: 억제 설정된 조건 수.
     """
-    from datetime import timedelta
     cond_map = {c["id"]: c.get("cooldown_minutes", 60) for c in get_conditions()
                 if c.get("signal_type") in ("add", "both")}
     now = _now_kst()
@@ -960,12 +1014,14 @@ def set_add_cooldown_after_trade(stock_code: str, suppress_minutes: int = 60) ->
     with get_conn() as conn:
         for cond_id, cooldown_minutes in cond_map.items():
             key = f"{stock_code}:{cond_id}"
-            # last_sent_at을 설정해 suppress_minutes 후에 다시 발동하도록 함
-            effective_last = now + timedelta(minutes=suppress_minutes - cooldown_minutes)
             conn.execute(
-                "INSERT INTO cooldowns (key, last_sent_at) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET last_sent_at = excluded.last_sent_at",
-                (key, effective_last.strftime("%Y-%m-%d %H:%M:%S")),
+                "INSERT INTO cooldowns (key, last_sent_at, next_allowed_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET last_sent_at = excluded.last_sent_at, next_allowed_at = excluded.next_allowed_at",
+                (
+                    key,
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    (now + timedelta(minutes=suppress_minutes)).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
             )
             count += 1
         conn.commit()
@@ -977,13 +1033,12 @@ def shorten_cooldowns_for_stock(stock_code: str, ratio: float = 0.25, min_minute
     예: 원래 120분 쿨다운 → 30분 후 재알림 (ratio=0.25, min=30)
     반환: 단축된 조건 수
     """
-    from datetime import timedelta
     cond_map = {c["id"]: c["cooldown_minutes"] for c in get_conditions()}
     now = _now_kst()
     count = 0
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT key, last_sent_at FROM cooldowns WHERE key LIKE ?",
+            "SELECT key, last_sent_at, next_allowed_at FROM cooldowns WHERE key LIKE ?",
             (f"{stock_code}:%",)
         ).fetchall()
         for row in rows:
@@ -991,11 +1046,11 @@ def shorten_cooldowns_for_stock(stock_code: str, ratio: float = 0.25, min_minute
             cond_id = key.split(":", 1)[1]
             original_minutes = cond_map.get(cond_id, 60)
             short_minutes = max(min_minutes, int(original_minutes * ratio))
-            # last_sent_at을 뒤로 밀어서 남은 쿨다운 = short_minutes
-            new_last = now - timedelta(minutes=original_minutes - short_minutes)
+            current_last = row["last_sent_at"] or now.strftime("%Y-%m-%d %H:%M:%S")
+            new_next = now + timedelta(minutes=short_minutes)
             conn.execute(
-                "UPDATE cooldowns SET last_sent_at = ? WHERE key = ?",
-                (new_last.strftime("%Y-%m-%d %H:%M:%S"), key)
+                "UPDATE cooldowns SET last_sent_at = ?, next_allowed_at = ? WHERE key = ?",
+                (current_last, new_next.strftime("%Y-%m-%d %H:%M:%S"), key)
             )
             count += 1
         conn.commit()

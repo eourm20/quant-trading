@@ -29,8 +29,8 @@ def filter_new_conditions(
     for cid, msg in zip(triggered_ids, triggered_conditions):
         cooldown_minutes = cooldown_map.get(cid, 60)
         key = f"{stock_code}:{cid}"
-        last = get_cooldown(key)
-        if last is None or now - last >= timedelta(minutes=cooldown_minutes):
+        next_allowed_at = get_cooldown(key)
+        if next_allowed_at is None or now >= next_allowed_at:
             new_ids.append(cid)
             new_msgs.append(msg)
 
@@ -39,6 +39,9 @@ def filter_new_conditions(
 
 def mark_sent(stock_code: str, triggered_ids: list[str]):
     """발송된 조건의 시간을 DB에 기록"""
+    from data.db import get_conditions
+
+    cooldown_map = {c["id"]: c.get("cooldown_minutes", 60) for c in get_conditions()}
     for cid in triggered_ids:
         key = f"{stock_code}:{cid}"
-        set_cooldown(key)
+        set_cooldown(key, cooldown_minutes=cooldown_map.get(cid, 60))

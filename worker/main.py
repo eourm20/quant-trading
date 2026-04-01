@@ -315,8 +315,8 @@ def check_inactive_stocks():
 
         # 주 1회 알림 쿨다운 체크
         key = f"{code}:inactive_alert"
-        last = get_cooldown(key)
-        if last and (_now_kst() - last).days < ALERT_INTERVAL_DAYS:
+        next_allowed_at = get_cooldown(key)
+        if next_allowed_at and _now_kst() < next_allowed_at:
             continue
 
         # 마지막 신호 날짜 조회
@@ -334,7 +334,7 @@ def check_inactive_stocks():
 
         if days_since >= INACTIVE_DAYS:
             alerts.append((name, days_since))
-            set_cooldown(key)
+            set_cooldown(key, cooldown_minutes=ALERT_INTERVAL_DAYS * 24 * 60)
 
     if alerts:
         lines = "\n".join(f"  • {name}: {days}일째 신호 없음" for name, days in alerts)
@@ -361,8 +361,8 @@ def check_removal_candidates():
 
         # ── 미보유 종목: 90일 미신호 → 삭제 ──────────────────────────
         key = f"{code}:removal_check"
-        last = get_cooldown(key)
-        if last and (_now_kst() - last).days < ALERT_INTERVAL_DAYS:
+        next_allowed_at = get_cooldown(key)
+        if next_allowed_at and _now_kst() < next_allowed_at:
             continue
 
         last_signal_dt = get_last_signal_date(code)
@@ -382,7 +382,7 @@ def check_removal_candidates():
 
         if days_since >= INACTIVE_DAYS:
             delete_stock(code)
-            set_cooldown(key)
+            set_cooldown(key, cooldown_minutes=ALERT_INTERVAL_DAYS * 24 * 60)
             send_message(
                 f"🗑 *[자동 제거] {name}* ({code})\n"
                 f"미보유 상태로 {days_since}일간 신호 없음\n"
@@ -541,10 +541,10 @@ def check_market_dip():
     cooldown_hours = int(_WORKER_CONFIG.get("dip_buy_cooldown_hours", 2))
     now_kst = _now_kst()
     dip_key = f"dip_buy:{now_kst.strftime('%Y-%m-%d-%H')}"
-    last = get_cooldown(dip_key)
-    if last and (now_kst - last).total_seconds() < cooldown_hours * 3600:
+    next_allowed_at = get_cooldown(dip_key)
+    if next_allowed_at and now_kst < next_allowed_at:
         return
-    set_cooldown(dip_key)
+    set_cooldown(dip_key, cooldown_minutes=cooldown_hours * 60)
 
     logger.info(f"[시장 급락] KOSPI {kospi_rate:+.2f}% / KOSDAQ {kosdaq_rate:+.2f}% — 반등 매수 스캔 시작")
     send_message(
