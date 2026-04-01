@@ -196,7 +196,26 @@ R/R 1:1 미만: 홀드 권고
 수치 기반 판단만 허용: RSI·스토캐스틱·CCI·R/R·거래량 비율·MA 위치·일목균형표로 판단
 "시장이 내 예상과 달라서"는 매매 근거가 될 수 없음
 과도한 지표 혼란 방지: 핵심 2~3개 지표가 동일 방향이면 신뢰도 높음
-트레이딩은 기법보다 심법 — 스스로를 이해하고 통제하는 능력이 핵심"""
+트레이딩은 기법보다 심법 — 스스로를 이해하고 통제하는 능력이 핵심
+
+### 19. 포트폴리오 관리 원칙 (분산투자)
+[현금 비중 관리]
+- 총 포트폴리오 대비 현금 30% 이상: 신규 진입 적극 검토 가능
+- 현금 15~30%: 정상 운용. 목표 비중 내 진입
+- 현금 5~15%: 현금 부족. 신규 매수 규모 절반 이하로 제한. 기존 수익 종목 분할 익절 후 재원 마련 고려
+- 현금 5% 미만: 매수 보류 원칙. 기존 수익 종목 익절 또는 물타기 대응만
+[분산 원칙]
+- 단일 종목 비중 20% 초과: 추가 매수 금지
+- 보유 종목 5개 이상: 신규 진입 시 가장 성과 나쁜 종목 정리 후 재편 고려
+- 동일 섹터 쏠림 경고: 같은 섹터 종목이 2개 이상이면 신규 진입 신중
+[손익률 관리]
+- 포트 전체 수익률 +5% 이상: 일부 익절로 수익 확정 후 현금 비중 확보
+- 포트 전체 수익률 -5% 이하: 리스크 축소 모드 — 신규 매수 최소화, 손절 원칙 철저 준수
+- 포트 전체 수익률 -10% 이하: 매수 중단, 손실 제한 최우선
+- 수익 종목이 포트의 절반 미만: 전략 재점검 신호 — 신규 진입보다 기존 관리 집중
+[물타기 우선순위]
+- 보유 종목 중 물타기 조건 근접 종목이 있으면 신규 진입보다 해당 종목 현금 배정 우선
+- 신규 entry와 물타기가 동시에 발생하면 보유 종목 물타기 우선"""
 
 _ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -629,6 +648,17 @@ def get_trade_opinion(
 
     # 실제 매수 여력 = 현금 - 물타기 예비금 (음수면 현금 부족)
     buy_budget = deposit - add_reserve
+
+    # 포트폴리오 상태 지표
+    cash_ratio = deposit / total_portfolio * 100 if total_portfolio else 0
+    winning = [h for h in holdings if _f(h.get("profit_rate")) > 0]
+    losing  = [h for h in holdings if _f(h.get("profit_rate")) < 0]
+    near_add = [  # 물타기 가격 근접 종목 (현재가가 add_buy_price의 105% 이내)
+        h for h in holdings
+        if str(h.get("stock_code", "")) != signal.stock_code
+        and _positions.get(str(h.get("stock_code", "")), {}).get("add_buy_price", 0)
+        and _p(h.get("current_price")) <= _positions[str(h.get("stock_code", ""))]["add_buy_price"] * 1.05
+    ] if _positions else []
     conditions_text = "\n".join(f"    - {c}" for c in signal.triggered_conditions)
     trades_text = _fmt_trades(recent_trades or [], signal.signal_type)
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
@@ -726,6 +756,15 @@ def get_trade_opinion(
 - entry 신호에서 시장 하락은 홀드 근거 아님 — R/R 2:1 이상이면 매수 검토
 - 목표가 도달 시 익절 실행 원칙 — 홀드 연장 시 근거 명시 필수
 - 감정적 판단(공포·욕심) 배제 — 수치 기반으로만 판단
+- 추천수량은 반드시 실질 매수 여력(현금 - 물타기 예비금) 이내로 제한 — 초과 절대 금지
+- 현금 비중 5% 미만이면 신규 매수 보류 — 기존 수익 종목 익절 또는 물타기만 허용
+
+## 포트폴리오 판단 기준 (entry 신호 시 반드시 확인)
+- 현금 비중 15% 미만: 추천수량을 목표의 절반 이하로 제한. 근거에 "현금 부족으로 축소 진입" 명시
+- 보유 종목 5개 이상: 신규 진입 시 가장 수익률 낮은 기존 종목 정리 고려를 근거에 언급
+- 포트 전체 수익률 -5% 이하: 리스크 축소 모드. 신규 매수 최소 수량만 허용
+- 포트 전체 수익률 -10% 이하: [홀드] 판단 우선. 매수는 매우 강한 신호(RSI 극과매도 + R/R 3:1 이상)에만 허용
+- 물타기 근접 종목 존재 시: 신규 진입 수량 축소하고 해당 사실을 근거에 명시
 
 ## 판단 기준 (반드시 준수)
 - entry 신호: 매수 진입 타이밍 검토. 시장 하락은 더 좋은 진입가일 수 있음. R/R 2:1 이상이면 매수 긍정 검토.
@@ -746,12 +785,12 @@ def get_trade_opinion(
 • 근거3: (1~2문장)
 [주문시장] KRX or NXT or SOR — 한 줄 이유 (홀드이면 이 줄 생략. 모의투자는 KRX만 허용)
 [주문방식] 시장가 or 지정가 — 이유 한 문장 (홀드이면 이 줄 생략)
-[추천수량] N주 (약 XXX만원) — 아래 순서로 계산:
+[추천수량] N주 (약 XXX만원) — 아래 순서로 계산 (위반 시 시스템에서 강제 차감됨):
   ① 목표 비중: 총 포트폴리오의 7~15% → 목표 매수금액 산출
-  ② 물타기 예비금 우선 확보: 실질 매수 여력(현금 - 물타기 예비금) 범위 내로 조정
-  ③ 실질 매수 여력이 부족하면 목표 비중보다 줄여서 매수 (단, 현금이 완전히 0이 되는 전액 매수는 금지)
-  ④ 실질 매수 여력이 음수(현금 < 물타기 예비금)라도 신호가 매우 강하면 소량 매수 가능 — 단 "물타기 여력 없음" 명시
-  ⑤ 주문가능금액(현금) 초과 절대 금지
+  ② 현금 비중 15% 미만이면 목표 금액을 절반으로 축소
+  ③ 물타기 근접 종목이 있으면 그 예비금만큼 추가 차감
+  ④ 최종 한도 = 실질 매수 여력(현금 - 물타기 예비금). 이 값을 초과하는 수량은 절대 추천 금지
+  ⑤ 실질 매수 여력이 0 이하면 [홀드] 판단 (현금 부족 명시)
   (홀드이면 이 줄 생략. 포트폴리오/예수금 정보 없으면 생략)
 [전환조건] 홀드 시 매수/매도 전환 트리거 명시 (홀드가 아니면 이 줄 생략)
 [임계값] 홀드 시만, 기존 설정이 구조적으로 부적합할 때만 변경 제안. field=value 형식, 파이프(|) 구분 (허용: rsi_overbought/rsi_oversold_intraday/volume_surge_ratio | 금지: rsi_oversold/stop_loss_price/target_price). 기존값 대비 ±3 초과 변경 금지. 예: volume_surge_ratio=1.5 — 변경 불필요하면 이 줄 반드시 생략
@@ -812,11 +851,11 @@ def get_trade_opinion(
 
 ## 보유 현황
 - 해당 종목: {holding_detail}
-- 현금(주문가능금액): {f'{deposit:,}원' if deposit else '조회 불가'}
-- 주식 평가액: {f'{total_eval:,}원' if total_eval else '없음'}
-- 총 포트폴리오: {f'{total_portfolio:,}원' if total_portfolio else '조회 불가'}
-- 물타기 예비금(보유 {len(holdings)}종목 대비): 약 {add_reserve:,}원
-- 실질 매수 여력: {f'{buy_budget:,}원' if buy_budget > 0 else f'부족 ({buy_budget:,}원) — 현금이 물타기 예비금보다 적음'}
+- 현금(주문가능금액): {f'{deposit:,}원' if deposit else '조회 불가'} (현금 비중 {cash_ratio:.1f}%)
+- 주식 평가액: {f'{total_eval:,}원' if total_eval else '없음'} | 총 포트폴리오: {f'{total_portfolio:,}원' if total_portfolio else '조회 불가'}
+- 보유 종목: {len(holdings)}개 (수익 {len(winning)}개 / 손실 {len(losing)}개)
+- 물타기 예비금: 약 {add_reserve:,}원 | 실질 매수 여력: {f'{buy_budget:,}원' if buy_budget > 0 else f'부족 ({buy_budget:,}원)'}
+{f'- ⚠️ 물타기 근접 종목: {", ".join(h.get("stock_name","") for h in near_add)} — 해당 종목 현금 배정 우선 검토' if near_add else ''}
 - 포트폴리오 전체:
 {portfolio_text}
 
