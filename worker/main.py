@@ -41,7 +41,7 @@ load_dotenv(dotenv_path=_env_file, override=True)
 
 from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
-from worker.claude_judge import get_trade_opinion, judge_position_values
+from worker.claude_judge import get_trade_opinion, judge_position_values, get_dip_buy_opinion
 from worker.cooldown import filter_new_conditions, mark_sent
 from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review, reassess_watchlist
 from worker.portfolio_sync import sync_all
@@ -484,6 +484,173 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         send_message(f"❌ 자동 주문 실패: *{signal.stock_name}* — `{e}`")
 
 
+def check_market_dip():
+    """시장 급락 감지 시 watchlist 미보유 종목 전체를 AI로 반등 매수 평가."""
+    if not AUTO_TRADE:
+        return
+    session = "main" if TEST_MODE else get_current_session()
+    if session != "main":
+        return
+
+    try:
+        kospi = kiwoom.get_market_index("kospi")
+        time.sleep(0.5)
+        kosdaq = kiwoom.get_market_index("kosdaq")
+    except Exception as e:
+        logger.warning(f"[급락 감지] 지수 조회 실패: {e}")
+        return
+
+    def _rate(d: dict) -> float:
+        try:
+            return float(str(d.get("flu_rt") or d.get("prdy_ctrt") or "0").replace(",", ""))
+        except (ValueError, TypeError):
+            return 0.0
+
+    kospi_rate = _rate(kospi)
+    kosdaq_rate = _rate(kosdaq)
+    threshold = float(_WORKER_CONFIG.get("dip_buy_threshold", -1.5))
+
+    if kospi_rate > threshold and kosdaq_rate > threshold:
+        return  # 급락 아님
+
+    # 쿨다운 (설정된 시간마다 최대 1회)
+    cooldown_hours = int(_WORKER_CONFIG.get("dip_buy_cooldown_hours", 2))
+    now_kst = _now_kst()
+    dip_key = f"dip_buy:{now_kst.strftime('%Y-%m-%d-%H')}"
+    last = get_cooldown(dip_key)
+    if last and (now_kst - last).total_seconds() < cooldown_hours * 3600:
+        return
+    set_cooldown(dip_key)
+
+    logger.info(f"[시장 급락] KOSPI {kospi_rate:+.2f}% / KOSDAQ {kosdaq_rate:+.2f}% — 반등 매수 스캔 시작")
+    send_message(
+        f"📉 *시장 급락 감지*\n"
+        f"KOSPI {kospi_rate:+.2f}% / KOSDAQ {kosdaq_rate:+.2f}%\n"
+        f"watchlist 미보유 종목 반등 매수 후보 스캔 중..."
+    )
+
+    stocks = [s for s in get_watchlist() if s.get("enabled", False)]
+    holdings = get_portfolio()
+    holding_codes = {str(h.get("stock_code", "")) for h in holdings}
+    candidates = [s for s in stocks if s["code"] not in holding_codes]
+
+    if not candidates:
+        send_message("📊 급락 스캔: 미보유 watchlist 종목 없음")
+        return
+
+    # 예수금 + 매수 여력 계산
+    deposit = 0
+    try:
+        deposit_info = kiwoom.get_deposit()
+        deposit = deposit_info.get("order_available", 0)
+    except Exception as e:
+        logger.warning(f"[급락 스캔] 예수금 조회 실패: {e}")
+
+    buy_budget = deposit
+    try:
+        from data.db import get_positions as _gp
+        _positions = {p["stock_code"]: p for p in _gp()}
+        _reserve = 0
+        for h in holdings:
+            _code = str(h.get("stock_code", ""))
+            _pos = _positions.get(_code)
+            if _pos and _pos.get("add_buy_price"):
+                _reserve += _pos["add_buy_price"] * int(int(h.get("quantity") or 0) * 0.5)
+            else:
+                _reserve += int((h.get("eval_amount") or 0) * 0.15)
+        buy_budget = max(0, deposit - int(_reserve))
+    except Exception:
+        pass
+
+    total_eval = sum(int(h.get("eval_amount") or 0) for h in holdings)
+    total_portfolio = total_eval + deposit
+
+    from worker.monitor import Signal, _parse_price
+    from worker.indicators import calculate_rsi, calculate_chart_summary
+
+    max_buys = int(_WORKER_CONFIG.get("dip_buy_max_stocks", 2))
+    bought = 0
+    results = []
+
+    for stock in candidates:
+        if bought >= max_buys:
+            break
+
+        code = stock["code"]
+        name = stock.get("name", code)
+        time.sleep(1)
+
+        try:
+            price_data = kiwoom.get_current_price(code)
+            current_price = _parse_price(
+                price_data.get("cur_prc") or price_data.get("stk_prpr") or price_data.get("prpr")
+            )
+            if not current_price:
+                continue
+
+            daily_data = kiwoom.get_daily_ohlcv(code, period=90)
+            closes, highs, lows, opens, vols = [], [], [], [], []
+            for d in daily_data:
+                cp = _parse_price(d.get("cur_prc"))
+                hp = _parse_price(d.get("high_pric"))
+                lp = _parse_price(d.get("lwst_pric") or d.get("low_pric"))
+                op = _parse_price(d.get("strt_pric") or d.get("opn_pric"))
+                vl = _parse_price(d.get("trde_qty"))
+                if cp: closes.append(cp)
+                if hp: highs.append(hp)
+                if lp: lows.append(lp)
+                if op: opens.append(op)
+                if vl: vols.append(vl)
+
+            rsi = calculate_rsi(closes) if len(closes) >= 15 else None
+            chart = calculate_chart_summary(
+                closes, highs, current_price,
+                low_prices=lows, open_prices=opens, volumes=vols,
+            ) if len(closes) >= 5 else None
+
+            opinion = get_dip_buy_opinion(
+                stock=stock,
+                current_price=current_price,
+                rsi=rsi,
+                chart=chart,
+                kospi_rate=kospi_rate,
+                kosdaq_rate=kosdaq_rate,
+                deposit=deposit,
+                buy_budget=buy_budget,
+                total_portfolio=total_portfolio,
+                holdings=holdings,
+            )
+
+            first_line = opinion.strip().splitlines()[0] if opinion.strip() else ""
+            logger.info(f"[급락 스캔] {name}: {first_line[:80]}")
+
+            if "[매수]" in first_line:
+                fake_signal = Signal(
+                    stock_code=code,
+                    stock_name=name,
+                    current_price=current_price,
+                    triggered_conditions=["시장 급락 반등 매수 (AI 판단)"],
+                    triggered_ids=["dip_buy"],
+                    rsi=rsi,
+                    volume_ratio=None,
+                    chart=chart,
+                    in_portfolio=False,
+                    signal_type="entry",
+                )
+                signal_id = save_signal(fake_signal, opinion, in_portfolio=False)
+                _auto_execute(fake_signal, opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
+                bought += 1
+                results.append(f"✅ {name} 매수")
+            else:
+                results.append(f"⏭ {name} 패스")
+
+        except Exception as e:
+            logger.error(f"[급락 스캔] {name} 오류: {e}")
+            results.append(f"❌ {name} 오류")
+
+    send_message(f"📊 *급락 스캔 완료* ({bought}종목 매수)\n" + "\n".join(results))
+
+
 def _set_position_by_ai(stock_code: str, stock_name: str, current_price: int, qty: int):
     """매수 체결 후 AI가 포지션 관리값 판단 → positions 테이블 업데이트 + 텔레그램 알림."""
     try:
@@ -726,6 +893,9 @@ def main():
     scheduler.add_job(check_removal_candidates, "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="removal_check")
+    scheduler.add_job(check_market_dip, "cron",
+                      day_of_week="mon-fri", hour="9-14", minute="*/30",
+                      id="dip_buy")
     scheduler.add_job(run_intraday_scan, "cron",
                       day_of_week="mon-fri", hour=11, minute=0,
                       id="intraday_scan")

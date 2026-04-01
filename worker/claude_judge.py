@@ -891,6 +891,119 @@ def get_trade_opinion(
         return response.choices[0].message.content
 
 
+def get_dip_buy_opinion(
+    stock: dict,
+    current_price: int,
+    rsi: float | None,
+    chart,
+    kospi_rate: float,
+    kosdaq_rate: float,
+    deposit: int = 0,
+    buy_budget: int = 0,
+    total_portfolio: int = 0,
+    holdings: list | None = None,
+) -> str:
+    """시장 급락 시 반등 매수 후보 평가 — 기술적 신호 없이 종합 판단.
+    반환 형식은 get_trade_opinion과 동일 ([매수]/[홀드] + [추천수량])하여 _auto_execute 재활용."""
+    holdings = holdings or []
+    code = stock.get("code", "")
+    name = stock.get("name", code)
+    horizon = stock.get("horizon", "")
+
+    dart_text = ""
+    try:
+        from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
+        if DART_API_KEY:
+            dart_text = format_full_context_for_ai(code)
+    except Exception:
+        pass
+
+    news_text = ""
+    try:
+        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+        if NAVER_CLIENT_ID:
+            news_text = format_news_for_ai(name, max_items=5)
+    except Exception:
+        pass
+
+    # 포트폴리오 현황
+    total_eval = total_portfolio - deposit
+    cash_ratio = deposit / total_portfolio * 100 if total_portfolio else 0
+
+    # 차트 요약 (기존 _fmt_chart 재활용)
+    class _FakeSignal:
+        pass
+    fake = _FakeSignal()
+    fake.chart = chart
+    fake.current_price = current_price
+    fake.rsi = rsi
+    chart_text = _fmt_chart(fake)
+
+    _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text else ""
+    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text else ""
+
+    system_prompt = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템에서 시장 급락 시 반등 매수 후보를 평가하는 AI입니다.
+기술적 신호(RSI 과매도, MA 크로스 등)가 발동하지 않은 상태에서도, 시장 전체 급락과 종목의 펀더멘털·차트·뉴스를 종합하여
+"지금 담을 만한가"를 판단합니다.
+
+{_TRADING_KNOWLEDGE}
+
+## 급락 매수 판단 원칙
+- 시장 급락은 우량 종목을 싸게 살 기회일 수 있음 — 공포에 동조하지 말 것
+- 단, 시장 급락 + 개별 악재(공시/실적 쇼크/섹터 붕괴) 동시면 패스
+- 차트상 주요 지지선 근처이거나 RSI가 낮을수록 반등 가능성 높음
+- 반등 목표: 최근 고점 또는 피보나치 61.8% 되돌림 수준
+- 물타기 여력이 있으면 첫 진입은 보수적으로 (목표 비중의 50~70%)
+
+## 출력 형식 (반드시 준수)
+[매수 or 홀드]
+• 근거1: (1~2문장)
+• 근거2: (1~2문장)
+[주문시장] KRX (홀드이면 생략, 모의투자는 KRX만 허용)
+[주문방식] 시장가 or 지정가 (홀드이면 생략)
+[추천수량] N주 (약 XXX만원) — 총 포트폴리오의 5~10% 기준, 실질 매수 여력({buy_budget:,}원) 초과 금지 (홀드이면 생략)
+[전환조건] 홀드 시 매수 전환 조건 명시
+
+마크다운 헤더 사용 금지. 150단어 이내."""
+
+    user_prompt = f"""## 시장 상황
+- KOSPI: {kospi_rate:+.2f}% / KOSDAQ: {kosdaq_rate:+.2f}% (급락 진행 중)
+
+## 종목 정보
+- 종목: {name} ({code}) | 매매 기간: {horizon or '미설정'}
+- 현재가: {current_price:,}원
+- RSI: {rsi if rsi else 'N/A'}
+
+## 차트 분석
+{chart_text}
+{_dart_section}
+{_news_section}
+
+## 포트폴리오 상태
+- 현금(주문가능금액): {deposit:,}원 (현금 비중 {cash_ratio:.1f}%)
+- 주식 평가액: {total_eval:,}원 | 총 포트폴리오: {total_portfolio:,}원
+- 실질 매수 여력: {buy_budget:,}원"""
+
+    if _BACKEND == "anthropic":
+        response = _client.messages.create(
+            model=MODEL,
+            max_tokens=400,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return response.content[0].text
+    else:
+        response = _client.chat.completions.create(
+            model=MODEL,
+            max_tokens=400,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content
+
+
 def judge_position_values(
     stock_code: str,
     stock_name: str,
