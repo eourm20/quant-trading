@@ -410,7 +410,7 @@ def _fmt_chart(signal) -> str:
     return "\n".join(l for l in lines if l)
 
 
-def _fmt_trades(trades: list[dict], signal_type: str) -> str:
+def _fmt_trades(trades: list[dict], signal_type: str, add_signal_mode: str = "") -> str:
     if not trades:
         return "없음"
     today = __import__("datetime").date.today().strftime("%Y-%m-%d")
@@ -432,14 +432,14 @@ def _fmt_trades(trades: list[dict], signal_type: str) -> str:
 
     result = "\n".join(lines)
     if signal_type == "add":
-        if getattr(signal, "add_signal_mode", "") == "momentum_add":
+        if add_signal_mode == "momentum_add":
             result += "\n  ▶ 반등 확인 후 추매 신호: 현재가가 평단보다 높을 때만 유효"
         else:
             result += f"\n  ▶ 물타기 실행 횟수: {add_count}회 (최대 1회 원칙 — 이미 1회 이상이면 홀드 권고)"
     if (
         any(str(t.get("executed_at", ""))[:10] == today and t.get("side") == "매수" for t in trades)
         and signal_type == "add"
-        and getattr(signal, "add_signal_mode", "") != "momentum_add"
+        and add_signal_mode != "momentum_add"
     ):
         result += "\n  ⚠️ 오늘 신규 진입 종목 — add 신호 홀드 강력 권고"
     return result
@@ -668,7 +668,7 @@ def get_trade_opinion(
         and _p(h.get("current_price")) <= _positions[str(h.get("stock_code", ""))]["add_buy_price"] * 1.05
     ] if _positions else []
     conditions_text = "\n".join(f"    - {c}" for c in signal.triggered_conditions)
-    trades_text = _fmt_trades(recent_trades or [], signal.signal_type)
+    trades_text = _fmt_trades(recent_trades or [], signal.signal_type, getattr(signal, "add_signal_mode", ""))
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
     hold_condition_text = _fmt_last_hold_condition(signal.stock_code)
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
