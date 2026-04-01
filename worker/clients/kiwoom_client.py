@@ -398,18 +398,44 @@ class KiwoomClient:
             f"[주문] {stock_code} {'매수' if order_type=='1' else '매도'} {qty}주 "
             f"market={market} trde_tp={trde_tp} price={ord_uv or '종가'}"
         )
-        return self._post(
-            "/api/dostk/ordr",
-            api_id,
-            {
-                "dmst_stex_tp": market,
-                "stk_cd": stock_code,
-                "ord_qty": str(qty),
-                "ord_uv": ord_uv,
-                "trde_tp": trde_tp,
-                "cond_uv": "",
-            },
-        )
+        try:
+            return self._post(
+                "/api/dostk/ordr",
+                api_id,
+                {
+                    "dmst_stex_tp": market,
+                    "stk_cd": stock_code,
+                    "ord_qty": str(qty),
+                    "ord_uv": ord_uv,
+                    "trde_tp": trde_tp,
+                    "cond_uv": "",
+                },
+            )
+        except RuntimeError as e:
+            if "RC4027" not in str(e) or trde_tp not in ("0",):
+                raise
+            # RC4027(모의투자 상/하한가): 시장가 → 현재가 지정가로 1회 재시도
+            try:
+                pd = self.get_current_price(stock_code)
+                fallback_price = abs(int(str(pd.get("cur_prc") or "0").replace(",", "")))
+            except Exception as fe:
+                logger.warning(f"[주문] RC4027 폴백 현재가 조회 실패: {fe}")
+                raise e
+            if not fallback_price:
+                raise
+            logger.warning(f"[주문] RC4027 → 지정가 재시도: {fallback_price:,}원")
+            return self._post(
+                "/api/dostk/ordr",
+                api_id,
+                {
+                    "dmst_stex_tp": market,
+                    "stk_cd": stock_code,
+                    "ord_qty": str(qty),
+                    "ord_uv": str(fallback_price),
+                    "trde_tp": "3",
+                    "cond_uv": "",
+                },
+            )
 
     def get_sector_index(self, inds_cd: str) -> dict:
         """종목 업종코드로 섹터 지수 조회 (ka20001)

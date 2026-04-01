@@ -469,7 +469,7 @@ def _fmt_portfolio(holdings: list[dict], stock_code: str) -> tuple[str, str]:
     else:
         holding_detail = "미보유"
 
-    return holding_detail, "\n".join(lines) if lines else "보유 종목 없음"
+    return holding_detail, "\n".join(lines) if lines else "보유 종목 없음", total_eval
 
 
 def _fmt_signal_history(stock_code: str, signal_type: str = "") -> str:
@@ -601,7 +601,34 @@ def get_trade_opinion(
     recent_trades: list[dict] | None = None,
     deposit: int = 0,
 ) -> str:
-    holding_detail, portfolio_text = _fmt_portfolio(holdings, signal.stock_code)
+    holding_detail, portfolio_text, total_eval = _fmt_portfolio(holdings, signal.stock_code)
+
+    # 총 포트폴리오 = 주식 평가액 + 현금
+    total_portfolio = total_eval + deposit
+
+    # 물타기 예비금: positions 테이블의 add_buy_price × 보유수량 × 0.5 합산
+    # add_buy_price 미설정 종목은 평가액의 15%로 추정
+    try:
+        from data.db import get_positions
+        _positions = {p["stock_code"]: p for p in get_positions()}
+    except Exception:
+        _positions = {}
+
+    add_reserve = 0
+    for h in holdings:
+        code = str(h.get("stock_code", ""))
+        if code == signal.stock_code:
+            continue
+        pos = _positions.get(code)
+        if pos and pos.get("add_buy_price"):
+            qty = _p(h.get("quantity"))
+            add_reserve += pos["add_buy_price"] * int(qty * 0.5)
+        else:
+            add_reserve += int(_p(h.get("eval_amount")) * 0.15)
+    add_reserve = int(add_reserve)
+
+    # 실제 매수 여력 = 현금 - 물타기 예비금 (음수면 현금 부족)
+    buy_budget = deposit - add_reserve
     conditions_text = "\n".join(f"    - {c}" for c in signal.triggered_conditions)
     trades_text = _fmt_trades(recent_trades or [], signal.signal_type)
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
@@ -719,7 +746,13 @@ def get_trade_opinion(
 • 근거3: (1~2문장)
 [주문시장] KRX or NXT or SOR — 한 줄 이유 (홀드이면 이 줄 생략. 모의투자는 KRX만 허용)
 [주문방식] 시장가 or 지정가 — 이유 한 문장 (홀드이면 이 줄 생략)
-[추천수량] N주 (약 XXX만원) — 주문가능금액 내에서, 포트폴리오 대비 5~15% 비중 기준. 주문가능금액 초과 금지. (홀드이면 이 줄 생략. 포트폴리오/예수금 정보 없으면 생략)
+[추천수량] N주 (약 XXX만원) — 아래 순서로 계산:
+  ① 목표 비중: 총 포트폴리오의 7~15% → 목표 매수금액 산출
+  ② 물타기 예비금 우선 확보: 실질 매수 여력(현금 - 물타기 예비금) 범위 내로 조정
+  ③ 실질 매수 여력이 부족하면 목표 비중보다 줄여서 매수 (단, 현금이 완전히 0이 되는 전액 매수는 금지)
+  ④ 실질 매수 여력이 음수(현금 < 물타기 예비금)라도 신호가 매우 강하면 소량 매수 가능 — 단 "물타기 여력 없음" 명시
+  ⑤ 주문가능금액(현금) 초과 절대 금지
+  (홀드이면 이 줄 생략. 포트폴리오/예수금 정보 없으면 생략)
 [전환조건] 홀드 시 매수/매도 전환 트리거 명시 (홀드가 아니면 이 줄 생략)
 [임계값] 홀드 시만, 기존 설정이 구조적으로 부적합할 때만 변경 제안. field=value 형식, 파이프(|) 구분 (허용: rsi_overbought/rsi_oversold_intraday/volume_surge_ratio | 금지: rsi_oversold/stop_loss_price/target_price). 기존값 대비 ±3 초과 변경 금지. 예: volume_surge_ratio=1.5 — 변경 불필요하면 이 줄 반드시 생략
 
@@ -779,7 +812,11 @@ def get_trade_opinion(
 
 ## 보유 현황
 - 해당 종목: {holding_detail}
-- 주문가능금액: {f'{deposit:,}원' if deposit else '조회 불가'}
+- 현금(주문가능금액): {f'{deposit:,}원' if deposit else '조회 불가'}
+- 주식 평가액: {f'{total_eval:,}원' if total_eval else '없음'}
+- 총 포트폴리오: {f'{total_portfolio:,}원' if total_portfolio else '조회 불가'}
+- 물타기 예비금(보유 {len(holdings)}종목 대비): 약 {add_reserve:,}원
+- 실질 매수 여력: {f'{buy_budget:,}원' if buy_budget > 0 else f'부족 ({buy_budget:,}원) — 현금이 물타기 예비금보다 적음'}
 - 포트폴리오 전체:
 {portfolio_text}
 
