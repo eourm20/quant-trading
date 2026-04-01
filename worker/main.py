@@ -459,7 +459,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
                     stock_name=signal.stock_name,
                     side=side,
                     quantity=qty,
-                    price=0,  # 자동매매는 시장가
+                    price=signal.current_price,  # 신호 시점 현재가로 추정
                 )
             except Exception as _e:
                 logger.warning(f"[{signal.stock_name}] 모의투자 체결 DB 저장 실패: {_e}")
