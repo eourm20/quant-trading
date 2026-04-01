@@ -422,7 +422,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
         return
 
-    # 하드캡: 실질 매수 여력(예수금 - 물타기 예비금) 기준 최대 수량 초과 방지
+    # 하드캡: 매수 — 실질 매수 여력 초과 방지
     if order_type == "1" and signal.current_price > 0:
         budget = buy_budget if buy_budget > 0 else deposit
         max_qty = budget // signal.current_price
@@ -435,6 +435,23 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         if qty <= 0:
             logger.info(f"[{signal.stock_name}] 매수 여력 부족으로 스킵")
             return
+
+    # 하드캡: 매도 — 보유 수량 초과 방지
+    if order_type == "2":
+        holdings = get_portfolio()
+        held_qty = next(
+            (int(h.get("quantity") or 0) for h in holdings
+             if str(h.get("stock_code", "")) == signal.stock_code),
+            0,
+        )
+        if held_qty <= 0:
+            logger.info(f"[{signal.stock_name}] 미보유 종목 매도 스킵")
+            return
+        if qty > held_qty:
+            logger.warning(
+                f"[{signal.stock_name}] 매도 추천수량 {qty}주 → 보유수량 {held_qty}주로 조정"
+            )
+            qty = held_qty
 
     try:
         result = kiwoom.place_order(signal.stock_code, order_type, qty, order_market=order_market)
