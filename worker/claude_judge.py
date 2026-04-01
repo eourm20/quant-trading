@@ -690,15 +690,15 @@ def get_trade_opinion(
         _stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
         if _stock:
             _settings = []
-            for _f, _label in [
+            for _field, _label in [
                 ("rsi_oversold", "RSI 과매도"),
                 ("rsi_overbought", "RSI 과매수"),
                 ("rsi_oversold_intraday", "RSI 과매도(분봉)"),
                 ("volume_surge_ratio", "거래량 배율"),
             ]:
-                _v = _stock.get(_f)
+                _v = _stock.get(_field)
                 if _v is not None:
-                    _settings.append(f"{_label}: {_v} ({_f})")
+                    _settings.append(f"{_label}: {_v} ({_field})")
             if _settings:
                 _wl_settings_text = "\n- 현재 임계값 설정: " + " / ".join(_settings)
 
