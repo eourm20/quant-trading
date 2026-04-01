@@ -32,6 +32,8 @@ class Signal:
     strategy_note: str = ""          # 관심목록 등록 근거 메모
     horizon: str = ""                # 단기 / 중기 / 장기
     recent_trades: list[dict] = dc_field(default_factory=list)  # 최근 3일 매매 이력
+    avg_price: int = 0
+    add_signal_mode: str = ""
 
 
 def _parse_price(value: str | int | None) -> int:
@@ -131,6 +133,20 @@ def _evaluate_condition(
     return None
 
 
+def _classify_add_signal(triggered_ids: list[str], current_price: int, avg_price: int) -> str:
+    if not triggered_ids or not avg_price:
+        return ""
+
+    if "ma5_recovery_add" in triggered_ids:
+        return "momentum_add" if current_price > avg_price else ""
+
+    dip_add_ids = {"rsi_oversold_add", "bollinger_lower_break_add"}
+    if any(cond_id in dip_add_ids for cond_id in triggered_ids):
+        return "averaging_down" if current_price < avg_price else ""
+
+    return ""
+
+
 def check_stock(
     client: KiwoomClient,
     stock: dict,
@@ -219,6 +235,13 @@ def check_stock(
             except Exception as e:
                 logger.warning(f"[{name}] 5분봉 데이터 조회 실패: {e}")
 
+        avg_price = 0
+        if in_portfolio:
+            avg_price = next(
+                (_parse_price(h.get("avg_price")) for h in (holdings or []) if str(h.get("stock_code", "")) == code),
+                0,
+            )
+
         # 보유 종목: positions 데이터를 조건 평가용에 merge
         # target_price, stop_loss_price는 positions에서, 나머지는 watchlist에서
         eval_cond = dict(cond)
@@ -251,6 +274,11 @@ def check_stock(
                 if c["id"] in triggered_ids
             ]
             rep_signal_type = min(triggered_types, key=lambda t: type_priority.get(t, 9), default="")
+            add_signal_mode = _classify_add_signal(triggered_ids, current_price, avg_price) if rep_signal_type == "add" else ""
+
+            if rep_signal_type == "add" and not add_signal_mode:
+                logger.info(f"[{name}] add 신호 감지됐으나 평단 조건 불일치로 스킵")
+                return None
 
             from data.db import get_recent_trades_for_stock
             recent_trades = get_recent_trades_for_stock(code, days=3)
@@ -280,6 +308,8 @@ def check_stock(
                 strategy_note=cond.get("strategy_note") or "",
                 horizon=horizon,
                 recent_trades=recent_trades,
+                avg_price=avg_price,
+                add_signal_mode=add_signal_mode,
             )
 
         logger.info(

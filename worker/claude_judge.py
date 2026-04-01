@@ -432,8 +432,15 @@ def _fmt_trades(trades: list[dict], signal_type: str) -> str:
 
     result = "\n".join(lines)
     if signal_type == "add":
-        result += f"\n  ▶ 물타기 실행 횟수: {add_count}회 (최대 1회 원칙 — 이미 1회 이상이면 홀드 권고)"
-    if any(str(t.get("executed_at", ""))[:10] == today and t.get("side") == "매수" for t in trades) and signal_type == "add":
+        if getattr(signal, "add_signal_mode", "") == "momentum_add":
+            result += "\n  ▶ 반등 확인 후 추매 신호: 현재가가 평단보다 높을 때만 유효"
+        else:
+            result += f"\n  ▶ 물타기 실행 횟수: {add_count}회 (최대 1회 원칙 — 이미 1회 이상이면 홀드 권고)"
+    if (
+        any(str(t.get("executed_at", ""))[:10] == today and t.get("side") == "매수" for t in trades)
+        and signal_type == "add"
+        and getattr(signal, "add_signal_mode", "") != "momentum_add"
+    ):
         result += "\n  ⚠️ 오늘 신규 진입 종목 — add 신호 홀드 강력 권고"
     return result
 
@@ -667,21 +674,26 @@ def get_trade_opinion(
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
     insights_text = _fmt_recent_insights()
 
-    # add 신호: 물타기 트리거(평단 -8%)까지 거리
+    add_mode = getattr(signal, "add_signal_mode", "")
+    # add 신호: 물타기 트리거(평단 -8%) 또는 반등 추매 여부 표시
     add_trigger_text = ""
     if signal.signal_type == "add":
-        avg_price = next(
+        avg_price = getattr(signal, "avg_price", 0) or next(
             (_p(h.get("avg_price")) for h in holdings
              if str(h.get("stock_code", "")) == signal.stock_code),
             0,
         )
         if avg_price and signal.current_price:
-            trigger_price = int(avg_price * 0.92)
-            gap_pct = (signal.current_price - trigger_price) / signal.current_price * 100
-            if gap_pct > 0:
-                add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 현재가 대비 {gap_pct:.1f}% 위"
+            if add_mode == "momentum_add":
+                premium_pct = (signal.current_price - avg_price) / avg_price * 100
+                add_trigger_text = f"\n- 반등 추매 구간: 평단 {avg_price:,}원 대비 현재가 +{premium_pct:.1f}%"
             else:
-                add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 이미 트리거 이하 ({abs(gap_pct):.1f}% 초과)"
+                trigger_price = int(avg_price * 0.92)
+                gap_pct = (signal.current_price - trigger_price) / signal.current_price * 100
+                if gap_pct > 0:
+                    add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 현재가 대비 {gap_pct:.1f}% 위"
+                else:
+                    add_trigger_text = f"\n- 물타기 트리거 {trigger_price:,}원 (평단 -8%) | 이미 트리거 이하 ({abs(gap_pct):.1f}% 초과)"
 
     # watchlist 현재 설정값 조회 + positions 포지션 관리 정보
     _wl_settings_text = ""
@@ -752,7 +764,8 @@ def get_trade_opinion(
 {_TRADING_KNOWLEDGE}
 
 ## 운용 원칙 (변경 불가 규칙)
-- 물타기 최대 1회 원칙 — 이미 1회 실행했으면 add 신호 무조건 홀드
+- 물타기 최대 1회 원칙은 averaging_down add 신호에만 적용
+- momentum_add add 신호는 현재가가 평단보다 높을 때만 검토 가능
 - 손절가 근접 시 홀드 유혹 금지 — 손절가 도달 시 즉시 매도 원칙
 - entry 신호에서 시장 하락은 홀드 근거 아님 — R/R 2:1 이상이면 매수 검토
 - 목표가 도달 시 익절 실행 원칙 — 홀드 연장 시 근거 명시 필수
@@ -770,7 +783,7 @@ def get_trade_opinion(
 ## 판단 기준 (반드시 준수)
 - entry 신호: 매수 진입 타이밍 검토. 시장 하락은 더 좋은 진입가일 수 있음. R/R 2:1 이상이면 매수 긍정 검토.
 - exit 신호: 매도·익절·손절 타이밍 검토.
-- add 신호: 보유 중 추가매수 타이밍 검토. 평단 낮추기 효과와 리스크를 함께 판단. 오늘 신규 진입 종목이면 홀드 권고.
+- add 신호: 보유 중 추가매수 타이밍 검토. averaging_down은 평단 아래에서만, momentum_add는 평단 위 반등 확인일 때만 판단. 오늘 신규 진입 종목 홀드 권고는 averaging_down에 우선 적용.
 - both 신호: 미보유면 entry 기준, 보유 중이면 exit 기준으로 분기 판단.
 - 홀드 판단 시: 구체적인 전환 트리거를 수치로 명시할 것.
 - [임계값] 변경 원칙: 기존 설정값 유지가 기본이며, 대부분의 홀드에서 [임계값] 줄은 생략해야 정상. 변경 제안 시 반드시 근거를 근거 항목에 명시. 기존값 대비 ±3 초과 변경 금지 (예: 기존 rsi_overbought=65이면 62~68 범위만 허용).
