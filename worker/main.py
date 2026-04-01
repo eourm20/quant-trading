@@ -83,6 +83,9 @@ kiwoom = KiwoomClient()
 
 AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
 
+# 매수 직후 entry 재발동 방지 (stock_code → 해제 시각)
+_post_buy_lock: dict[str, datetime] = {}
+
 # KRX 거래 세션 (규정값)
 _SESSIONS: dict[str, tuple[dtime, dtime]] = {
     "premarket":  (dtime(8, 30),  dtime(9, 0)),    # 장전 시간외 (trde_tp 61)
@@ -487,6 +490,8 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         reset_cooldowns_for_stock(signal.stock_code)
         if order_type == "1":
             set_add_cooldown_after_trade(signal.stock_code)
+            # 매수 직후 1시간 동안 entry 신호 재발동 방지
+            _post_buy_lock[signal.stock_code] = _now_kst() + _td(hours=1)
             # 매수 후 포지션 자동 생성 (portfolio_sync에서 정확한 평단가로 갱신됨)
             create_position_from_trade(signal.stock_code, signal.stock_name, signal.current_price, qty)
         if signal_id is not None:
@@ -793,6 +798,15 @@ def run_check():
             if not new_conditions:
                 logger.info(f"[{signal.stock_name}] 신호 감지됐으나 쿨다운 중 — 스킵")
                 continue
+
+            # 매수 직후 entry 재발동 방지
+            if signal.stock_code in _post_buy_lock:
+                if _now_kst() < _post_buy_lock[signal.stock_code]:
+                    if not signal.in_portfolio:
+                        logger.info(f"[{signal.stock_name}] 최근 매수 후 entry 재발동 방지 — 스킵")
+                        continue
+                else:
+                    del _post_buy_lock[signal.stock_code]
 
             signal.triggered_conditions = new_conditions
             signal.triggered_ids = new_ids

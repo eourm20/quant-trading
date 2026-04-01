@@ -1120,11 +1120,20 @@ JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
             )
             text = response.choices[0].message.content
 
-        # JSON 파싱
+        # JSON 파싱 (마크다운 코드블록 제거 + 숫자 내 쉼표 처리)
         import re
-        json_match = re.search(r'\{[^}]+\}', text, re.DOTALL)
+        # 마크다운 코드블록 제거
+        text_clean = re.sub(r'```(?:json)?\s*', '', text).replace('```', '').strip()
+        # 숫자 안의 쉼표 제거 (예: 32,670 → 32670) — JSON 키/값 구분 쉼표는 보존
+        text_clean = re.sub(r'(\d),(\d)', r'\1\2', text_clean)
+        json_match = re.search(r'\{[\s\S]*?\}', text_clean)
         if json_match:
-            result = _json.loads(json_match.group())
+            try:
+                result = _json.loads(json_match.group())
+            except _json.JSONDecodeError:
+                # 파싱 실패 시 trailing comma 등 정리 후 재시도
+                cleaned = re.sub(r',\s*([}\]])', r'\1', json_match.group())
+                result = _json.loads(cleaned)
             # 정수 변환
             for k in ("target_price", "stop_loss_price", "add_buy_price"):
                 if k in result:
