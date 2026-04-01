@@ -400,8 +400,23 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
     """AI 판단이 매수/매도이고 추천수량이 있으면 자동 주문 실행. 추천수량 없으면 홀드."""
     import re
     first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
-    if "[매수]" in first_line:
+    if "[매수]" in first_line or "[추가매수(매수)]" in first_line or "[물타기(매수)]" in first_line:
         order_type, side = "1", "매수"
+        # add 신호에서 물타기/추가매수 의미 구분 (코드 레벨 검증)
+        if signal.signal_type == "add" and order_type == "1":
+            holdings = get_portfolio()
+            holding = next((h for h in holdings if str(h.get("stock_code", "")) == signal.stock_code), None)
+            if holding:
+                avg_price = int(float(str(holding.get("avg_price") or holding.get("purchase_price") or 0).replace(",", "")))
+                if avg_price > 0:
+                    is_add_buy = "[추가매수(매수)]" in first_line  # 수익 구간 추가매수
+                    is_dip_buy = "[물타기(매수)]" in first_line    # 평단 아래 물타기
+                    if is_dip_buy and signal.current_price >= avg_price:
+                        logger.info(f"[{signal.stock_name}] 물타기 신호이나 현재가({signal.current_price:,}) ≥ 평단({avg_price:,}) — 스킵")
+                        return
+                    if is_add_buy and signal.current_price < avg_price:
+                        logger.info(f"[{signal.stock_name}] 추가매수 신호이나 현재가({signal.current_price:,}) < 평단({avg_price:,}) — 물타기 조건 미충족 스킵")
+                        return
     elif "[매도]" in first_line:
         order_type, side = "2", "매도"
     else:
