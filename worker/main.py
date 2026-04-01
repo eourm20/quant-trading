@@ -391,7 +391,7 @@ def check_removal_candidates():
             logger.info(f"[자동 제거] {name}({code}) 미보유 {days_since}일 미신호 삭제")
 
 
-def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: int = 0) -> None:
+def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: int = 0, buy_budget: int = 0) -> None:
     """AI 판단이 매수/매도이고 추천수량이 있으면 자동 주문 실행. 추천수량 없으면 홀드."""
     import re
     first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
@@ -422,17 +422,18 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
         return
 
-    # 하드캡: 예수금 기준 최대 매수 가능 수량 초과 방지
-    if order_type == "1" and deposit > 0 and signal.current_price > 0:
-        max_qty = deposit // signal.current_price
+    # 하드캡: 실질 매수 여력(예수금 - 물타기 예비금) 기준 최대 수량 초과 방지
+    if order_type == "1" and signal.current_price > 0:
+        budget = buy_budget if buy_budget > 0 else deposit
+        max_qty = budget // signal.current_price
         if qty > max_qty:
             logger.warning(
                 f"[{signal.stock_name}] 추천수량 {qty}주 → {max_qty}주로 조정 "
-                f"(예수금 {deposit:,}원 / 현재가 {signal.current_price:,}원)"
+                f"(매수여력 {budget:,}원 / 현재가 {signal.current_price:,}원)"
             )
             qty = max_qty
         if qty <= 0:
-            logger.info(f"[{signal.stock_name}] 예수금 부족으로 매수 불가 — 스킵")
+            logger.info(f"[{signal.stock_name}] 매수 여력 부족으로 스킵")
             return
 
     try:
@@ -572,6 +573,24 @@ def run_check():
     except Exception as e:
         logger.warning(f"예수금 조회 실패: {e}")
 
+    # 물타기 예비금 계산 → 실질 매수 여력 산출 (하드캡 기준)
+    buy_budget = deposit
+    try:
+        from data.db import get_positions as _get_positions
+        _positions = {p["stock_code"]: p for p in _get_positions()}
+        _add_reserve = 0
+        for h in holdings:
+            code = str(h.get("stock_code", ""))
+            pos = _positions.get(code)
+            if pos and pos.get("add_buy_price"):
+                qty = int(h.get("quantity") or 0)
+                _add_reserve += pos["add_buy_price"] * int(qty * 0.5)
+            else:
+                _add_reserve += int((h.get("eval_amount") or 0) * 0.15)
+        buy_budget = max(0, deposit - int(_add_reserve))
+    except Exception as e:
+        logger.warning(f"물타기 예비금 계산 실패, deposit 전액 사용: {e}")
+
     kospi = kiwoom.get_market_index("kospi")
     time.sleep(1)
     kosdaq = kiwoom.get_market_index("kosdaq")
@@ -652,7 +671,7 @@ def run_check():
                 _maybe_save_hold_conditions(signal, claude_opinion)
 
             if AUTO_TRADE and claude_opinion:
-                _auto_execute(signal, claude_opinion, signal_id, deposit=deposit)
+                _auto_execute(signal, claude_opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
 
     logger.info("=== 조건 체크 완료 ===")
 
