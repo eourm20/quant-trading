@@ -299,8 +299,9 @@ def check_trailing_stops():
 def check_inactive_stocks():
     """30일 이상 신호 미발동 종목 주 1회 텔레그램 알림."""
     from data.db import get_conn
-    INACTIVE_DAYS = 30
-    ALERT_INTERVAL_DAYS = 7
+    _wm = _WORKER_CONFIG.get("watchlist_management", {})
+    INACTIVE_DAYS = int(_wm.get("inactive_days_alert", 30))
+    ALERT_INTERVAL_DAYS = int(_wm.get("alert_interval_days", 7))
 
     stocks = [s for s in get_watchlist() if s.get("enabled")]
     alerts = []
@@ -340,8 +341,9 @@ def check_inactive_stocks():
 
 def check_removal_candidates():
     """미보유 종목 중 90일 미신호 → 관심종목 자동 삭제."""
-    INACTIVE_DAYS = 90
-    ALERT_INTERVAL_DAYS = 7
+    _wm = _WORKER_CONFIG.get("watchlist_management", {})
+    INACTIVE_DAYS = int(_wm.get("inactive_days_removal", 90))
+    ALERT_INTERVAL_DAYS = int(_wm.get("alert_interval_days", 7))
 
     holdings = {str(h.get("stock_code", "")): h for h in get_portfolio()}
     stocks = [s for s in get_watchlist() if s.get("enabled")]

@@ -23,6 +23,14 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 logger = logging.getLogger(__name__)
 
+try:
+    import yaml as _yaml
+    _cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+    with open(_cfg_path, encoding="utf-8") as _f:
+        _PREFILTER_CONFIG = _yaml.safe_load(_f).get("prefilter", {})
+except Exception:
+    _PREFILTER_CONFIG = {}
+
 _ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
@@ -235,23 +243,26 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 mkt_cap = abs(int(float(mkt_cap_raw)))
             except Exception:
                 mkt_cap = 0
-            if mkt_cap > 0 and mkt_cap < 500:
-                logger.debug(f"[프리필터] {cand['stock_name']}: 시총 {mkt_cap}억 < 500억 → 제외")
+            _mkt_cap_min = int(_PREFILTER_CONFIG.get("market_cap_min", 500))
+            if mkt_cap > 0 and mkt_cap < _mkt_cap_min:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 시총 {mkt_cap}억 < {_mkt_cap_min}억 → 제외")
                 reject_counts["시총"] += 1
                 continue
 
-            # 등락률 (+7% 초과 제외)
+            # 등락률 제외
             change_str = str(price_data.get("flu_rt") or price_data.get("prdy_ctrt") or "0").replace(",", "")
             try:
                 change_pct = float(change_str)
             except Exception:
                 change_pct = 0
-            if change_pct > 7:
-                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +7% → 제외")
+            _change_upper = float(_PREFILTER_CONFIG.get("change_upper", 7))
+            _change_lower = float(_PREFILTER_CONFIG.get("change_lower", -10))
+            if change_pct > _change_upper:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +{_change_upper}% → 제외")
                 reject_counts["등락률_상단"] += 1
                 continue
-            if change_pct < -10:
-                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < -10% → 제외")
+            if change_pct < _change_lower:
+                logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < {_change_lower}% → 제외")
                 reject_counts["등락률_하단"] += 1
                 continue
 
@@ -268,35 +279,39 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     volumes.append(vol)
                     opens.append(op)
 
-            # RSI > 70 제외
+            # RSI 상단 초과 제외
+            _rsi_max = float(_PREFILTER_CONFIG.get("rsi_max", 70))
             if len(closes) >= 15:
                 rsi = calculate_rsi(closes)
-                if rsi and rsi > 70:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > 70 → 제외")
+                if rsi and rsi > _rsi_max:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: RSI {rsi:.1f} > {_rsi_max} → 제외")
                     reject_counts["RSI"] += 1
                     continue
 
-            # MA5 < MA20 × 0.97 역배열 제외 (3% 이상 역배열만)
+            # MA 역배열 제외
+            _ma_ratio = float(_PREFILTER_CONFIG.get("ma_ratio", 0.97))
             if len(closes) >= 20:
                 ma5 = sum(closes[:5]) / 5
                 ma20 = sum(closes[:20]) / 20
-                if ma5 < ma20 * 0.97:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20×0.97 역배열 → 제외")
+                if ma5 < ma20 * _ma_ratio:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: MA5 < MA20×{_ma_ratio} 역배열 → 제외")
                     reject_counts["MA역배열"] += 1
                     continue
 
-            # 거래량 비율 15배 초과 제외
+            # 거래량 비율 상단 초과 제외
+            _vol_ratio_max = float(_PREFILTER_CONFIG.get("volume_ratio_max", 15))
             if len(volumes) >= 21:
                 avg_vol = sum(volumes[1:21]) / 20
-                if avg_vol > 0 and volumes[0] > avg_vol * 15:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > 15배 → 제외")
+                if avg_vol > 0 and volumes[0] > avg_vol * _vol_ratio_max:
+                    logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > {_vol_ratio_max}배 → 제외")
                     reject_counts["거래량과열"] += 1
                     continue
 
-            # 5일 연속 양봉 제외
-            if len(closes) >= 5 and len(opens) >= 5:
-                if all(closes[i] > opens[i] for i in range(5)):
-                    logger.debug(f"[프리필터] {cand['stock_name']}: 5일 연속 양봉 → 제외")
+            # 연속 양봉 제외
+            _consec = int(_PREFILTER_CONFIG.get("consecutive_candles", 5))
+            if len(closes) >= _consec and len(opens) >= _consec:
+                if all(closes[i] > opens[i] for i in range(_consec)):
+                    logger.debug(f"[프리필터] {cand['stock_name']}: {_consec}일 연속 양봉 → 제외")
                     reject_counts["연속양봉"] += 1
                     continue
 

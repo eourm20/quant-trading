@@ -7,6 +7,20 @@ worker:
   dip_buy_max_stocks: 2        # 급락 스캔 시 최대 매수 종목 수
   dip_buy_cooldown_hours: 2    # 급락 스캔 재실행 최소 간격 (시간)
 
+watchlist_management:
+  inactive_days_alert: 30       # 신호 미발동 시 알림 기준 (일)
+  inactive_days_removal: 90     # 미보유 종목 자동 삭제 기준 (일)
+  alert_interval_days: 7        # 미발동 알림 재발송 간격 (일)
+
+prefilter:
+  market_cap_min: 500           # 시가총액 최소 (억 원)
+  change_upper: 7               # 등락률 상단 제외 기준 (%)
+  change_lower: -10             # 등락률 하단 제외 기준 (%)
+  rsi_max: 70                   # RSI 상단 제외 기준
+  ma_ratio: 0.97                # MA5/MA20 역배열 허용 비율 (1.0 = 역배열 미허용)
+  volume_ratio_max: 15          # 거래량 비율 상단 제외 기준 (배)
+  consecutive_candles: 5        # 연속 양봉 제외 기준 (일)
+
 # KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)
 # 프리장(장전 시간외): 08:30~09:00  trde_tp=61  (exit/add/both 조건만)
 # 정규장:             09:00~15:30  trde_tp=0/3 (전체 조건)
