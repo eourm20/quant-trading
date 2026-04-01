@@ -400,7 +400,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
     """AI 판단이 매수/매도이고 추천수량이 있으면 자동 주문 실행. 추천수량 없으면 홀드."""
     import re
     first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
-    if "[매수]" in first_line:
+    if "[매수]" in first_line or "[추가매수" in first_line or "[물타기" in first_line:
         order_type, side = "1", "매수"
     elif "[매도]" in first_line:
         order_type, side = "2", "매도"
