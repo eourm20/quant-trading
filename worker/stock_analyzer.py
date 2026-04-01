@@ -243,6 +243,13 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
         time.sleep(0.5)
         _kosdaq_rate = _rate(kiwoom.get_market_index("kosdaq"))
         _market_rate = max(_kospi_rate, _kosdaq_rate)  # 둘 중 높은 쪽 기준
+        _skip_thr = float(_pf.get("skip_bull_threshold", 5.0))
+        if _market_rate >= _skip_thr:
+            logger.info(
+                f"[프리필터] 시장 급등일 (KOSPI {_kospi_rate:+.1f}% / KOSDAQ {_kosdaq_rate:+.1f}%) "
+                f"— 스크리닝 생략 (기준 +{_skip_thr}%)"
+            )
+            return []
         if _market_rate >= _bull_thr:
             _market_state = "bull"
             _change_upper += float(_pf.get("bull_change_upper_add", 4.0))

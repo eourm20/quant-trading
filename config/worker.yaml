@@ -22,6 +22,7 @@ prefilter:
   consecutive_candles: 5        # 연속 양봉 제외 기준 (일)
 
   # 시장 상황별 자동 조정
+  skip_bull_threshold: 5.0      # 시장 급등일 스크리닝 생략 기준 (KOSPI 또는 KOSDAQ 등락률 %)
   market_bull_threshold: 2.0    # 강세장 기준 (KOSPI 또는 KOSDAQ 등락률 %)
   market_bear_threshold: -2.0   # 약세장 기준 (KOSPI 또는 KOSDAQ 등락률 %)
   bull_change_upper_add: 4.0    # 강세장 시 등락률 상단 +N% 완화
