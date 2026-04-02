@@ -446,14 +446,13 @@ def run_intraday_scan():
         logger.info("[장중 스캔] 후보 없음")
         return
 
-    # 쿨다운 필터 (같은 종목 하루 1번)
+    # 쿨다운 필터 (같은 종목 하루 1번) — 체크만, 설정은 프리필터 통과 후
     filtered = []
     for cand in candidates:
         key = f"intraday_scan:{cand['stock_code']}"
         next_allowed_at = get_cooldown(key)
         if next_allowed_at and now_kst() < next_allowed_at:  # 12시간
             continue
-        set_cooldown(key, cooldown_minutes=12 * 60)
         filtered.append(cand)
 
     if not filtered:
@@ -465,6 +464,10 @@ def run_intraday_scan():
     if not filtered:
         logger.info("[장중 스캔] 프리필터 후 후보 없음")
         return
+
+    # 프리필터 통과 종목에만 쿨다운 설정 (실패 종목은 다음 스캔에서 재시도 가능)
+    for cand in filtered:
+        set_cooldown(f"intraday_scan:{cand['stock_code']}", cooldown_minutes=12 * 60)
 
     ai_target = filtered
     logger.info(f"[장중 스캔] 프리필터 통과 {len(ai_target)}개 → AI 분석 시작")
