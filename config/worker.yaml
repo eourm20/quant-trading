@@ -28,8 +28,10 @@ prefilter:
   bull_change_upper_add: 4.0    # 강세장 시 등락률 상단 +N% 완화
   bull_consecutive_sub: 2       # 강세장 시 연속양봉 기준 -N일 완화
   bear_change_lower_sub: 3.0    # 약세장 시 등락률 하단 -N% 완화 (더 하락한 종목 포함)
+  bear_change_upper_add: 6.0    # 약세장 시 등락률 상단 +N% 완화 (7% → 13%, 폭락장 역행 강세 종목 포함)
   bear_rsi_max_add: 5.0         # 약세장 시 RSI 상단 +N 완화
   bear_ma_ratio_sub: 0.07       # 약세장 시 MA역배열 허용 완화 (0.97 → 0.90, 10% 역배열까지 허용)
+  bear_consecutive_disable: true  # 약세장 시 연속양봉 체크 비활성화 (폭락장 역행 강세 = 강한 종목)
 
 # KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)
 # 프리장(장전 시간외): 08:30~09:00  trde_tp=61  (exit/add/both 조건만)

@@ -257,12 +257,16 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
         elif _market_rate <= _bear_thr:
             _market_state = "bear"
             _change_lower -= float(_pf.get("bear_change_lower_sub", 3.0))
+            _change_upper += float(_pf.get("bear_change_upper_add", 6.0))
             _rsi_max      += float(_pf.get("bear_rsi_max_add", 5.0))
             _ma_ratio     -= float(_pf.get("bear_ma_ratio_sub", 0.07))
+            if _pf.get("bear_consecutive_disable", True):
+                _consec = 9999  # 사실상 비활성화
+        _consec_label = "비활성" if _consec >= 9999 else f"{_consec}일"
         logger.info(
             f"[프리필터] 시장 상태: {_market_state} "
             f"(KOSPI {_kospi_rate:+.1f}% / KOSDAQ {_kosdaq_rate:+.1f}%) → "
-            f"등락률 상단 {_change_upper:.0f}% / 연속양봉 {_consec}일 / RSI {_rsi_max:.0f} / MA역배열허용 {_ma_ratio:.2f}"
+            f"등락률 {_change_lower:.0f}~+{_change_upper:.0f}% / 연속양봉 {_consec_label} / RSI {_rsi_max:.0f} / MA역배열허용 {_ma_ratio:.2f}"
         )
     except Exception as _e:
         logger.warning(f"[프리필터] 시장 지수 조회 실패, 기본값 사용: {_e}")
