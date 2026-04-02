@@ -348,7 +348,8 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 avg_vol = sum(volumes[1:21]) / 20
                 if avg_vol > 0:
                     vol_ratio = volumes[0] / avg_vol
-                    if _vol_ratio_min > 0 and vol_ratio < _vol_ratio_min:
+                    # 거래량 하한은 퀀트_거래량급증 소스만 적용 (축적단계/눌림목 등 잠재 종목 제외 방지)
+                    if _vol_ratio_min > 0 and "거래량급증" in cand.get("source", "") and vol_ratio < _vol_ratio_min:
                         logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {vol_ratio:.1f}배 < {_vol_ratio_min}배 → 제외 (급증 아님)")
                         reject_counts["거래량부족"] += 1
                         continue
