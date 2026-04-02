@@ -18,6 +18,7 @@ prefilter:
   change_lower: -10             # 등락률 하단 제외 기준 (%)
   rsi_max: 70                   # RSI 상단 제외 기준
   ma_ratio: 0.97                # MA5/MA20 역배열 허용 비율 (1.0 = 역배열 미허용)
+  volume_ratio_min: 2.0         # 거래량 비율 하단 제외 기준 (20일 평균 대비, 배) — 급증 아닌 종목 제외
   volume_ratio_max: 15          # 거래량 비율 상단 제외 기준 (배)
   consecutive_candles: 5        # 연속 양봉 제외 기준 (일)
 
@@ -32,6 +33,7 @@ prefilter:
   bear_rsi_max_add: 5.0         # 약세장 시 RSI 상단 +N 완화
   bear_ma_ratio_sub: 0.07       # 약세장 시 MA역배열 허용 완화 (0.97 → 0.90, 10% 역배열까지 허용)
   bear_consecutive_disable: true  # 약세장 시 연속양봉 체크 비활성화 (폭락장 역행 강세 = 강한 종목)
+  max_ai_candidates: 10           # 프리필터 통과 후 AI 분석 상한 (hts 우선순위)
 
 # KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)
 # 프리장(장전 시간외): 08:30~09:00  trde_tp=61  (exit/add/both 조건만)

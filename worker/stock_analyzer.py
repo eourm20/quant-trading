@@ -229,6 +229,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
     _change_lower    = float(_pf.get("change_lower", -10))
     _rsi_max         = float(_pf.get("rsi_max", 70))
     _ma_ratio        = float(_pf.get("ma_ratio", 0.97))
+    _vol_ratio_min   = float(_pf.get("volume_ratio_min", 0))   # 0 = 하한 미적용
     _vol_ratio_max   = float(_pf.get("volume_ratio_max", 15))
     _consec          = int(_pf.get("consecutive_candles", 5))
 
@@ -272,7 +273,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
         logger.warning(f"[프리필터] 시장 지수 조회 실패, 기본값 사용: {_e}")
 
     passed = []
-    reject_counts = {"시총": 0, "등락률_상단": 0, "등락률_하단": 0, "RSI": 0, "MA역배열": 0, "거래량과열": 0, "연속양봉": 0}
+    reject_counts = {"시총": 0, "등락률_상단": 0, "등락률_하단": 0, "RSI": 0, "MA역배열": 0, "거래량부족": 0, "거래량과열": 0, "연속양봉": 0}
     time.sleep(1)  # 후보 수집 후 대기
     for cand in candidates:
         code = cand["stock_code"]
@@ -342,13 +343,19 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     reject_counts["MA역배열"] += 1
                     continue
 
-            # 거래량 비율 상단 초과 제외
+            # 거래량 비율 하단/상단 제외
             if len(volumes) >= 21:
                 avg_vol = sum(volumes[1:21]) / 20
-                if avg_vol > 0 and volumes[0] > avg_vol * _vol_ratio_max:
-                    logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {volumes[0]/avg_vol:.1f}배 > {_vol_ratio_max}배 → 제외")
-                    reject_counts["거래량과열"] += 1
-                    continue
+                if avg_vol > 0:
+                    vol_ratio = volumes[0] / avg_vol
+                    if _vol_ratio_min > 0 and vol_ratio < _vol_ratio_min:
+                        logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {vol_ratio:.1f}배 < {_vol_ratio_min}배 → 제외 (급증 아님)")
+                        reject_counts["거래량부족"] += 1
+                        continue
+                    if vol_ratio > _vol_ratio_max:
+                        logger.debug(f"[프리필터] {cand['stock_name']}: 거래량 {vol_ratio:.1f}배 > {_vol_ratio_max}배 → 제외 (과열)")
+                        reject_counts["거래량과열"] += 1
+                        continue
 
             # 연속 양봉 제외 (시장 상황 반영)
             if len(closes) >= _consec and len(opens) >= _consec:
@@ -464,6 +471,14 @@ def run_intraday_scan():
     if not filtered:
         logger.info("[장중 스캔] 프리필터 후 후보 없음")
         return
+
+    # source_tier 우선순위 정렬 (hts > general) 후 AI 분석 상한 적용
+    _tier_order = {"hts": 0, "general": 1}
+    filtered.sort(key=lambda c: _tier_order.get(c.get("source_tier", "general"), 1))
+    _max_ai = int(_PREFILTER_CONFIG.get("max_ai_candidates", 10))
+    if len(filtered) > _max_ai:
+        logger.info(f"[장중 스캔] 프리필터 통과 {len(filtered)}개 → 상위 {_max_ai}개만 AI 분석 (hts 우선)")
+        filtered = filtered[:_max_ai]
 
     # 프리필터 통과 종목에만 쿨다운 설정 (실패 종목은 다음 스캔에서 재시도 가능)
     for cand in filtered:
