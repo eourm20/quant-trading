@@ -1,5 +1,6 @@
 """
-DB 도구: 신호 이력, 진입 근거, watchlist 업데이트, 관심종목 추가.
+DB 도구: 신호 이력, 진입 근거, watchlist 업데이트, 관심종목 추가,
+         유사 신호 검색, 조건별/패턴별 적중률, 자기보정.
 """
 
 from __future__ import annotations
@@ -156,5 +157,154 @@ class AddToWatchlistTool(BaseTool):
             upsert_stock(stock_code, stock_name, enabled=True, conditions=payload)
             logger.info(f"[Agent] watchlist 추가: {stock_name}({stock_code}) horizon={horizon} 근거={reason}")
             return {"ok": True, "stock_code": stock_code, "stock_name": stock_name}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class SearchSimilarSignalsTool(BaseTool):
+    """유사 지표 상황에서의 과거 AI 판단 + 결과 조회 (SQL 범위 필터 RAG)."""
+
+    name = "search_similar_signals"
+    label = "유사 신호 검색"
+    description = (
+        "현재 RSI, 추세, 거래량 등과 유사했던 과거 신호를 검색하여 "
+        "당시 AI 판단(verdict)과 실제 수익률을 반환합니다. "
+        "과거 유사 상황의 성공/실패 패턴을 참고해 현재 판단에 활용하세요."
+    )
+    input_schema = {
+        "properties": {
+            "rsi": {"type": "number", "description": "현재 RSI 값 (±5 범위로 검색)"},
+            "trend": {"type": "string", "description": "현재 추세 ('상승'/'하락'/'횡보')"},
+            "signal_type": {"type": "string", "description": "신호 유형 필터 ('entry'/'exit'/'add'/'')", "default": ""},
+            "volume_ratio": {"type": "number", "description": "현재 거래량 배율 (0.5~2배 범위로 검색)"},
+            "above_ma20": {"type": "boolean", "description": "MA20 위에 있는지 여부"},
+            "limit": {"type": "integer", "description": "최대 결과 수", "default": 5},
+            "days": {"type": "integer", "description": "검색 기간(일)", "default": 90},
+        },
+        "required": [],
+    }
+
+    def execute(
+        self,
+        rsi: float | None = None,
+        trend: str | None = None,
+        signal_type: str = "",
+        volume_ratio: float | None = None,
+        above_ma20: bool | None = None,
+        limit: int = 5,
+        days: int = 90,
+    ) -> dict:
+        try:
+            from data.db import search_similar_signals
+            rows = search_similar_signals(
+                rsi=rsi, trend=trend, signal_type=signal_type,
+                volume_ratio=volume_ratio, above_ma20=above_ma20,
+                limit=limit, days=days,
+            )
+            return {"count": len(rows), "signals": rows}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class GetConditionAccuracyTool(BaseTool):
+    """트리거 조건별 적중률 통계 — 어떤 조건이 효과적인지 파악."""
+
+    name = "get_condition_accuracy"
+    label = "조건별 적중률"
+    description = (
+        "각 신호 조건(RSI 과매도, 골든크로스 등)별로 적중률과 평균 수익률을 반환합니다. "
+        "적중률이 낮은 조건을 파악하여 임계값 조정 여부를 판단할 때 활용하세요."
+    )
+    input_schema = {
+        "properties": {
+            "days": {"type": "integer", "description": "분석 기간(일)", "default": 30},
+            "min_count": {"type": "integer", "description": "최소 신호 건수 (이하 제외)", "default": 3},
+        },
+        "required": [],
+    }
+
+    def execute(self, days: int = 30, min_count: int = 3) -> dict:
+        try:
+            from data.db import get_condition_accuracy
+            rows = get_condition_accuracy(days=days, min_count=min_count)
+            return {"count": len(rows), "conditions": rows}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class GetPatternAccuracyTool(BaseTool):
+    """차트 패턴별 적중률 통계 — 어떤 패턴이 신뢰도 높은지 파악."""
+
+    name = "get_pattern_accuracy"
+    label = "패턴별 적중률"
+    description = (
+        "망치형, 골든크로스 등 차트 패턴별 적중률과 평균 수익률을 반환합니다. "
+        "현재 감지된 패턴의 과거 성과를 참고해 판단 신뢰도를 높이세요."
+    )
+    input_schema = {
+        "properties": {
+            "days": {"type": "integer", "description": "분석 기간(일)", "default": 30},
+            "min_count": {"type": "integer", "description": "최소 발생 건수 (이하 제외)", "default": 2},
+        },
+        "required": [],
+    }
+
+    def execute(self, days: int = 30, min_count: int = 2) -> dict:
+        try:
+            from data.db import get_pattern_accuracy
+            rows = get_pattern_accuracy(days=days, min_count=min_count)
+            return {"count": len(rows), "patterns": rows}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class SelfCorrectionTool(BaseTool):
+    """자기보정 — 저성과 조건을 감지하고 임계값 변경을 제안."""
+
+    name = "self_correction"
+    label = "자기보정 분석"
+    description = (
+        "적중률이 낮은 조건을 자동 감지하고 watchlist 임계값 변경을 제안합니다. "
+        "실제 변경은 update_watchlist를 통해 별도로 처리하세요."
+    )
+    input_schema = {
+        "properties": {
+            "days": {"type": "integer", "description": "분석 기간(일)", "default": 30},
+            "hit_rate_threshold": {
+                "type": "number",
+                "description": "이 적중률 미만 조건을 문제로 판단 (%)",
+                "default": 40.0,
+            },
+        },
+        "required": [],
+    }
+
+    def execute(self, days: int = 30, hit_rate_threshold: float = 40.0) -> dict:
+        try:
+            from data.db import get_condition_accuracy, get_verdict_accuracy, get_watchlist
+
+            condition_stats = get_condition_accuracy(days=days, min_count=3)
+            verdict_stats = get_verdict_accuracy(days=days)
+            watchlist = {s["code"]: s for s in get_watchlist()}
+
+            # 저성과 조건 추출
+            low_perf = [c for c in condition_stats if c["hit_rate_3d"] < hit_rate_threshold]
+
+            # 전체 verdict 성과 요약
+            verdict_summary = {
+                v: {"count": s["count"], "hit_rate_3d": s["hit_rate_3d"], "avg_3d": s["avg_3d"]}
+                for v, s in verdict_stats.items()
+            }
+
+            return {
+                "period_days": days,
+                "verdict_summary": verdict_summary,
+                "low_performance_conditions": low_perf,
+                "suggestion": (
+                    "적중률 낮은 조건들을 검토하세요. "
+                    "RSI 기준이 너무 넓거나 시장 환경과 맞지 않을 수 있습니다. "
+                    "update_watchlist로 임계값을 조정하거나 해당 조건을 비활성화하세요."
+                ) if low_perf else "모든 조건이 정상 범위입니다.",
+            }
         except Exception as e:
             return {"error": str(e)}

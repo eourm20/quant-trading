@@ -1157,7 +1157,30 @@ def save_signal(
             ),
         )
         conn.commit()
-        return cur.lastrowid
+        signal_id = cur.lastrowid
+
+    # 벡터DB 인덱싱 (chromadb 미설치 시 조용히 스킵)
+    try:
+        from worker.agents.tools.rag_tools import index_signal
+        import threading
+        threading.Thread(
+            target=index_signal,
+            kwargs={
+                "signal_id": signal_id,
+                "stock_name": signal.stock_name,
+                "signal_type": getattr(signal, "signal_type", "") or "",
+                "verdict": verdict,
+                "result_3d": None,
+                "triggered_conditions": ", ".join(signal.triggered_conditions),
+                "dart_summary": dart_summary,
+                "news_summary": news_summary,
+            },
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
+
+    return signal_id
 
 
 def update_signal_result(signal_id: int, result_pct: float, period: str = "3d") -> bool:
@@ -1411,3 +1434,147 @@ def get_screening_accuracy(days: int = 30) -> dict:
         "hit_7d": round(sum(1 for v in r7_vals if v > 0) / len(r7_vals) * 100, 1) if r7_vals else None,
         "hit_30d": round(sum(1 for v in r30_vals if v > 0) / len(r30_vals) * 100, 1) if r30_vals else None,
     }
+
+
+def search_similar_signals(
+    rsi: float | None = None,
+    trend: str | None = None,
+    signal_type: str = "",
+    volume_ratio: float | None = None,
+    above_ma20: bool | None = None,
+    limit: int = 5,
+    days: int = 90,
+) -> list[dict]:
+    """현재 지표와 유사한 과거 신호 검색 (SQL 범위 필터 기반 RAG).
+
+    반환: [{created_at, stock_name, signal_type, verdict, result_pct, result_3d,
+             result_5d, triggered_conditions, indicator_snapshot}]
+    """
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conditions = ["created_at >= ?", "verdict IS NOT NULL", "result_pct IS NOT NULL"]
+    params: list = [since]
+
+    if rsi is not None:
+        conditions.append("json_extract(indicator_snapshot, '$.rsi') BETWEEN ? AND ?")
+        params += [rsi - 5, rsi + 5]
+    if trend:
+        conditions.append("json_extract(indicator_snapshot, '$.trend') = ?")
+        params.append(trend)
+    if signal_type:
+        conditions.append("signal_type = ?")
+        params.append(signal_type)
+    if volume_ratio is not None:
+        conditions.append("json_extract(indicator_snapshot, '$.volume_ratio') BETWEEN ? AND ?")
+        params += [volume_ratio * 0.5, volume_ratio * 2.0]
+    if above_ma20 is not None:
+        conditions.append("json_extract(indicator_snapshot, '$.above_ma20') = ?")
+        params.append(1 if above_ma20 else 0)
+
+    where = " AND ".join(conditions)
+    params.append(limit)
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT created_at, stock_name, signal_type, verdict,
+                       result_pct, result_1d, result_5d,
+                       triggered_conditions, indicator_snapshot
+                FROM signals WHERE {where}
+                ORDER BY created_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_condition_accuracy(days: int = 30, min_count: int = 3) -> list[dict]:
+    """triggered_conditions 항목별 적중률 통계.
+
+    반환: [{condition, count, hit_rate_3d, avg_3d, avg_5d}] — hit_rate 낮은 순 정렬
+    """
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT triggered_conditions, verdict, result_pct, result_5d
+               FROM signals
+               WHERE created_at >= ? AND verdict IS NOT NULL AND result_pct IS NOT NULL""",
+            (since,),
+        ).fetchall()
+
+    stats: dict[str, dict] = {}
+    for r in rows:
+        raw = r["triggered_conditions"] or ""
+        # "조건A, 조건B" → ["조건A", "조건B"]
+        conds = [c.strip() for c in raw.split(",") if c.strip()]
+        v = r["verdict"]
+        r3 = r["result_pct"] or 0
+        r5 = r["result_5d"]
+        for cond in conds:
+            if cond not in stats:
+                stats[cond] = {"count": 0, "hit_3d": 0, "sum_3d": 0.0, "sum_5d": 0.0, "n_5d": 0}
+            s = stats[cond]
+            s["count"] += 1
+            s["sum_3d"] += r3
+            if (v in ("매수", "홀드") and r3 > 0) or (v == "매도" and r3 < 0):
+                s["hit_3d"] += 1
+            if r5 is not None:
+                s["sum_5d"] += r5
+                s["n_5d"] += 1
+
+    result = []
+    for cond, s in stats.items():
+        if s["count"] < min_count:
+            continue
+        result.append({
+            "condition": cond,
+            "count": s["count"],
+            "hit_rate_3d": round(s["hit_3d"] / s["count"] * 100, 1),
+            "avg_3d": round(s["sum_3d"] / s["count"], 2),
+            "avg_5d": round(s["sum_5d"] / s["n_5d"], 2) if s["n_5d"] else None,
+        })
+    return sorted(result, key=lambda x: x["hit_rate_3d"])
+
+
+def get_pattern_accuracy(days: int = 30, min_count: int = 2) -> list[dict]:
+    """chart_patterns 항목별 적중률 통계.
+
+    반환: [{pattern, count, hit_rate_3d, avg_3d}] — hit_rate 높은 순 정렬
+    """
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT chart_patterns, verdict, result_pct
+               FROM signals
+               WHERE created_at >= ? AND verdict IS NOT NULL
+                 AND result_pct IS NOT NULL AND chart_patterns IS NOT NULL""",
+            (since,),
+        ).fetchall()
+
+    stats: dict[str, dict] = {}
+    for r in rows:
+        try:
+            patterns = json.loads(r["chart_patterns"] or "[]")
+        except Exception:
+            continue
+        v = r["verdict"]
+        r3 = r["result_pct"] or 0
+        for pat in patterns:
+            if not pat:
+                continue
+            if pat not in stats:
+                stats[pat] = {"count": 0, "hit_3d": 0, "sum_3d": 0.0}
+            s = stats[pat]
+            s["count"] += 1
+            s["sum_3d"] += r3
+            if (v in ("매수", "홀드") and r3 > 0) or (v == "매도" and r3 < 0):
+                s["hit_3d"] += 1
+
+    result = []
+    for pat, s in stats.items():
+        if s["count"] < min_count:
+            continue
+        result.append({
+            "pattern": pat,
+            "count": s["count"],
+            "hit_rate_3d": round(s["hit_3d"] / s["count"] * 100, 1),
+            "avg_3d": round(s["sum_3d"] / s["count"], 2),
+        })
+    return sorted(result, key=lambda x: x["hit_rate_3d"], reverse=True)

@@ -57,7 +57,12 @@ def load_judgment_tools() -> list[BaseTool]:
         GetSignalHistoryTool,
         GetEntryReasonTool,
         UpdateWatchlistTool,
+        SearchSimilarSignalsTool,
+        GetConditionAccuracyTool,
+        GetPatternAccuracyTool,
+        SelfCorrectionTool,
     )
+    from worker.agents.tools.rag_tools import SearchTextContextTool
     from worker.agents.tools.order_tools import ExecuteOrderTool
 
     return [
@@ -71,6 +76,11 @@ def load_judgment_tools() -> list[BaseTool]:
         GetDartTool(),
         GetSignalHistoryTool(),
         GetEntryReasonTool(),
+        SearchSimilarSignalsTool(),
+        GetConditionAccuracyTool(),
+        GetPatternAccuracyTool(),
+        SelfCorrectionTool(),
+        SearchTextContextTool(),
         UpdateWatchlistTool(),
         ExecuteOrderTool(),
     ]
