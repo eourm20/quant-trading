@@ -1,16 +1,22 @@
 """
-벡터 RAG 도구 — chromadb + OpenAI 임베딩 기반 텍스트 유사도 검색.
+벡터 RAG 도구 — FAISS + OpenAI 임베딩 기반 텍스트 유사도 검색.
 
 대상: signals 테이블의 dart_summary + news_summary + triggered_conditions
 용도: "비슷한 공시/뉴스 상황에서 AI가 어떤 판단을 했고 결과가 어땠는지" 검색
 
-의존성: chromadb (pip install chromadb)
+구조:
+  - 벡터: FAISS IndexIDMap(IndexFlatIP) — signal_id를 키로 직접 저장
+  - 정규화: L2 정규화 → 코사인 유사도 (InnerProduct = cosine after normalize)
+  - 메타데이터: 기존 signals 테이블 재활용 (FAISS가 signal_id 반환 → SQLite 조회)
+  - 영속성: data/faiss_index.bin 파일로 저장
+
+의존성: faiss-cpu (pip install faiss-cpu)
 """
 
 from __future__ import annotations
-import json
 import logging
 import os
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -19,32 +25,65 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '..'
 logger = logging.getLogger(__name__)
 
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-_CHROMA_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'chroma_db')
+_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_index.bin')
+_INDEX_LOCK = threading.Lock()
 
 EMBED_MODEL = "text-embedding-3-small"
-COLLECTION_NAME = "signal_contexts"
+EMBED_DIM = 1536  # text-embedding-3-small 차원
 
 
-def _get_collection():
-    """chromadb 컬렉션 반환. 없으면 생성."""
+# ── 임베딩 ────────────────────────────────────────────────────────────────────
+
+def _embed(text: str) -> list[float]:
+    """OpenAI 임베딩 생성 (1536차원 float 리스트)."""
+    from openai import OpenAI
+    client = OpenAI(api_key=_OPENAI_KEY)
+    resp = client.embeddings.create(model=EMBED_MODEL, input=text)
+    return resp.data[0].embedding
+
+
+# ── FAISS 인덱스 관리 ─────────────────────────────────────────────────────────
+
+def _load_index():
+    """디스크에서 인덱스 로드. 없으면 새로 생성."""
     try:
-        import chromadb
-        from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+        import faiss
     except ImportError:
-        raise RuntimeError("chromadb 미설치. pip install chromadb 실행 후 재시도하세요.")
+        raise RuntimeError("faiss-cpu 미설치. pip install faiss-cpu 실행 후 재시도하세요.")
 
-    Path(_CHROMA_DIR).mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=_CHROMA_DIR)
+    path = Path(_INDEX_PATH)
+    if path.exists():
+        index = faiss.read_index(str(path))
+        logger.debug(f"[RAG] 인덱스 로드 완료: {index.ntotal}건")
+        return index
 
-    embed_fn = OpenAIEmbeddingFunction(
-        api_key=_OPENAI_KEY,
-        model_name=EMBED_MODEL,
-    )
-    return client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        embedding_function=embed_fn,
-        metadata={"hnsw:space": "cosine"},
-    )
+    # 신규 생성: IndexIDMap으로 signal_id를 직접 키로 사용
+    flat = faiss.IndexFlatIP(EMBED_DIM)   # InnerProduct (코사인 = L2정규화 후 IP)
+    index = faiss.IndexIDMap(flat)
+    return index
+
+
+def _save_index(index) -> None:
+    """인덱스를 디스크에 저장."""
+    import faiss
+    Path(_INDEX_PATH).parent.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(index, str(_INDEX_PATH))
+
+
+# ── 핵심 함수 ─────────────────────────────────────────────────────────────────
+
+def _build_document(
+    triggered_conditions: str,
+    dart_summary: str | None,
+    news_summary: str | None,
+) -> str:
+    """임베딩할 텍스트 조합."""
+    parts = [f"[신호조건] {triggered_conditions}"]
+    if dart_summary:
+        parts.append(f"[공시] {dart_summary[:500]}")
+    if news_summary:
+        parts.append(f"[뉴스] {news_summary[:300]}")
+    return "\n".join(parts)
 
 
 def index_signal(
@@ -57,66 +96,113 @@ def index_signal(
     dart_summary: str | None = None,
     news_summary: str | None = None,
 ) -> bool:
-    """신호 1건을 벡터DB에 인덱싱. 이미 존재하면 업데이트."""
+    """신호 1건을 FAISS 인덱스에 추가. 이미 존재하면 덮어씀."""
     if not _OPENAI_KEY:
         return False
 
-    # 임베딩할 텍스트: 조건 + 공시 + 뉴스
-    text_parts = [f"[신호조건] {triggered_conditions}"]
-    if dart_summary:
-        text_parts.append(f"[공시] {dart_summary[:500]}")
-    if news_summary:
-        text_parts.append(f"[뉴스] {news_summary[:300]}")
-    document = "\n".join(text_parts)
-
-    metadata = {
-        "signal_id": signal_id,
-        "stock_name": stock_name,
-        "signal_type": signal_type or "",
-        "verdict": verdict or "",
-        "result_3d": result_3d if result_3d is not None else 0.0,
-    }
+    document = _build_document(triggered_conditions, dart_summary, news_summary)
 
     try:
-        col = _get_collection()
-        col.upsert(
-            ids=[str(signal_id)],
-            documents=[document],
-            metadatas=[metadata],
-        )
+        import faiss
+        import numpy as np
+
+        vec = np.array([_embed(document)], dtype=np.float32)
+        faiss.normalize_L2(vec)  # 코사인 유사도를 위한 L2 정규화
+        ids = np.array([signal_id], dtype=np.int64)
+
+        with _INDEX_LOCK:
+            index = _load_index()
+            # 기존 항목 제거 후 재추가 (upsert)
+            try:
+                index.remove_ids(ids)
+            except Exception:
+                pass
+            index.add_with_ids(vec, ids)
+            _save_index(index)
+
+        logger.debug(f"[RAG] 인덱싱 완료: signal_id={signal_id} ({stock_name})")
         return True
+
     except Exception as e:
         logger.warning(f"[RAG] 인덱싱 실패 signal_id={signal_id}: {e}")
         return False
 
 
 def search_similar_context(query: str, n_results: int = 5) -> list[dict]:
-    """쿼리 텍스트와 유사한 과거 신호 컨텍스트 검색."""
+    """쿼리와 유사한 과거 신호 검색.
+    반환: [{signal_id, stock_name, verdict, result_3d, similarity, context_preview}]
+    """
+    if not _OPENAI_KEY:
+        return []
+
     try:
-        col = _get_collection()
-        results = col.query(query_texts=[query], n_results=n_results)
+        import faiss
+        import numpy as np
+        from data.db import get_conn
+
+        with _INDEX_LOCK:
+            index = _load_index()
+
+        if index.ntotal == 0:
+            return []
+
+        # 쿼리 임베딩 + 정규화
+        vec = np.array([_embed(query)], dtype=np.float32)
+        faiss.normalize_L2(vec)
+
+        k = min(n_results, index.ntotal)
+        scores, ids = index.search(vec, k)  # scores = 코사인 유사도 (0~1)
+
+        # signal_id로 메타데이터 조회 (기존 signals 테이블)
+        valid_ids = [int(i) for i in ids[0] if i >= 0]
+        if not valid_ids:
+            return []
+
+        placeholders = ",".join("?" * len(valid_ids))
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"""SELECT id, stock_name, signal_type, verdict,
+                           result_pct, result_1d, result_5d,
+                           triggered_conditions, dart_summary, news_summary
+                    FROM signals WHERE id IN ({placeholders})""",
+                valid_ids,
+            ).fetchall()
+
+        # id → row 매핑
+        row_map = {r["id"]: dict(r) for r in rows}
+
         output = []
-        for i, doc in enumerate(results["documents"][0]):
-            meta = results["metadatas"][0][i]
-            dist = results["distances"][0][i] if results.get("distances") else None
-            similarity = round(1 - dist, 3) if dist is not None else None
+        for i, sid in enumerate(valid_ids):
+            row = row_map.get(sid)
+            if not row:
+                continue
+            similarity = round(float(scores[0][i]), 4)
+            doc_preview = _build_document(
+                row.get("triggered_conditions") or "",
+                row.get("dart_summary"),
+                row.get("news_summary"),
+            )[:200]
             output.append({
-                "signal_id": meta.get("signal_id"),
-                "stock_name": meta.get("stock_name"),
-                "signal_type": meta.get("signal_type"),
-                "verdict": meta.get("verdict"),
-                "result_3d": meta.get("result_3d"),
+                "signal_id": sid,
+                "stock_name": row.get("stock_name"),
+                "signal_type": row.get("signal_type"),
+                "verdict": row.get("verdict"),
+                "result_3d": row.get("result_pct"),
+                "result_1d": row.get("result_1d"),
+                "result_5d": row.get("result_5d"),
                 "similarity": similarity,
-                "context_preview": doc[:200],
+                "context_preview": doc_preview,
             })
+
         return output
+
     except Exception as e:
         logger.warning(f"[RAG] 검색 실패: {e}")
         return []
 
 
 def bulk_index_existing_signals(days: int = 180) -> int:
-    """기존 signals 테이블 데이터를 일괄 인덱싱. 반환: 인덱싱된 건수."""
+    """기존 signals 데이터 일괄 인덱싱. 반환: 인덱싱된 건수."""
     from data.db import get_conn
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -150,13 +236,29 @@ def bulk_index_existing_signals(days: int = 180) -> int:
     return count
 
 
-# ── Agent 도구 ─────────────────────────────────────────────────────────────
+def get_index_stats() -> dict:
+    """인덱스 상태 조회."""
+    try:
+        import faiss
+        with _INDEX_LOCK:
+            index = _load_index()
+        return {
+            "total_vectors": index.ntotal,
+            "dimension": EMBED_DIM,
+            "index_path": str(_INDEX_PATH),
+            "index_exists": Path(_INDEX_PATH).exists(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── Agent 도구 ─────────────────────────────────────────────────────────────────
 
 from worker.agents.tools.registry import BaseTool
 
 
 class SearchTextContextTool(BaseTool):
-    """벡터 유사도 기반 과거 신호 컨텍스트 검색 (공시/뉴스 텍스트 기반)."""
+    """FAISS 벡터 유사도 기반 과거 신호 컨텍스트 검색 (공시/뉴스 텍스트 기반)."""
 
     name = "search_text_context"
     label = "공시·뉴스 유사 검색"
@@ -191,11 +293,11 @@ class SearchTextContextTool(BaseTool):
 
 
 class RagIndexSignalTool(BaseTool):
-    """신호 저장 후 벡터DB에 인덱싱 (워커 자동 호출용)."""
+    """신호 저장 후 FAISS 인덱스에 추가 (워커 자동 호출용)."""
 
     name = "rag_index_signal"
     label = "RAG 인덱싱"
-    description = "신호를 벡터DB에 인덱싱합니다. 신호 저장 직후 호출하세요."
+    description = "신호를 FAISS 벡터 인덱스에 추가합니다. 신호 저장 직후 호출하세요."
     input_schema = {
         "properties": {
             "signal_id": {"type": "integer"},
