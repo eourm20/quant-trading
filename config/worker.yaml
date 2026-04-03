@@ -3,6 +3,7 @@ worker:
   interval_seconds: 60         # 시세 조회 주기 (초)
   use_claude_api: true         # 조건 충족 시 Claude API 판단 여부
   claude_model: "claude-sonnet-4-6"
+  use_agent_mode: false        # true로 전환하면 Tool Use Agent 모드 활성화 (기본: 레거시 프롬프트 스터핑)
   dip_buy_threshold: -1.5      # 시장 급락 감지 기준 (KOSPI 또는 KOSDAQ 등락률 %)
   dip_buy_max_stocks: 2        # 급락 스캔 시 최대 매수 종목 수
   dip_buy_cooldown_hours: 2    # 급락 스캔 재실행 최소 간격 (시간)

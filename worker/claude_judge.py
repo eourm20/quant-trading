@@ -628,6 +628,35 @@ def get_trade_opinion(
     recent_trades: list[dict] | None = None,
     deposit: int = 0,
 ) -> str:
+    # Agent 모드 분기 — worker.yaml의 use_agent_mode: true 시 활성화
+    try:
+        import yaml
+        _cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+        with open(_cfg_path, encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f) or {}
+        _use_agent = bool((_cfg.get("worker") or {}).get("use_agent_mode", False))
+    except Exception:
+        _use_agent = False
+
+    if _use_agent:
+        try:
+            from worker.agents.judgment_agent import JudgmentAgent
+            return JudgmentAgent().run(signal)
+        except Exception as _e:
+            logger.warning(f"[Agent모드] 실패, 레거시로 폴백: {_e}")
+
+    return _legacy_get_trade_opinion(signal, holdings, kospi, kosdaq, sector, recent_trades, deposit)
+
+
+def _legacy_get_trade_opinion(
+    signal,
+    holdings: list[dict],
+    kospi: dict,
+    kosdaq: dict,
+    sector: dict,
+    recent_trades: list[dict] | None = None,
+    deposit: int = 0,
+) -> str:
     holding_detail, portfolio_text, total_eval = _fmt_portfolio(holdings, signal.stock_code)
 
     # 총 포트폴리오 = 주식 평가액 + 현금
