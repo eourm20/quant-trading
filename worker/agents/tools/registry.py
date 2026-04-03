@@ -23,13 +23,16 @@ class BaseTool:
 
 
 def build_schema(tool: BaseTool) -> dict:
-    """BaseTool → Anthropic tool_use 스키마 dict 변환."""
+    """BaseTool → OpenAI function calling 스키마 dict 변환."""
     return {
-        "name": tool.name,
-        "description": tool.description,
-        "input_schema": {
-            "type": "object",
-            **tool.input_schema,
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": {
+                "type": "object",
+                **tool.input_schema,
+            },
         },
     }
 
