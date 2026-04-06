@@ -63,9 +63,9 @@ def load_judgment_tools() -> list[BaseTool]:
         SelfCorrectionTool,
     )
     from worker.agents.tools.rag_tools import SearchTextContextTool, SearchScreeningContextTool
-    from worker.agents.tools.order_tools import ExecuteOrderTool
+    from worker.agents.tools.order_tools import ExecuteOrderTool, AUTO_TRADE
 
-    return [
+    tools = [
         GetCurrentPriceTool(),
         GetChartTool(),
         GetMarketIndexTool(),
@@ -83,8 +83,10 @@ def load_judgment_tools() -> list[BaseTool]:
         SearchTextContextTool(),
         SearchScreeningContextTool(),
         UpdateWatchlistTool(),
-        ExecuteOrderTool(),
     ]
+    if AUTO_TRADE:
+        tools.append(ExecuteOrderTool())
+    return tools
 
 
 def load_research_tools() -> list[BaseTool]:
@@ -106,6 +108,7 @@ def load_research_tools() -> list[BaseTool]:
         GetDartTool,
     )
     from worker.agents.tools.db_tools import AddToWatchlistTool
+    from worker.agents.tools.rag_tools import SearchScreeningContextTool
 
     return [
         GetCurrentPriceTool(),
@@ -118,5 +121,6 @@ def load_research_tools() -> list[BaseTool]:
         GetDepositTool(),
         GetNewsTool(),
         GetDartTool(),
+        SearchScreeningContextTool(),
         AddToWatchlistTool(),
     ]

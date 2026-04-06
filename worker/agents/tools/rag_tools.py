@@ -227,7 +227,8 @@ def bulk_index_existing_signals(days: int = 180) -> int:
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, stock_name, signal_type, verdict, result_pct,
-                      triggered_conditions, dart_summary, news_summary
+                      triggered_conditions, dart_summary, news_summary,
+                      indicator_snapshot
                FROM signals
                WHERE created_at >= ? AND verdict IS NOT NULL""",
             (since,),
@@ -244,6 +245,7 @@ def bulk_index_existing_signals(days: int = 180) -> int:
             triggered_conditions=r["triggered_conditions"] or "",
             dart_summary=r["dart_summary"],
             news_summary=r["news_summary"],
+            indicator_snapshot=r["indicator_snapshot"],
         )
         if ok:
             count += 1

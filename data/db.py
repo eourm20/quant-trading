@@ -1068,6 +1068,11 @@ def _extract_verdict(claude_opinion: str | None) -> str | None:
     return None
 
 
+def extract_verdict(claude_opinion: str | None) -> str | None:
+    """외부에서 AI 판정 텍스트 파싱 시 사용 (public wrapper)."""
+    return _extract_verdict(claude_opinion)
+
+
 def _build_indicator_snapshot(signal) -> str | None:
     """신호 시점의 전체 지표 스냅샷을 JSON으로 생성."""
     chart = getattr(signal, "chart", None)

@@ -117,9 +117,9 @@ def _rag_index_signal(
     """신호 저장 후 FAISS RAG 인덱싱 (백그라운드). db.py 의존성 분리용."""
     try:
         from worker.agents.tools.rag_tools import index_signal as _idx
-        from data.db import build_indicator_snapshot, _extract_verdict
+        from data.db import build_indicator_snapshot, extract_verdict
         import threading
-        verdict = _extract_verdict(claude_opinion)
+        verdict = extract_verdict(claude_opinion)
         indicator_snapshot = build_indicator_snapshot(signal)
         threading.Thread(
             target=_idx,
@@ -301,6 +301,35 @@ def update_signal_results():
                     pct = (now_price - row["current_price"]) / row["current_price"] * 100
                     update_signal_result(row["id"], round(pct, 2), period=period_name)
                     logger.debug(f"[결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
+                    # 3d 결과 확정 시 FAISS 재인덱싱 (verdict + 수익률 포함)
+                    if period_name == "3d":
+                        try:
+                            from worker.agents.tools.rag_tools import index_signal as _idx
+                            import threading as _thr
+                            with get_conn() as _conn:
+                                _sig_row = _conn.execute(
+                                    "SELECT stock_name, signal_type, verdict, triggered_conditions, "
+                                    "dart_summary, news_summary, indicator_snapshot FROM signals WHERE id=?",
+                                    (row["id"],)
+                                ).fetchone()
+                            if _sig_row:
+                                _thr.Thread(
+                                    target=_idx,
+                                    kwargs={
+                                        "signal_id": row["id"],
+                                        "stock_name": _sig_row["stock_name"] or "",
+                                        "signal_type": _sig_row["signal_type"] or "",
+                                        "verdict": _sig_row["verdict"],
+                                        "result_3d": round(pct, 2),
+                                        "triggered_conditions": _sig_row["triggered_conditions"] or "",
+                                        "dart_summary": _sig_row["dart_summary"],
+                                        "news_summary": _sig_row["news_summary"],
+                                        "indicator_snapshot": _sig_row["indicator_snapshot"],
+                                    },
+                                    daemon=True,
+                                ).start()
+                        except Exception:
+                            pass
                 time.sleep(0.5)
             except Exception as e:
                 logger.warning(f"[결과 {period_name} 실패] {row['stock_name']}: {e}")
