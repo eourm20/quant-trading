@@ -14,8 +14,26 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 _KST = timezone(timedelta(hours=9))
+
+
+def _dart_session() -> requests.Session:
+    """DART API 전용 세션 — 타임아웃 시 최대 2회 재시도."""
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        backoff_factor=1.0,          # 1초, 2초 간격
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 def now_kst() -> datetime:
@@ -68,7 +86,7 @@ def _load_corp_code_map() -> dict[str, str]:
 
     # DART에서 고유번호 파일 다운로드
     try:
-        resp = requests.get(
+        resp = _dart_session().get(
             f"{DART_BASE_URL}/corpCode.xml",
             params={"crtfc_key": DART_API_KEY},
             timeout=30,
@@ -153,7 +171,7 @@ def get_disclosures(
         params["pblntf_ty"] = pblntf_ty
 
     try:
-        resp = requests.get(
+        resp = _dart_session().get(
             f"{DART_BASE_URL}/list.json",
             params=params,
             timeout=15,
@@ -246,7 +264,7 @@ def get_financial_summary_for_ai(stock_code: str) -> str:
 
     # 주요계정 조회
     try:
-        resp = requests.get(
+        resp = _dart_session().get(
             f"{DART_BASE_URL}/fnlttSinglAcnt.json",
             params={"crtfc_key": DART_API_KEY, "corp_code": corp_code,
                     "bsns_year": year, "reprt_code": "11011"},
