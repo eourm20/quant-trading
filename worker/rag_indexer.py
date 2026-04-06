@@ -32,10 +32,10 @@ def main():
         sys.exit(1)
 
     try:
-        import chromadb
+        import faiss  # noqa: F401
     except ImportError:
-        logger.error("chromadb 미설치. 아래 명령어 실행 후 재시도하세요:")
-        logger.error("  pip install chromadb")
+        logger.error("faiss-cpu 미설치. 아래 명령어 실행 후 재시도하세요:")
+        logger.error("  pip install faiss-cpu")
         sys.exit(1)
 
     logger.info(f"RAG 인덱싱 시작 (최근 {args.days}일)")

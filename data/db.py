@@ -1174,6 +1174,7 @@ def save_signal(
                 "triggered_conditions": ", ".join(signal.triggered_conditions),
                 "dart_summary": dart_summary,
                 "news_summary": news_summary,
+                "indicator_snapshot": indicator_snapshot,
             },
             daemon=True,
         ).start()

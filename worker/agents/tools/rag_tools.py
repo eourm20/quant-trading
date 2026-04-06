@@ -76,9 +76,23 @@ def _build_document(
     triggered_conditions: str,
     dart_summary: str | None,
     news_summary: str | None,
+    indicator_snapshot: str | dict | None = None,
 ) -> str:
     """임베딩할 텍스트 조합."""
+    import json as _json
     parts = [f"[신호조건] {triggered_conditions}"]
+    if indicator_snapshot:
+        try:
+            snap = _json.loads(indicator_snapshot) if isinstance(indicator_snapshot, str) else indicator_snapshot
+            key_vals = []
+            for k in ["rsi", "trend", "above_ma20", "ma_cross", "volume_ratio", "bollinger_position", "stochastic_k"]:
+                v = snap.get(k)
+                if v is not None:
+                    key_vals.append(f"{k}:{v}")
+            if key_vals:
+                parts.append(f"[지표] {' '.join(key_vals)}")
+        except Exception:
+            pass
     if dart_summary:
         parts.append(f"[공시] {dart_summary[:500]}")
     if news_summary:
@@ -95,12 +109,13 @@ def index_signal(
     triggered_conditions: str,
     dart_summary: str | None = None,
     news_summary: str | None = None,
+    indicator_snapshot: str | dict | None = None,
 ) -> bool:
     """신호 1건을 FAISS 인덱스에 추가. 이미 존재하면 덮어씀."""
     if not _OPENAI_KEY:
         return False
 
-    document = _build_document(triggered_conditions, dart_summary, news_summary)
+    document = _build_document(triggered_conditions, dart_summary, news_summary, indicator_snapshot)
 
     try:
         import faiss
@@ -327,3 +342,55 @@ class RagIndexSignalTool(BaseTool):
             news_summary=news_summary or None,
         )
         return {"ok": ok, "signal_id": signal_id}
+
+
+# ── 스크리닝 로그 RAG ─────────────────────────────────────────────────────────
+
+_SCREENING_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_screening_index.bin')
+
+
+def index_screening_result(
+    log_id: int,
+    stock_name: str,
+    recommendation: str,
+    reason: str | None = None,
+    dart_summary: str | None = None,
+    news_summary: str | None = None,
+    indicator_snapshot: str | dict | None = None,
+) -> bool:
+    """스크리닝 결과 1건을 별도 FAISS 인덱스에 추가."""
+    if not _OPENAI_KEY:
+        return False
+
+    cond_text = f"추천:{recommendation} {reason or ''}"
+    document = _build_document(cond_text, dart_summary, news_summary, indicator_snapshot)
+
+    try:
+        import faiss
+        import numpy as np
+
+        vec = np.array([_embed(document)], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        ids = np.array([log_id], dtype=np.int64)
+
+        path = Path(_SCREENING_INDEX_PATH)
+        with _INDEX_LOCK:
+            if path.exists():
+                index = faiss.read_index(str(path))
+            else:
+                flat = faiss.IndexFlatIP(EMBED_DIM)
+                index = faiss.IndexIDMap(flat)
+            try:
+                index.remove_ids(ids)
+            except Exception:
+                pass
+            index.add_with_ids(vec, ids)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            faiss.write_index(index, str(path))
+
+        logger.debug(f"[RAG-screening] 인덱싱 완료: log_id={log_id} ({stock_name}) → {recommendation}")
+        return True
+
+    except Exception as e:
+        logger.warning(f"[RAG-screening] 인덱싱 실패 log_id={log_id}: {e}")
+        return False

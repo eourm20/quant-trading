@@ -701,6 +701,33 @@ def _legacy_get_trade_opinion(
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
     hold_condition_text = _fmt_last_hold_condition(signal.stock_code)
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
+
+    # ── SQL 범위 필터 RAG: 유사 지표 상황의 과거 신호 ──
+    _rag_context_text = ""
+    try:
+        from data.db import search_similar_signals
+        _rag_rows = search_similar_signals(
+            rsi=signal.rsi if signal.rsi else None,
+            signal_type=signal.signal_type,
+            volume_ratio=signal.volume_ratio if signal.volume_ratio else None,
+            limit=3,
+            days=90,
+        )
+        if _rag_rows:
+            _rag_lines = []
+            for _r in _rag_rows:
+                _v = _r.get("verdict") or "판정없음"
+                _r3 = _r.get("result_pct")
+                _r3_str = f"{_r3:+.1f}%" if _r3 is not None else "미집계"
+                _conds = str(_r.get("triggered_conditions") or "")[:60]
+                _rag_lines.append(
+                    f"  - {_r.get('created_at','')[:10]} {_r.get('stock_name','')} "
+                    f"[{_v}] 3일후:{_r3_str} | {_conds}"
+                )
+            _rag_context_text = "\n".join(_rag_lines)
+    except Exception:
+        pass
+
     insights_text = _fmt_recent_insights()
 
     add_mode = getattr(signal, "add_signal_mode", "")
@@ -911,6 +938,7 @@ def _legacy_get_trade_opinion(
 
 ## 과거 AI 판단 이력 — {signal.signal_type} 신호 기준 (최근 5건)
 {history_text}
+{f'## 유사 지표 사례 (RSI·거래량 유사, 최근 90일){chr(10)}{_rag_context_text}' if _rag_context_text else ''}
 {_dart_section}
 {_news_section}
 

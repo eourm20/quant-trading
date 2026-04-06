@@ -1306,6 +1306,27 @@ def run_daily_screening():
                 logger.warning(f"[스크리닝] screening_log 저장 실패: {e}")
                 log_id = None
 
+            # FAISS 인덱싱 (백그라운드)
+            if log_id:
+                try:
+                    import threading as _thr
+                    from worker.agents.tools.rag_tools import index_screening_result as _idx_scr
+                    _thr.Thread(
+                        target=_idx_scr,
+                        kwargs={
+                            "log_id": log_id,
+                            "stock_name": cand["stock_name"],
+                            "recommendation": rec,
+                            "reason": reason,
+                            "dart_summary": analysis.get("_dart_summary"),
+                            "news_summary": analysis.get("_news_summary"),
+                            "indicator_snapshot": analysis.get("indicator_snapshot"),
+                        },
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    pass
+
             if analysis.get("recommendation") != "관심종목 등록":
                 time.sleep(2)
                 continue

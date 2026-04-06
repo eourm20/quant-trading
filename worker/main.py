@@ -171,6 +171,71 @@ def _maybe_save_hold_conditions(signal, opinion: str):
         logger.info(f"[{signal.stock_name}] 임계값 변경 제안 발송: {threshold_changes}")
 
 
+def run_weekly_self_correction():
+    """매주 월요일 장 시작 직후 — 최근 30일 조건별·판정별 적중률을 전략 노트에 기록."""
+    from data.db import get_condition_accuracy, get_verdict_accuracy, save_strategy_note
+    from notifications.telegram import send_message
+
+    logger.info("[자기보정] 주간 적중률 분석 시작")
+    try:
+        condition_stats = get_condition_accuracy(days=30, min_count=3)
+        verdict_stats = get_verdict_accuracy(days=30)
+    except Exception as e:
+        logger.warning(f"[자기보정] 통계 조회 실패: {e}")
+        return
+
+    if not condition_stats and not verdict_stats:
+        logger.info("[자기보정] 데이터 부족 — 스킵")
+        return
+
+    # ── 판정별 요약 ──
+    verdict_lines = []
+    for v, s in sorted(verdict_stats.items()):
+        hr = s.get("hit_rate_3d")
+        avg3 = s.get("avg_3d")
+        cnt = s.get("count", 0)
+        verdict_lines.append(
+            f"  [{v}] {cnt}건 | 적중률 {hr:.0f}% | 3일평균 {avg3:+.2f}%"
+            if hr is not None and avg3 is not None
+            else f"  [{v}] {cnt}건 (데이터 부족)"
+        )
+
+    # ── 조건별 저성과 ──
+    low_perf = [c for c in condition_stats if (c.get("hit_rate_3d") or 0) < 40]
+    low_lines = []
+    for c in low_perf:
+        low_lines.append(
+            f"  ⚠️ {c['condition']} | {c['count']}건 | 적중률 {c['hit_rate_3d']:.0f}% | "
+            f"3일평균 {c.get('avg_3d', 0):+.2f}%"
+        )
+
+    summary = f"주간 자기보정 — 판정 {len(verdict_stats)}종 / 저성과 조건 {len(low_perf)}개"
+    detail_parts = ["## 판정별 적중률 (최근 30일)"]
+    detail_parts.extend(verdict_lines or ["  데이터 없음"])
+    if low_perf:
+        detail_parts.append("\n## 저성과 조건 (적중률 40% 미만)")
+        detail_parts.extend(low_lines)
+    detail = "\n".join(detail_parts)
+
+    try:
+        save_strategy_note(category="general", summary=summary, detail=detail)
+        logger.info(f"[자기보정] 전략 노트 저장 완료: {summary}")
+    except Exception as e:
+        logger.warning(f"[자기보정] 전략 노트 저장 실패: {e}")
+        return
+
+    # 텔레그램 발송
+    try:
+        msg_lines = [f"📊 *{summary}*", ""]
+        msg_lines.extend(verdict_lines[:5])
+        if low_perf:
+            msg_lines.append("")
+            msg_lines.extend(low_lines[:3])
+        send_message("\n".join(msg_lines))
+    except Exception as e:
+        logger.debug(f"[자기보정] 텔레그램 발송 실패: {e}")
+
+
 def update_signal_results():
     """신호 발생 후 1일/3일/5일/10일 결과 수익률을 현재가 기준으로 업데이트."""
     from datetime import timedelta
@@ -938,6 +1003,9 @@ def main():
     scheduler.add_job(run_daily_review, "cron",
                       day_of_week="mon-fri", hour=16, minute=10,
                       id="daily_review")
+    scheduler.add_job(run_weekly_self_correction, "cron",
+                      day_of_week="mon", hour=9, minute=5,
+                      id="weekly_self_correction")
     run_check()
 
     scheduler.start()
