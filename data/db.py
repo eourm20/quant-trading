@@ -121,6 +121,10 @@ def init_db():
                 conn.execute(f"ALTER TABLE watchlist ADD COLUMN {col} {typedef}")
             except Exception:
                 pass
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN sector_code TEXT DEFAULT NULL")
+        except Exception:
+            pass
         _migrate_watchlist_columns(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
@@ -317,6 +321,23 @@ def init_db():
         """)
         # positions 마이그레이션: 기존 보유종목 자동 생성
         _migrate_positions(conn)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS paper_trades (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at  TEXT NOT NULL,
+                stock_code  TEXT NOT NULL,
+                stock_name  TEXT NOT NULL,
+                order_type  TEXT NOT NULL,
+                quantity    INTEGER NOT NULL,
+                price       INTEGER NOT NULL,
+                signal_id   INTEGER,
+                verdict     TEXT,
+                result_1d   REAL DEFAULT NULL,
+                result_3d   REAL DEFAULT NULL,
+                result_5d   REAL DEFAULT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_stock ON paper_trades (stock_code, created_at)")
         conn.commit()
     _seed_conditions()
 
@@ -1567,3 +1588,40 @@ def get_pattern_accuracy(days: int = 30, min_count: int = 2) -> list[dict]:
             "avg_3d": round(s["sum_3d"] / s["count"], 2),
         })
     return sorted(result, key=lambda x: x["hit_rate_3d"], reverse=True)
+
+
+def save_paper_trade(
+    stock_code: str, stock_name: str, order_type: str,
+    quantity: int, price: int, signal_id: int | None = None, verdict: str | None = None,
+) -> int:
+    """모의투자 체결 기록. 반환: paper_trade id."""
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO paper_trades
+               (created_at, stock_code, stock_name, order_type, quantity, price, signal_id, verdict)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now, stock_code, stock_name, order_type, quantity, price, signal_id, verdict),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_paper_result(paper_id: int, result_pct: float, period: str = "3d") -> None:
+    col = {"1d": "result_1d", "3d": "result_3d", "5d": "result_5d"}.get(period)
+    if not col:
+        return
+    with get_conn() as conn:
+        conn.execute(f"UPDATE paper_trades SET {col}=? WHERE id=?", (result_pct, paper_id))
+        conn.commit()
+
+
+def get_paper_trades(days: int = 30) -> list[dict]:
+    """최근 N일 모의투자 내역."""
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM paper_trades WHERE created_at >= ? ORDER BY created_at DESC""",
+            (since,),
+        ).fetchall()
+    return [dict(r) for r in rows]

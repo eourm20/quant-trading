@@ -13,6 +13,9 @@ watchlist_management:
   inactive_days_removal: 90     # 미보유 종목 자동 삭제 기준 (일)
   alert_interval_days: 7        # 미발동 알림 재발송 간격 (일)
 
+sector:
+  max_holdings: 3            # 동일 섹터 최대 보유 종목 수 (초과 시 AI 경고)
+
 prefilter:
   market_cap_min: 500           # 시가총액 최소 (억 원)
   change_upper: 7               # 등락률 상단 제외 기준 (%)

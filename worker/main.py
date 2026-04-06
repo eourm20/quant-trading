@@ -269,6 +269,116 @@ def run_weekly_self_correction():
         logger.debug(f"[자기보정] 텔레그램 발송 실패: {e}")
 
 
+# 뉴스 위험 키워드 분류
+_NEWS_CRITICAL = [
+    "거래정지", "상장폐지", "감사의견거절", "횡령", "배임", "분식회계",
+    "검찰 수사", "구속영장", "대표이사 구속",
+]
+_NEWS_WARNING = [
+    "유상증자", "주주배정", "실적쇼크", "영업손실 전환", "영업정지",
+    "대표이사 사임", "대표 교체", "주요주주 매도", "블록딜",
+]
+
+# 뉴스 알림 쿨다운: {stock_code: 마지막_알림_시각}
+_news_alert_cooldown: dict = {}
+_NEWS_COOLDOWN_HOURS = 4
+
+
+def run_news_monitor():
+    """보유 종목 뉴스 30분 주기 스캔 — 위험 키워드 감지 시 알림/exit 트리거."""
+    from worker.clients.news_client import search_news, NAVER_CLIENT_ID
+    from notifications.telegram import send_message
+
+    if not NAVER_CLIENT_ID:
+        return
+
+    try:
+        holdings = get_portfolio()
+    except Exception as e:
+        logger.warning(f"[뉴스모니터] 잔고 조회 실패: {e}")
+        return
+
+    if not holdings:
+        return
+
+    now = _now_kst()
+    for h in holdings:
+        code = str(h.get("stock_code", "")).strip()
+        name = str(h.get("stock_name", "") or h.get("stk_nm", "")).strip()
+        if not name or not code:
+            continue
+
+        # 쿨다운 체크 (같은 종목 4시간 이내 재알림 방지)
+        last_alert = _news_alert_cooldown.get(code)
+        if last_alert and (now - last_alert).total_seconds() < _NEWS_COOLDOWN_HOURS * 3600:
+            continue
+
+        try:
+            news_items = search_news(name, display=5, sort="date")
+            time.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"[뉴스모니터] {name} 조회 실패: {e}")
+            continue
+
+        for item in news_items:
+            full_text = f"{item.get('title', '')} {item.get('description', '')}".lower()
+            title = item.get("title", "")[:80]
+            pub = item.get("pub_date", "")
+
+            critical_matched = [kw for kw in _NEWS_CRITICAL if kw in full_text]
+            warning_matched  = [kw for kw in _NEWS_WARNING  if kw in full_text]
+
+            if critical_matched:
+                # CRITICAL: exit 신호 트리거 + AI 판단
+                logger.warning(f"[뉴스모니터] CRITICAL 감지: {name} — {critical_matched}")
+                _news_alert_cooldown[code] = now
+                try:
+                    from worker.monitor import Signal
+                    from worker.claude_judge import get_trade_opinion
+                    cur_data = kiwoom.get_current_price(code)
+                    cur_price = abs(int(str(cur_data.get("cur_prc") or cur_data.get("stk_prpr") or "0").replace(",", "")))
+                    fake_signal = Signal(
+                        stock_code=code, stock_name=name,
+                        current_price=cur_price,
+                        triggered_conditions=[f"뉴스위험-{','.join(critical_matched)}"],
+                        triggered_ids=["news_critical"],
+                        rsi=None, volume_ratio=None, chart=None,
+                        in_portfolio=True, signal_type="exit",
+                    )
+                    holdings_full = kiwoom.get_holdings()
+                    opinion = get_trade_opinion(fake_signal, holdings_full, {}, {}, {})
+                    signal_id = save_signal(fake_signal, opinion, in_portfolio=True)
+                    _rag_index_signal(fake_signal, signal_id, opinion)
+                    send_message(
+                        f"🚨 *뉴스 위험 감지 — {name}*\n"
+                        f"키워드: `{'`, `'.join(critical_matched)}`\n"
+                        f"{title}\n_{pub}_\n\n"
+                        f"🤖 *AI 판단*: {opinion.splitlines()[0] if opinion else '조회 실패'}"
+                    )
+                except Exception as _e:
+                    logger.error(f"[뉴스모니터] {name} exit 트리거 실패: {_e}")
+                    send_message(
+                        f"🚨 *뉴스 위험 감지 — {name}*\n"
+                        f"키워드: `{'`, `'.join(critical_matched)}`\n"
+                        f"{title}\n_{pub}_"
+                    )
+                break  # 종목당 1건만 처리
+
+            elif warning_matched:
+                # WARNING: 알림만
+                logger.info(f"[뉴스모니터] WARNING 감지: {name} — {warning_matched}")
+                _news_alert_cooldown[code] = now
+                send_message(
+                    f"⚠️ *뉴스 주의 — {name}*\n"
+                    f"키워드: `{'`, `'.join(warning_matched)}`\n"
+                    f"{title}\n_{pub}_\n\n"
+                    f"매도 여부는 직접 판단하세요."
+                )
+                break
+
+    logger.debug(f"[뉴스모니터] {len(holdings)}개 종목 스캔 완료")
+
+
 def update_signal_results():
     """신호 발생 후 1일/3일/5일/10일 결과 수익률을 현재가 기준으로 업데이트."""
     from datetime import timedelta
@@ -333,6 +443,34 @@ def update_signal_results():
                 time.sleep(0.5)
             except Exception as e:
                 logger.warning(f"[결과 {period_name} 실패] {row['stock_name']}: {e}")
+
+
+def update_paper_results():
+    """모의투자 1일/3일/5일 수익률 업데이트."""
+    from datetime import timedelta
+    from data.db import get_conn, update_paper_result
+
+    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
+    for period_name, days_after, days_before, col_name in periods:
+        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to   = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, stock_code, stock_name, price FROM paper_trades "
+                f"WHERE {col_name} IS NULL AND created_at >= ? AND created_at < ?",
+                (cutoff_from, cutoff_to),
+            ).fetchall()
+        for row in rows:
+            try:
+                pd = kiwoom.get_current_price(row["stock_code"])
+                now_price = abs(int(str(pd.get("cur_prc") or pd.get("stk_prpr") or "0").replace(",", "")))
+                if now_price and row["price"]:
+                    pct = (now_price - row["price"]) / row["price"] * 100
+                    update_paper_result(row["id"], round(pct, 2), period=period_name)
+                    logger.debug(f"[모의투자 결과 {period_name}] {row['stock_name']}: {pct:+.2f}%")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[모의투자 결과 실패] {row['stock_name']}: {e}")
 
 
 def update_screening_results():
@@ -521,6 +659,46 @@ def check_removal_candidates():
                 f"미보유 상태에서 {days_since}일간 신호 미발동으로 삭제",
             )
             logger.info(f"[자동 제거] {name}({code}) 미보유 {days_since}일 미신호 삭제")
+
+
+def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
+    """AUTO_TRADE=false 시 AI 판단을 모의투자 기록으로 저장 (실제 주문 없음)."""
+    import re
+    first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
+    if "[매수]" in first_line or "[추가매수" in first_line or "[물타기" in first_line:
+        order_type, side = "buy", "매수"
+    elif "[매도]" in first_line:
+        order_type, side = "sell", "매도"
+    else:
+        return
+
+    qty = None
+    for line in claude_opinion.splitlines():
+        if line.strip().startswith("[추천수량]"):
+            m = re.search(r"(\d+)\s*주", line)
+            if m:
+                qty = int(m.group(1))
+                break
+    if not qty:
+        return
+
+    from data.db import save_paper_trade, extract_verdict
+    verdict = extract_verdict(claude_opinion)
+    paper_id = save_paper_trade(
+        stock_code=signal.stock_code,
+        stock_name=signal.stock_name,
+        order_type=order_type,
+        quantity=qty,
+        price=signal.current_price,
+        signal_id=signal_id,
+        verdict=verdict,
+    )
+    logger.info(f"[모의투자] {signal.stock_name} {side} {qty}주 @ {signal.current_price:,}원 기록 (paper_id={paper_id})")
+    send_message(
+        f"📝 *모의투자 기록* (실제 주문 없음)\n"
+        f"종목: *{signal.stock_name}* | {side} {qty:,}주\n"
+        f"AI 판단: {first_line[:60]}"
+    )
 
 
 def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: int = 0, buy_budget: int = 0) -> None:
@@ -1000,8 +1178,11 @@ def run_check():
             if claude_opinion:
                 _maybe_save_hold_conditions(signal, claude_opinion)
 
-            if AUTO_TRADE and claude_opinion:
-                _auto_execute(signal, claude_opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
+            if claude_opinion:
+                if AUTO_TRADE:
+                    _auto_execute(signal, claude_opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
+                else:
+                    _paper_execute(signal, claude_opinion, signal_id)
 
     logger.info("=== 조건 체크 완료 ===")
 
@@ -1071,6 +1252,12 @@ def main():
     scheduler.add_job(run_weekly_self_correction, "cron",
                       day_of_week="mon", hour=9, minute=5,
                       id="weekly_self_correction")
+    scheduler.add_job(update_paper_results, "cron",
+                      day_of_week="mon-fri", hour="9-18", minute="*/30",
+                      id="paper_result_update")
+    scheduler.add_job(run_news_monitor, "cron",
+                      day_of_week="mon-fri", hour="9-15", minute="*/30",
+                      id="news_monitor")
     run_check()
 
     scheduler.start()

@@ -780,6 +780,32 @@ def _legacy_get_trade_opinion(
             if _settings:
                 _wl_settings_text = "\n- 현재 임계값 설정: " + " / ".join(_settings)
 
+        # 섹터 집중도 계산
+        _sector_text = ""
+        if _stock and _stock.get("sector_code"):
+            _sector = _stock["sector_code"]
+            try:
+                import yaml as _yaml
+                _cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+                with open(_cfg_path, encoding='utf-8') as _cf:
+                    _sector_max = int((_yaml.safe_load(_cf) or {}).get('sector', {}).get('max_holdings', 3))
+            except Exception:
+                _sector_max = 3
+            _holdings_codes = {str(h.get("stock_code", "")) for h in holdings}
+            _all_wl = get_watchlist()
+            _same_sector = [
+                w["name"] for w in _all_wl
+                if w.get("sector_code") == _sector
+                and w["code"] in _holdings_codes
+                and w["code"] != signal.stock_code
+            ]
+            _remain = _sector_max - len(_same_sector)
+            _sector_text = (
+                f"\n- 섹터: {_sector} | 동일 섹터 보유: {len(_same_sector)}종목"
+                f" ({', '.join(_same_sector) or '없음'})"
+                f" | 상한 {_sector_max}종목 → {'여유 있음' if _remain > 0 else '⚠️ 상한 도달'}"
+            )
+
         # 보유 종목이면 positions에서 포지션 관리 정보 조회
         if signal.in_portfolio:
             _pos = get_position(signal.stock_code)
@@ -930,7 +956,7 @@ def _legacy_get_trade_opinion(
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 
 ## 종목 전략 설정
-- {rr_text}{add_trigger_text}{_position_text}{_wl_settings_text}
+- {rr_text}{add_trigger_text}{_position_text}{_wl_settings_text}{_sector_text}
 
 ## 직전 AI 판단 (오늘)
 - {last_ai_text}
