@@ -243,7 +243,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
         _kospi_rate  = _rate(kiwoom.get_market_index("kospi"))
         time.sleep(0.5)
         _kosdaq_rate = _rate(kiwoom.get_market_index("kosdaq"))
-        _market_rate = max(_kospi_rate, _kosdaq_rate)  # 둘 중 높은 쪽 기준
+        _market_rate = (_kospi_rate + _kosdaq_rate) / 2  # 두 지수 평균 기준
         _skip_thr = float(_pf.get("skip_bull_threshold", 5.0))
         if _market_rate >= _skip_thr:
             logger.info(
