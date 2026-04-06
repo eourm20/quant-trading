@@ -1625,3 +1625,134 @@ def get_paper_trades(days: int = 30) -> list[dict]:
             (since,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_weekly_performance_report(days: int = 7) -> dict:
+    """최근 N일간 AI 신호 성과 통계 집계.
+
+    반환: {
+        period_days, signal_count, rated_count,
+        win_rate_3d,          # 3일 후 수익 비율 (%)
+        avg_return_3d,        # 3일 평균 수익률 (%)
+        avg_return_1d,        # 1일 평균 수익률 (%)
+        avg_return_5d,        # 5일 평균 수익률 (%)
+        max_gain_3d,          # 최대 수익 (%)
+        max_loss_3d,          # 최대 손실 (%)
+        best_stock,           # 최고 수익 종목
+        worst_stock,          # 최대 손실 종목
+        verdict_breakdown,    # {verdict: {count, win_rate, avg_return}}
+        buy_count,            # 매수 판정 수
+        hold_count,           # 홀드 판정 수
+        sell_count,           # 매도 판정 수
+        paper_summary,        # 모의투자 요약 (있을 때만)
+    }
+    """
+    since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT stock_name, verdict, result_1d, result_pct AS result_3d, result_5d
+               FROM signals
+               WHERE created_at >= ? AND verdict IS NOT NULL
+               ORDER BY created_at DESC""",
+            (since,),
+        ).fetchall()
+
+    rows = [dict(r) for r in rows]
+    signal_count = len(rows)
+    rated = [r for r in rows if r["result_3d"] is not None]
+    rated_count = len(rated)
+
+    if not rated:
+        return {
+            "period_days": days,
+            "signal_count": signal_count,
+            "rated_count": 0,
+            "win_rate_3d": None,
+            "avg_return_3d": None,
+            "avg_return_1d": None,
+            "avg_return_5d": None,
+            "max_gain_3d": None,
+            "max_loss_3d": None,
+            "best_stock": None,
+            "worst_stock": None,
+            "verdict_breakdown": {},
+            "buy_count": 0, "hold_count": 0, "sell_count": 0,
+            "paper_summary": None,
+        }
+
+    # ── 기본 통계 ──
+    returns_3d = [r["result_3d"] for r in rated]
+    wins = sum(1 for r in rated
+               if (r["verdict"] in ("매수", "홀드") and r["result_3d"] > 0)
+               or (r["verdict"] == "매도" and r["result_3d"] < 0))
+    win_rate = round(wins / rated_count * 100, 1)
+    avg_3d = round(sum(returns_3d) / rated_count, 2)
+
+    r1d_vals = [r["result_1d"] for r in rated if r["result_1d"] is not None]
+    r5d_vals = [r["result_5d"] for r in rated if r["result_5d"] is not None]
+    avg_1d = round(sum(r1d_vals) / len(r1d_vals), 2) if r1d_vals else None
+    avg_5d = round(sum(r5d_vals) / len(r5d_vals), 2) if r5d_vals else None
+
+    max_gain = round(max(returns_3d), 2)
+    max_loss = round(min(returns_3d), 2)
+
+    best = max(rated, key=lambda r: r["result_3d"])
+    worst = min(rated, key=lambda r: r["result_3d"])
+
+    # ── 판정별 분해 ──
+    vbreakdown: dict = {}
+    for r in rated:
+        v = r["verdict"]
+        if v not in vbreakdown:
+            vbreakdown[v] = {"count": 0, "wins": 0, "sum_3d": 0.0}
+        s = vbreakdown[v]
+        s["count"] += 1
+        s["sum_3d"] += r["result_3d"]
+        if (v in ("매수", "홀드") and r["result_3d"] > 0) or (v == "매도" and r["result_3d"] < 0):
+            s["wins"] += 1
+    verdict_breakdown = {
+        v: {
+            "count": s["count"],
+            "win_rate": round(s["wins"] / s["count"] * 100, 1),
+            "avg_return": round(s["sum_3d"] / s["count"], 2),
+        }
+        for v, s in vbreakdown.items()
+    }
+
+    # ── 모의투자 요약 ──
+    paper_summary = None
+    try:
+        with get_conn() as conn:
+            p_rows = conn.execute(
+                """SELECT order_type, verdict, result_3d
+                   FROM paper_trades WHERE created_at >= ? AND result_3d IS NOT NULL""",
+                (since,),
+            ).fetchall()
+        if p_rows:
+            p_buy = [r["result_3d"] for r in p_rows if r["order_type"] == "BUY" and r["result_3d"] is not None]
+            paper_summary = {
+                "count": len(p_buy),
+                "avg_return": round(sum(p_buy) / len(p_buy), 2) if p_buy else None,
+                "win_rate": round(sum(1 for r in p_buy if r > 0) / len(p_buy) * 100, 1) if p_buy else None,
+            }
+    except Exception:
+        pass
+
+    return {
+        "period_days": days,
+        "signal_count": signal_count,
+        "rated_count": rated_count,
+        "win_rate_3d": win_rate,
+        "avg_return_3d": avg_3d,
+        "avg_return_1d": avg_1d,
+        "avg_return_5d": avg_5d,
+        "max_gain_3d": max_gain,
+        "max_loss_3d": max_loss,
+        "best_stock": {"name": best["stock_name"], "return": round(best["result_3d"], 2)},
+        "worst_stock": {"name": worst["stock_name"], "return": round(worst["result_3d"], 2)},
+        "verdict_breakdown": verdict_breakdown,
+        "buy_count": vbreakdown.get("매수", {}).get("count", 0),
+        "hold_count": vbreakdown.get("홀드", {}).get("count", 0),
+        "sell_count": vbreakdown.get("매도", {}).get("count", 0),
+        "paper_summary": paper_summary,
+    }
