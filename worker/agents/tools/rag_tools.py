@@ -394,3 +394,96 @@ def index_screening_result(
     except Exception as e:
         logger.warning(f"[RAG-screening] 인덱싱 실패 log_id={log_id}: {e}")
         return False
+
+
+def search_similar_screening_context(query: str, n_results: int = 5) -> list[dict]:
+    """스크리닝 인덱스에서 유사한 과거 스크리닝 결과 검색.
+    반환: [{log_id, stock_name, recommendation, similarity, context_preview}]
+    """
+    if not _OPENAI_KEY:
+        return []
+
+    path = Path(_SCREENING_INDEX_PATH)
+    if not path.exists():
+        return []
+
+    try:
+        import faiss
+        import numpy as np
+        from data.db import get_conn
+
+        index = faiss.read_index(str(path))
+        if index.ntotal == 0:
+            return []
+
+        vec = np.array([_embed(query)], dtype=np.float32)
+        faiss.normalize_L2(vec)
+
+        k = min(n_results, index.ntotal)
+        scores, ids = index.search(vec, k)
+
+        valid_ids = [int(i) for i in ids[0] if i >= 0]
+        if not valid_ids:
+            return []
+
+        placeholders = ",".join("?" * len(valid_ids))
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"""SELECT id, stock_name, recommendation, reason, dart_summary, news_summary
+                    FROM screening_log WHERE id IN ({placeholders})""",
+                valid_ids,
+            ).fetchall()
+
+        row_map = {r["id"]: dict(r) for r in rows}
+        output = []
+        for i, lid in enumerate(valid_ids):
+            row = row_map.get(lid)
+            if not row:
+                continue
+            preview = f"추천:{row.get('recommendation','')} {(row.get('reason') or '')[:100]}"
+            output.append({
+                "log_id": lid,
+                "stock_name": row.get("stock_name"),
+                "recommendation": row.get("recommendation"),
+                "similarity": round(float(scores[0][i]), 4),
+                "context_preview": preview,
+            })
+        return output
+
+    except Exception as e:
+        logger.warning(f"[RAG-screening] 검색 실패: {e}")
+        return []
+
+
+class SearchScreeningContextTool(BaseTool):
+    """FAISS 벡터 유사도 기반 과거 스크리닝 결과 검색."""
+
+    name = "search_screening_context"
+    label = "스크리닝 이력 검색"
+    description = (
+        "과거 스크리닝에서 이 종목 또는 유사한 공시/뉴스 상황을 분석한 이력을 검색합니다. "
+        "'이 종목 전에 왜 안 담았지?' 또는 '비슷한 공시 상황에서 스크리닝 결과가 어땠는지' 확인할 때 활용하세요."
+    )
+    input_schema = {
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "검색 쿼리 — 종목명, 공시 내용, 스크리닝 상황 키워드",
+            },
+            "n_results": {
+                "type": "integer",
+                "description": "최대 결과 수",
+                "default": 3,
+            },
+        },
+        "required": ["query"],
+    }
+
+    def execute(self, query: str, n_results: int = 3) -> dict:
+        if not _OPENAI_KEY:
+            return {"error": "OPENAI_API_KEY 미설정"}
+        try:
+            results = search_similar_screening_context(query, n_results=n_results)
+            return {"count": len(results), "results": results}
+        except Exception as e:
+            return {"error": str(e)}

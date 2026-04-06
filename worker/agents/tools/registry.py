@@ -62,7 +62,7 @@ def load_judgment_tools() -> list[BaseTool]:
         GetPatternAccuracyTool,
         SelfCorrectionTool,
     )
-    from worker.agents.tools.rag_tools import SearchTextContextTool
+    from worker.agents.tools.rag_tools import SearchTextContextTool, SearchScreeningContextTool
     from worker.agents.tools.order_tools import ExecuteOrderTool
 
     return [
@@ -81,6 +81,7 @@ def load_judgment_tools() -> list[BaseTool]:
         GetPatternAccuracyTool(),
         SelfCorrectionTool(),
         SearchTextContextTool(),
+        SearchScreeningContextTool(),
         UpdateWatchlistTool(),
         ExecuteOrderTool(),
     ]

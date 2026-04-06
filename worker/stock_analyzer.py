@@ -1239,6 +1239,33 @@ def _is_auto_mode() -> bool:
 
 def run_daily_screening():
     """일일 자동 스크리닝: 후보 발굴 → AI 분석 → 모드에 따라 자동 편입 or 사용자 승인 요청."""
+    # Agent 모드 분기 — use_agent_mode: true 시 ResearchAgent로 위임
+    try:
+        import yaml as _yaml
+        _cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+        with open(_cfg_path, encoding='utf-8') as _f:
+            _use_agent = bool((_yaml.safe_load(_f) or {}).get('worker', {}).get('use_agent_mode', False))
+    except Exception:
+        _use_agent = False
+
+    if _use_agent:
+        try:
+            from worker.agents.research_agent import ResearchAgent
+            from worker.clients.kiwoom_client import KiwoomClient as _KW
+            import time as _t
+            _kw = _KW()
+            def _rate(d):
+                try: return float(str(d.get("flu_rt") or d.get("prdy_ctrt") or "0").replace(",", ""))
+                except: return 0.0
+            _kospi = _rate(_kw.get_market_index("kospi"))
+            _t.sleep(0.5)
+            _kosdaq = _rate(_kw.get_market_index("kosdaq"))
+            result = ResearchAgent().run(kospi_rate=_kospi, kosdaq_rate=_kosdaq)
+            logger.info(f"[ResearchAgent 스크리닝] 완료\n{result[:300]}")
+            return
+        except Exception as _e:
+            logger.warning(f"[스크리닝] ResearchAgent 실패, 레거시로 폴백: {_e}")
+
     from notifications.telegram import send_message, send_message_with_inline_buttons
     from data.db import save_strategy_note
     from worker.clients.kiwoom_client import KiwoomClient

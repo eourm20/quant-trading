@@ -107,6 +107,39 @@ def get_current_session() -> str | None:
     return None
 
 
+def _rag_index_signal(
+    signal,
+    signal_id: int,
+    claude_opinion: str | None = None,
+    dart_summary: str | None = None,
+    news_summary: str | None = None,
+) -> None:
+    """신호 저장 후 FAISS RAG 인덱싱 (백그라운드). db.py 의존성 분리용."""
+    try:
+        from worker.agents.tools.rag_tools import index_signal as _idx
+        from data.db import build_indicator_snapshot, _extract_verdict
+        import threading
+        verdict = _extract_verdict(claude_opinion)
+        indicator_snapshot = build_indicator_snapshot(signal)
+        threading.Thread(
+            target=_idx,
+            kwargs={
+                "signal_id": signal_id,
+                "stock_name": signal.stock_name,
+                "signal_type": getattr(signal, "signal_type", "") or "",
+                "verdict": verdict,
+                "result_3d": None,
+                "triggered_conditions": ", ".join(signal.triggered_conditions),
+                "dart_summary": dart_summary,
+                "news_summary": news_summary,
+                "indicator_snapshot": indicator_snapshot,
+            },
+            daemon=True,
+        ).start()
+    except Exception:
+        pass
+
+
 def _maybe_save_hold_conditions(signal, opinion: str):
     """AI가 홀드 판단 시 [전환조건]/[임계값] 파싱 → 전략 노트 저장 + 텔레그램 변경 제안."""
     import re
@@ -727,6 +760,7 @@ def check_market_dip():
                     signal_type="entry",
                 )
                 signal_id = save_signal(fake_signal, opinion, in_portfolio=False)
+                _rag_index_signal(fake_signal, signal_id, opinion)
                 _auto_execute(fake_signal, opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
                 bought += 1
                 results.append(f"✅ {name} 매수")
@@ -930,6 +964,8 @@ def run_check():
                 dart_summary=dart_summary, news_summary=news_summary,
                 market_snapshot=market_snapshot, portfolio_snapshot=portfolio_snapshot,
             )
+            _rag_index_signal(signal, signal_id, claude_opinion,
+                              dart_summary=dart_summary, news_summary=news_summary)
             send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
 
             if claude_opinion:

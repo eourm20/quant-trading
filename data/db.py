@@ -1106,6 +1106,11 @@ def _build_indicator_snapshot(signal) -> str | None:
     return json.dumps({k: v for k, v in snapshot.items() if v is not None}, ensure_ascii=False)
 
 
+def build_indicator_snapshot(signal) -> str | None:
+    """외부(main.py 등)에서 indicator_snapshot을 빌드할 때 사용."""
+    return _build_indicator_snapshot(signal)
+
+
 def save_signal(
     signal,
     claude_opinion: str | None = None,
@@ -1158,28 +1163,6 @@ def save_signal(
         )
         conn.commit()
         signal_id = cur.lastrowid
-
-    # 벡터DB 인덱싱 (chromadb 미설치 시 조용히 스킵)
-    try:
-        from worker.agents.tools.rag_tools import index_signal
-        import threading
-        threading.Thread(
-            target=index_signal,
-            kwargs={
-                "signal_id": signal_id,
-                "stock_name": signal.stock_name,
-                "signal_type": getattr(signal, "signal_type", "") or "",
-                "verdict": verdict,
-                "result_3d": None,
-                "triggered_conditions": ", ".join(signal.triggered_conditions),
-                "dart_summary": dart_summary,
-                "news_summary": news_summary,
-                "indicator_snapshot": indicator_snapshot,
-            },
-            daemon=True,
-        ).start()
-    except Exception:
-        pass
 
     return signal_id
 
