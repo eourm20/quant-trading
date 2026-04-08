@@ -14,3 +14,4 @@ trading.db
 trading_real.db
 .claude/
 .dart_cache/
+data/faiss_index.bin
