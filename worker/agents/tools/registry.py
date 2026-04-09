@@ -52,6 +52,9 @@ def load_judgment_tools() -> list[BaseTool]:
     from worker.agents.tools.info_tools import (
         GetNewsTool,
         GetDartTool,
+        GetMacroNewsTool,
+        GetSectorNewsTool,
+        GetGlobalMarketTool,
     )
     from worker.agents.tools.db_tools import (
         GetSignalHistoryTool,
@@ -74,6 +77,9 @@ def load_judgment_tools() -> list[BaseTool]:
         GetPositionsTool(),
         GetNewsTool(),
         GetDartTool(),
+        GetMacroNewsTool(),
+        GetSectorNewsTool(),
+        GetGlobalMarketTool(),
         GetSignalHistoryTool(),
         GetEntryReasonTool(),
         SearchSimilarSignalsTool(),
@@ -106,6 +112,9 @@ def load_research_tools() -> list[BaseTool]:
     from worker.agents.tools.info_tools import (
         GetNewsTool,
         GetDartTool,
+        GetMacroNewsTool,
+        GetSectorNewsTool,
+        GetGlobalMarketTool,
     )
     from worker.agents.tools.db_tools import AddToWatchlistTool
     from worker.agents.tools.rag_tools import SearchScreeningContextTool
@@ -121,6 +130,9 @@ def load_research_tools() -> list[BaseTool]:
         GetDepositTool(),
         GetNewsTool(),
         GetDartTool(),
+        GetMacroNewsTool(),
+        GetSectorNewsTool(),
+        GetGlobalMarketTool(),
         SearchScreeningContextTool(),
         AddToWatchlistTool(),
     ]

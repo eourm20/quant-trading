@@ -31,8 +31,11 @@ _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템
 - get_deposit + get_portfolio: 현금 비중, 보유 현황 — entry/add 신호 시 필수
 - get_positions: 목표가/손절가/추가매수가 — 보유 종목(exit/add) 시 필수
 - get_dart / get_news: 공시·뉴스 — 판단에 영향 가능성 있을 때 호출
+- get_macro_news: 거시경제·지정학 뉴스 (관세·금리·전쟁 등) — 시장 전반 충격이 의심될 때 호출
+- get_sector_news: 업종 업황 뉴스 — 섹터 리스크/호재 파악 시 호출 (sector_name: 업종명 입력)
+- get_global_market: 나스닥·S&P500·달러원 — 해외 시장 영향 판단 시 호출
 - get_signal_history: 과거 AI 판단 이력 — 일관성 확인에 활용
-- get_market_index: 시장 환경 — 필요 시 호출
+- get_market_index: 코스피·코스닥·섹터 지수 — 필요 시 호출
 - update_watchlist: 임계값 변경 — 구조적 오류 확인 시에만
 - execute_order: 주문 실행 — 사용자가 자동 실행 모드로 요청한 경우에만
 
@@ -104,7 +107,9 @@ class JudgmentAgent:
 - 보유 여부: {'보유 중' if signal.in_portfolio else '미보유'}
 
 도구를 호출하여 필요한 데이터를 수집한 후 매매 판단을 내려주세요.
-차트 분석(get_chart)과 잔고/예수금(get_portfolio, get_deposit)은 반드시 조회하세요."""
+필수 조회: get_chart (차트·지표), get_portfolio + get_deposit (잔고·예수금)
+권장 조회: get_global_market (글로벌 지수), get_macro_news (거시경제 이슈) — 시장 변동성이 큰 경우
+섹터 이슈 의심 시: get_sector_news에 업종명을 입력하여 업황 확인"""
 
         opinion = self._agent.run(initial_message)
 

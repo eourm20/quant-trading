@@ -101,3 +101,65 @@ def format_news_for_ai(stock_name: str, max_items: int = 5) -> str:
             lines.append(f"    → {desc}")
 
     return "\n".join(lines)
+
+
+# 거시경제·지정학 키워드 (가장 시장 영향이 큰 이슈 중심)
+_MACRO_KEYWORDS = [
+    "미국 관세 무역",
+    "연준 FOMC 금리",
+    "지정학 리스크 전쟁",
+]
+
+
+def get_macro_news_for_ai(max_per_keyword: int = 2, max_total: int = 6) -> str:
+    """거시경제·지정학 이슈 뉴스 요약.
+
+    미국 관세, 금리, 전쟁 등 시장 전반에 영향을 주는 매크로 이슈를
+    최신 뉴스로 조회하여 AI 판단 프롬프트에 제공한다.
+
+    Returns:
+        뉴스 헤드라인 목록 문자열. 뉴스가 없거나 API 미설정 시 빈 문자열.
+    """
+    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+        return ""
+
+    seen: set[str] = set()
+    items: list[dict] = []
+
+    for kw in _MACRO_KEYWORDS:
+        if len(items) >= max_total:
+            break
+        for n in search_news(kw, display=max_per_keyword, sort="date"):
+            key = n["title"][:30]
+            if key not in seen:
+                seen.add(key)
+                items.append(n)
+            if len(items) >= max_total:
+                break
+
+    if not items:
+        return ""
+
+    lines = [f"  - {n['pub_date']} {n['title'][:65]}" for n in items]
+    return "\n".join(lines)
+
+
+def format_sector_news_for_ai(sector_name: str, max_items: int = 3) -> str:
+    """업종·섹터 관련 뉴스 요약.
+
+    Args:
+        sector_name: 업종명 (예: "방위산업", "반도체")
+        max_items: 최대 기사 수
+
+    Returns:
+        뉴스 헤드라인 목록 문자열. 빈 섹터명이거나 결과 없으면 빈 문자열.
+    """
+    if not sector_name or not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+        return ""
+
+    news = search_news(f"{sector_name} 업황", display=max_items, sort="date")
+    if not news:
+        return ""
+
+    lines = [f"  - {n['pub_date']} {n['title'][:65]}" for n in news]
+    return "\n".join(lines)

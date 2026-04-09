@@ -928,23 +928,44 @@ def _legacy_get_trade_opinion(
     except Exception as e:
         logger.debug(f"DART 공시 조회 실패: {e}")
 
-    # ── 뉴스 조회 ──
+    # ── 뉴스 조회 (종목 + 섹터 + 매크로) ──
     news_text = "뉴스 조회 불가"
+    sector_news_text = ""
+    macro_news_text = ""
     try:
-        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+        from worker.clients.news_client import (
+            format_news_for_ai, get_macro_news_for_ai,
+            format_sector_news_for_ai, NAVER_CLIENT_ID,
+        )
         if NAVER_CLIENT_ID:
             news_text = format_news_for_ai(signal.stock_name, max_items=5)
+            sector_name = sector.get("upjong_nm") if sector else None
+            if sector_name:
+                sector_news_text = format_sector_news_for_ai(sector_name, max_items=3)
+            macro_news_text = get_macro_news_for_ai()
     except Exception as e:
         logger.debug(f"뉴스 조회 실패: {e}")
+
+    # ── 글로벌 지수 조회 ──
+    global_indices_text = ""
+    try:
+        from worker.clients.global_market import format_global_indices_for_ai
+        global_indices_text = format_global_indices_for_ai()
+    except Exception as e:
+        logger.debug(f"글로벌 지수 조회 실패: {e}")
 
     # ── 동적 유저 프롬프트 (신호별 데이터) ──
     _skipped = []
     _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text != "공시 조회 불가" else (_skipped.append("DART") or "")
-    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text != "뉴스 조회 불가" else (_skipped.append("뉴스") or "")
+    _news_section = f"\n## 최근 뉴스 ({signal.stock_name})\n{news_text}" if news_text != "뉴스 조회 불가" else (_skipped.append("뉴스") or "")
+    _sector_news_section = f"\n## 업종 뉴스 ({sector.get('upjong_nm', '')})\n{sector_news_text}" if sector_news_text else ""
+    _macro_news_section = f"\n## 거시경제·글로벌 이슈\n{macro_news_text}" if macro_news_text else ""
     _trades_section = f"\n## 최근 매매 이력 (3일)\n{trades_text}" if trades_text != "없음" else (_skipped.append("매매이력") or "")
     _insights_section = f"\n## 최근 AI 판단 성과 (자기 보정용)\n{insights_text}" if insights_text not in ("데이터 부족", "조회 실패") else (_skipped.append("AI성과") or "")
     if _skipped:
         logger.debug(f"[판단 프롬프트] 빈 섹션 제거: {', '.join(_skipped)}")
+
+    _global_line = f"\n글로벌: {global_indices_text}" if global_indices_text else ""
 
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
@@ -967,6 +988,8 @@ def _legacy_get_trade_opinion(
 {f'## 유사 지표 사례 (RSI·거래량 유사, 최근 90일){chr(10)}{_rag_context_text}' if _rag_context_text else ''}
 {_dart_section}
 {_news_section}
+{_sector_news_section}
+{_macro_news_section}
 
 ## 차트 분석
 {_fmt_chart(signal)}
@@ -985,7 +1008,7 @@ def _legacy_get_trade_opinion(
 ## 시장 환경
 {_fmt_index(kospi, '코스피')}
 {_fmt_index(kosdaq, '코스닥')}
-{_fmt_sector(sector, signal.sector_code)}
+{_fmt_sector(sector, signal.sector_code)}{_global_line}
 {_insights_section}"""
 
     if _BACKEND == "anthropic":
@@ -1042,10 +1065,21 @@ def get_dip_buy_opinion(
         pass
 
     news_text = ""
+    macro_news_text = ""
     try:
-        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+        from worker.clients.news_client import (
+            format_news_for_ai, get_macro_news_for_ai, NAVER_CLIENT_ID,
+        )
         if NAVER_CLIENT_ID:
             news_text = format_news_for_ai(name, max_items=5)
+            macro_news_text = get_macro_news_for_ai()
+    except Exception:
+        pass
+
+    global_indices_text = ""
+    try:
+        from worker.clients.global_market import format_global_indices_for_ai
+        global_indices_text = format_global_indices_for_ai()
     except Exception:
         pass
 
@@ -1063,7 +1097,9 @@ def get_dip_buy_opinion(
     chart_text = _fmt_chart(fake)
 
     _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text else ""
-    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text else ""
+    _news_section = f"\n## 최근 뉴스 ({name})\n{news_text}" if news_text else ""
+    _macro_news_section = f"\n## 거시경제·글로벌 이슈\n{macro_news_text}" if macro_news_text else ""
+    _global_line = f" / 글로벌: {global_indices_text}" if global_indices_text else ""
 
     system_prompt = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템에서 시장 급락 시 반등 매수 후보를 평가하는 AI입니다.
 기술적 신호(RSI 과매도, MA 크로스 등)가 발동하지 않은 상태에서도, 시장 전체 급락과 종목의 펀더멘털·차트·뉴스를 종합하여
@@ -1090,7 +1126,7 @@ def get_dip_buy_opinion(
 마크다운 헤더 사용 금지. 150단어 이내."""
 
     user_prompt = f"""## 시장 상황
-- KOSPI: {kospi_rate:+.2f}% / KOSDAQ: {kosdaq_rate:+.2f}% (급락 진행 중)
+- KOSPI: {kospi_rate:+.2f}% / KOSDAQ: {kosdaq_rate:+.2f}% (급락 진행 중){_global_line}
 
 ## 종목 정보
 - 종목: {name} ({code}) | 매매 기간: {horizon or '미설정'}
@@ -1101,6 +1137,7 @@ def get_dip_buy_opinion(
 {chart_text}
 {_dart_section}
 {_news_section}
+{_macro_news_section}
 
 ## 포트폴리오 상태
 - 현금(주문가능금액): {deposit:,}원 (현금 비중 {cash_ratio:.1f}%)
