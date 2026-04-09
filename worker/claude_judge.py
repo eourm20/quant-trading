@@ -628,6 +628,35 @@ def get_trade_opinion(
     recent_trades: list[dict] | None = None,
     deposit: int = 0,
 ) -> str:
+    # Agent 모드 분기 — worker.yaml의 use_agent_mode: true 시 활성화
+    try:
+        import yaml
+        _cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+        with open(_cfg_path, encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f) or {}
+        _use_agent = bool((_cfg.get("worker") or {}).get("use_agent_mode", False))
+    except Exception:
+        _use_agent = False
+
+    if _use_agent:
+        try:
+            from worker.agents.judgment_agent import JudgmentAgent
+            return JudgmentAgent().run(signal)
+        except Exception as _e:
+            logger.warning(f"[Agent모드] 실패, 레거시로 폴백: {_e}")
+
+    return _legacy_get_trade_opinion(signal, holdings, kospi, kosdaq, sector, recent_trades, deposit)
+
+
+def _legacy_get_trade_opinion(
+    signal,
+    holdings: list[dict],
+    kospi: dict,
+    kosdaq: dict,
+    sector: dict,
+    recent_trades: list[dict] | None = None,
+    deposit: int = 0,
+) -> str:
     holding_detail, portfolio_text, total_eval = _fmt_portfolio(holdings, signal.stock_code)
 
     # 총 포트폴리오 = 주식 평가액 + 현금
@@ -672,6 +701,33 @@ def get_trade_opinion(
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
     hold_condition_text = _fmt_last_hold_condition(signal.stock_code)
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
+
+    # ── SQL 범위 필터 RAG: 유사 지표 상황의 과거 신호 ──
+    _rag_context_text = ""
+    try:
+        from data.db import search_similar_signals
+        _rag_rows = search_similar_signals(
+            rsi=signal.rsi if signal.rsi else None,
+            signal_type=signal.signal_type,
+            volume_ratio=signal.volume_ratio if signal.volume_ratio else None,
+            limit=3,
+            days=90,
+        )
+        if _rag_rows:
+            _rag_lines = []
+            for _r in _rag_rows:
+                _v = _r.get("verdict") or "판정없음"
+                _r3 = _r.get("result_pct")
+                _r3_str = f"{_r3:+.1f}%" if _r3 is not None else "미집계"
+                _conds = str(_r.get("triggered_conditions") or "")[:60]
+                _rag_lines.append(
+                    f"  - {_r.get('created_at','')[:10]} {_r.get('stock_name','')} "
+                    f"[{_v}] 3일후:{_r3_str} | {_conds}"
+                )
+            _rag_context_text = "\n".join(_rag_lines)
+    except Exception:
+        pass
+
     insights_text = _fmt_recent_insights()
 
     add_mode = getattr(signal, "add_signal_mode", "")
@@ -723,6 +779,32 @@ def get_trade_opinion(
                     _settings.append(f"{_label}: {_v} ({_field})")
             if _settings:
                 _wl_settings_text = "\n- 현재 임계값 설정: " + " / ".join(_settings)
+
+        # 섹터 집중도 계산
+        _sector_text = ""
+        if _stock and _stock.get("sector_code"):
+            _sector = _stock["sector_code"]
+            try:
+                import yaml as _yaml
+                _cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+                with open(_cfg_path, encoding='utf-8') as _cf:
+                    _sector_max = int((_yaml.safe_load(_cf) or {}).get('sector', {}).get('max_holdings', 3))
+            except Exception:
+                _sector_max = 3
+            _holdings_codes = {str(h.get("stock_code", "")) for h in holdings}
+            _all_wl = get_watchlist()
+            _same_sector = [
+                w["name"] for w in _all_wl
+                if w.get("sector_code") == _sector
+                and w["code"] in _holdings_codes
+                and w["code"] != signal.stock_code
+            ]
+            _remain = _sector_max - len(_same_sector)
+            _sector_text = (
+                f"\n- 섹터: {_sector} | 동일 섹터 보유: {len(_same_sector)}종목"
+                f" ({', '.join(_same_sector) or '없음'})"
+                f" | 상한 {_sector_max}종목 → {'여유 있음' if _remain > 0 else '⚠️ 상한 도달'}"
+            )
 
         # 보유 종목이면 positions에서 포지션 관리 정보 조회
         if signal.in_portfolio:
@@ -846,23 +928,44 @@ def get_trade_opinion(
     except Exception as e:
         logger.debug(f"DART 공시 조회 실패: {e}")
 
-    # ── 뉴스 조회 ──
+    # ── 뉴스 조회 (종목 + 섹터 + 매크로) ──
     news_text = "뉴스 조회 불가"
+    sector_news_text = ""
+    macro_news_text = ""
     try:
-        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+        from worker.clients.news_client import (
+            format_news_for_ai, get_macro_news_for_ai,
+            format_sector_news_for_ai, NAVER_CLIENT_ID,
+        )
         if NAVER_CLIENT_ID:
             news_text = format_news_for_ai(signal.stock_name, max_items=5)
+            sector_name = sector.get("upjong_nm") if sector else None
+            if sector_name:
+                sector_news_text = format_sector_news_for_ai(sector_name, max_items=3)
+            macro_news_text = get_macro_news_for_ai()
     except Exception as e:
         logger.debug(f"뉴스 조회 실패: {e}")
+
+    # ── 글로벌 지수 조회 ──
+    global_indices_text = ""
+    try:
+        from worker.clients.global_market import format_global_indices_for_ai
+        global_indices_text = format_global_indices_for_ai()
+    except Exception as e:
+        logger.debug(f"글로벌 지수 조회 실패: {e}")
 
     # ── 동적 유저 프롬프트 (신호별 데이터) ──
     _skipped = []
     _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text != "공시 조회 불가" else (_skipped.append("DART") or "")
-    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text != "뉴스 조회 불가" else (_skipped.append("뉴스") or "")
+    _news_section = f"\n## 최근 뉴스 ({signal.stock_name})\n{news_text}" if news_text != "뉴스 조회 불가" else (_skipped.append("뉴스") or "")
+    _sector_news_section = f"\n## 업종 뉴스 ({sector.get('upjong_nm', '')})\n{sector_news_text}" if sector_news_text else ""
+    _macro_news_section = f"\n## 거시경제·글로벌 이슈\n{macro_news_text}" if macro_news_text else ""
     _trades_section = f"\n## 최근 매매 이력 (3일)\n{trades_text}" if trades_text != "없음" else (_skipped.append("매매이력") or "")
     _insights_section = f"\n## 최근 AI 판단 성과 (자기 보정용)\n{insights_text}" if insights_text not in ("데이터 부족", "조회 실패") else (_skipped.append("AI성과") or "")
     if _skipped:
         logger.debug(f"[판단 프롬프트] 빈 섹션 제거: {', '.join(_skipped)}")
+
+    _global_line = f"\n글로벌: {global_indices_text}" if global_indices_text else ""
 
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
@@ -874,7 +977,7 @@ def get_trade_opinion(
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 
 ## 종목 전략 설정
-- {rr_text}{add_trigger_text}{_position_text}{_wl_settings_text}
+- {rr_text}{add_trigger_text}{_position_text}{_wl_settings_text}{_sector_text}
 
 ## 직전 AI 판단 (오늘)
 - {last_ai_text}
@@ -882,8 +985,11 @@ def get_trade_opinion(
 
 ## 과거 AI 판단 이력 — {signal.signal_type} 신호 기준 (최근 5건)
 {history_text}
+{f'## 유사 지표 사례 (RSI·거래량 유사, 최근 90일){chr(10)}{_rag_context_text}' if _rag_context_text else ''}
 {_dart_section}
 {_news_section}
+{_sector_news_section}
+{_macro_news_section}
 
 ## 차트 분석
 {_fmt_chart(signal)}
@@ -902,7 +1008,7 @@ def get_trade_opinion(
 ## 시장 환경
 {_fmt_index(kospi, '코스피')}
 {_fmt_index(kosdaq, '코스닥')}
-{_fmt_sector(sector, signal.sector_code)}
+{_fmt_sector(sector, signal.sector_code)}{_global_line}
 {_insights_section}"""
 
     if _BACKEND == "anthropic":
@@ -959,10 +1065,21 @@ def get_dip_buy_opinion(
         pass
 
     news_text = ""
+    macro_news_text = ""
     try:
-        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+        from worker.clients.news_client import (
+            format_news_for_ai, get_macro_news_for_ai, NAVER_CLIENT_ID,
+        )
         if NAVER_CLIENT_ID:
             news_text = format_news_for_ai(name, max_items=5)
+            macro_news_text = get_macro_news_for_ai()
+    except Exception:
+        pass
+
+    global_indices_text = ""
+    try:
+        from worker.clients.global_market import format_global_indices_for_ai
+        global_indices_text = format_global_indices_for_ai()
     except Exception:
         pass
 
@@ -980,7 +1097,9 @@ def get_dip_buy_opinion(
     chart_text = _fmt_chart(fake)
 
     _dart_section = f"\n## 최근 공시 (DART)\n{dart_text}" if dart_text else ""
-    _news_section = f"\n## 최근 뉴스\n{news_text}" if news_text else ""
+    _news_section = f"\n## 최근 뉴스 ({name})\n{news_text}" if news_text else ""
+    _macro_news_section = f"\n## 거시경제·글로벌 이슈\n{macro_news_text}" if macro_news_text else ""
+    _global_line = f" / 글로벌: {global_indices_text}" if global_indices_text else ""
 
     system_prompt = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템에서 시장 급락 시 반등 매수 후보를 평가하는 AI입니다.
 기술적 신호(RSI 과매도, MA 크로스 등)가 발동하지 않은 상태에서도, 시장 전체 급락과 종목의 펀더멘털·차트·뉴스를 종합하여
@@ -1007,7 +1126,7 @@ def get_dip_buy_opinion(
 마크다운 헤더 사용 금지. 150단어 이내."""
 
     user_prompt = f"""## 시장 상황
-- KOSPI: {kospi_rate:+.2f}% / KOSDAQ: {kosdaq_rate:+.2f}% (급락 진행 중)
+- KOSPI: {kospi_rate:+.2f}% / KOSDAQ: {kosdaq_rate:+.2f}% (급락 진행 중){_global_line}
 
 ## 종목 정보
 - 종목: {name} ({code}) | 매매 기간: {horizon or '미설정'}
@@ -1018,6 +1137,7 @@ def get_dip_buy_opinion(
 {chart_text}
 {_dart_section}
 {_news_section}
+{_macro_news_section}
 
 ## 포트폴리오 상태
 - 현금(주문가능금액): {deposit:,}원 (현금 비중 {cash_ratio:.1f}%)
