@@ -64,14 +64,34 @@ def _fmt_int(value, default: int = 0) -> int:
 
 
 def _build_market_text(kiwoom) -> str:
+    parts = []
     try:
         kospi = kiwoom.get_market_index("kospi")
         kosdaq = kiwoom.get_market_index("kosdaq")
         kospi_rate = kospi.get("flu_rt") or kospi.get("prdy_ctrt") or "N/A"
         kosdaq_rate = kosdaq.get("flu_rt") or kosdaq.get("prdy_ctrt") or "N/A"
-        return f"코스피 {kospi_rate}% / 코스닥 {kosdaq_rate}%"
+        parts.append(f"코스피 {kospi_rate}% / 코스닥 {kosdaq_rate}%")
     except Exception:
-        return "시장 지수 조회 실패"
+        parts.append("시장 지수 조회 실패")
+    try:
+        from worker.clients.global_market import format_global_indices_for_ai
+        global_text = format_global_indices_for_ai()
+        if global_text:
+            parts.append(f"글로벌: {global_text}")
+    except Exception:
+        pass
+    return " | ".join(parts)
+
+
+def _build_macro_news() -> str:
+    """거시경제·지정학 이슈 뉴스 (스크리닝 실행 시 1회 조회)."""
+    try:
+        from worker.clients.news_client import get_macro_news_for_ai, NAVER_CLIENT_ID
+        if not NAVER_CLIENT_ID:
+            return ""
+        return get_macro_news_for_ai()
+    except Exception:
+        return ""
 
 
 def _extract_json_block(text: str) -> str | None:
@@ -394,6 +414,7 @@ def run_intraday_scan():
     existing_codes = {s["code"] for s in get_watchlist()}
     auto_mode = _is_auto_mode()
     market_text = _build_market_text(kiwoom)
+    macro_news_text = _build_macro_news()
 
     candidates = []
     seen_codes = set()
@@ -496,6 +517,7 @@ def run_intraday_scan():
             analysis = _analyze_candidate(
                 cand["stock_code"], cand["stock_name"],
                 kiwoom=kiwoom, market_text=market_text,
+                macro_news_text=macro_news_text,
             )
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")
@@ -829,7 +851,13 @@ def _build_screening_insights() -> str:
 
 # ═══════════════════════════ AI 편입 분석 ═══════════════════════════
 
-def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_text: str | None = None) -> dict:
+def _analyze_candidate(
+    stock_code: str,
+    stock_name: str,
+    kiwoom=None,
+    market_text: str | None = None,
+    macro_news_text: str = "",
+) -> dict:
     """후보 종목 1개를 차트+공시+뉴스로 분석하여 편입 적합성 판단.
 
     Returns:
@@ -883,12 +911,26 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
     except Exception:
         pass
 
-    # 3. 뉴스
+    # 3. 뉴스 (종목 + 섹터)
     news_text = ""
+    sector_news_text = ""
     try:
-        from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+        from worker.clients.news_client import (
+            format_news_for_ai, format_sector_news_for_ai, NAVER_CLIENT_ID,
+        )
         if NAVER_CLIENT_ID:
             news_text = format_news_for_ai(stock_name, max_items=5)
+            # 업종명 확보 → 섹터 뉴스
+            sector_code = str(price_data.get("upjong_cd") or "").strip()
+            sector_name = str(price_data.get("upjong_nm") or "").strip()
+            if not sector_name and sector_code and kiwoom:
+                try:
+                    sector_data = kiwoom.get_sector_index(sector_code)
+                    sector_name = str(sector_data.get("upjong_nm") or "").strip()
+                except Exception:
+                    pass
+            if sector_name:
+                sector_news_text = format_sector_news_for_ai(sector_name, max_items=3)
     except Exception:
         pass
 
@@ -1020,8 +1062,10 @@ def _analyze_candidate(stock_code: str, stock_name: str, kiwoom=None, market_tex
 ## DART 공시/재무
 {dart_text or '데이터 없음'}
 
-## 최근 뉴스
+## 최근 뉴스 ({stock_name})
 {news_text or '데이터 없음'}
+{f"## 업종 뉴스{chr(10)}{sector_news_text}" if sector_news_text else ""}
+{f"## 거시경제·글로벌 이슈{chr(10)}{macro_news_text}" if macro_news_text else ""}
 
 ## 포트폴리오 현황
 {portfolio_context}
@@ -1246,6 +1290,7 @@ def run_daily_screening():
     auto_mode = _is_auto_mode()
     kiwoom = KiwoomClient()
     market_text = _build_market_text(kiwoom)
+    macro_news_text = _build_macro_news()
 
     candidates = _screen_candidates()
     if not candidates:
@@ -1270,6 +1315,7 @@ def run_daily_screening():
                 cand["stock_name"],
                 kiwoom=kiwoom,
                 market_text=market_text,
+                macro_news_text=macro_news_text,
             )
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")
