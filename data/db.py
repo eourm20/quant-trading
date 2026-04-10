@@ -1461,7 +1461,7 @@ def search_similar_signals(
              result_5d, triggered_conditions, indicator_snapshot}]
     """
     since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
-    conditions = ["created_at >= ?", "verdict IS NOT NULL", "result_pct IS NOT NULL"]
+    conditions = ["created_at >= ?", "verdict IS NOT NULL"]
     params: list = [since]
 
     if rsi is not None:

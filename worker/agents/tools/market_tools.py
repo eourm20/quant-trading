@@ -75,11 +75,12 @@ class GetChartTool(BaseTool):
         try:
             kiwoom = _kiwoom()
             daily_data = kiwoom.get_daily_ohlcv(stock_code, period=90)
-            close_prices, high_prices, low_prices, volumes = [], [], [], []
+            close_prices, high_prices, low_prices, open_prices, volumes = [], [], [], [], []
             for d in daily_data:
                 cp = abs(_p(d.get("cur_prc")))
                 hp = abs(_p(d.get("high_pric")))
                 lp = abs(_p(d.get("lwst_pric") or d.get("low_pric")))
+                op = abs(_p(d.get("strt_pric") or d.get("opn_pric")))
                 vol = _p(d.get("trde_qty"))
                 if cp:
                     close_prices.append(cp)
@@ -87,6 +88,8 @@ class GetChartTool(BaseTool):
                     high_prices.append(hp)
                 if lp:
                     low_prices.append(lp)
+                if op:
+                    open_prices.append(op)
                 if vol >= 0:
                     volumes.append(vol)
 
@@ -101,8 +104,8 @@ class GetChartTool(BaseTool):
                 high_prices,
                 current_price,
                 low_prices=low_prices,
+                open_prices=open_prices,
                 volumes=volumes,
-                horizon=horizon,
             )
 
             # ChartSummary → dict 직렬화 (None 제거)
@@ -182,6 +185,7 @@ class ScanVolumeSurgeTool(BaseTool):
             rows = payload.get("volm_surg_rnk_array", []) or []
             return {"stocks": rows[:limit]}
         except Exception as e:
+            logger.warning("[ScanVolumeSurgeTool] 거래량 급증 스캔 실패: %s", e, exc_info=True)
             return {"error": str(e)}
 
 
@@ -211,6 +215,7 @@ class ScanForeignBuyTool(BaseTool):
             rows = payload.get("frgn_ntby_rnk_array", []) or []
             return {"stocks": rows[:limit]}
         except Exception as e:
+            logger.warning("[ScanForeignBuyTool] 외인 순매수 스캔 실패: %s", e, exc_info=True)
             return {"error": str(e)}
 
 
@@ -240,4 +245,5 @@ class ScanDeclineRankTool(BaseTool):
             rows = payload.get("flu_rt_rnk_array", []) or []
             return {"stocks": rows[:limit]}
         except Exception as e:
+            logger.warning("[ScanDeclineRankTool] 하락 종목 스캔 실패: %s", e, exc_info=True)
             return {"error": str(e)}

@@ -41,13 +41,7 @@ def get_global_indices() -> dict[str, dict]:
         "https://query1.finance.yahoo.com/v7/finance/quote"
         f"?symbols={symbols_str}&fields=regularMarketPrice,regularMarketChangePercent"
     )
-    try:
-        resp = httpx.get(url, headers=_HEADERS, timeout=6)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("quoteResponse", {}).get("result") or []
-
-        # 심볼 → 이름 역매핑
+    def _parse_items(items: list) -> dict:
         symbol_to_name = {v: k for k, v in _SYMBOLS.items()}
         results: dict[str, dict] = {}
         for item in items:
@@ -59,33 +53,57 @@ def get_global_indices() -> dict[str, dict]:
             change_pct = float(item.get("regularMarketChangePercent") or 0)
             if price:
                 results[name] = {"price": price, "change_pct": change_pct}
-
         return results
 
+    # 1차: query1 v7
+    try:
+        resp = httpx.get(url, headers=_HEADERS, timeout=6)
+        resp.raise_for_status()
+        items = resp.json().get("quoteResponse", {}).get("result") or []
+        result = _parse_items(items)
+        if result:
+            return result
+        logger.warning(f"글로벌 지수 v7 응답 비어있음: {resp.text[:200]}")
     except Exception as e:
-        logger.debug(f"글로벌 지수 조회 실패: {e}")
-        # query1 실패 시 query2 폴백
-        try:
-            url2 = url.replace("query1.", "query2.")
-            resp2 = httpx.get(url2, headers=_HEADERS, timeout=6)
-            resp2.raise_for_status()
-            data2 = resp2.json()
-            items2 = data2.get("quoteResponse", {}).get("result") or []
-            symbol_to_name = {v: k for k, v in _SYMBOLS.items()}
-            results2: dict[str, dict] = {}
-            for item in items2:
-                symbol = item.get("symbol", "")
-                name = symbol_to_name.get(symbol)
-                if not name:
-                    continue
-                price = float(item.get("regularMarketPrice") or 0)
-                change_pct = float(item.get("regularMarketChangePercent") or 0)
-                if price:
-                    results2[name] = {"price": price, "change_pct": change_pct}
-            return results2
-        except Exception as e2:
-            logger.debug(f"글로벌 지수 폴백 조회도 실패: {e2}")
-            return {}
+        logger.warning(f"글로벌 지수 v7 조회 실패: {e}")
+
+    # 2차: query2 v7
+    try:
+        url2 = url.replace("query1.", "query2.")
+        resp2 = httpx.get(url2, headers=_HEADERS, timeout=6)
+        resp2.raise_for_status()
+        items2 = resp2.json().get("quoteResponse", {}).get("result") or []
+        result2 = _parse_items(items2)
+        if result2:
+            return result2
+        logger.warning(f"글로벌 지수 v7 query2 응답 비어있음: {resp2.text[:200]}")
+    except Exception as e2:
+        logger.warning(f"글로벌 지수 v7 query2 조회 실패: {e2}")
+
+    # 3차: v8 chart API (심볼별 개별 조회)
+    try:
+        symbol_to_name = {v: k for k, v in _SYMBOLS.items()}
+        result3: dict[str, dict] = {}
+        for name, symbol in _SYMBOLS.items():
+            r = httpx.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                params={"interval": "1d", "range": "2d"},
+                headers=_HEADERS,
+                timeout=6,
+            )
+            r.raise_for_status()
+            meta = r.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
+            price = float(meta.get("regularMarketPrice") or 0)
+            prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or 0)
+            change_pct = ((price - prev) / prev * 100) if prev else 0.0
+            if price:
+                result3[name] = {"price": price, "change_pct": change_pct}
+        if result3:
+            return result3
+    except Exception as e3:
+        logger.warning(f"글로벌 지수 v8 조회 실패: {e3}")
+
+    return {}
 
 
 def format_global_indices_for_ai(indices: dict[str, dict] | None = None) -> str:

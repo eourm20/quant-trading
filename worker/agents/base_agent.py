@@ -109,7 +109,12 @@ class BaseAgent:
         self._used_tools.append(label)
 
         try:
-            return tool.execute(**inputs)
+            result = tool.execute(**inputs)
+            result_str = json.dumps(result, ensure_ascii=False, default=str)
+            # 결과가 길면 500자만 출력
+            preview = result_str if len(result_str) <= 500 else result_str[:500] + "…(생략)"
+            logger.debug(f"[Agent] 도구 결과: {label} | {preview}")
+            return result
         except Exception as e:
             logger.exception(f"[Agent] {label} 실행 오류")
             return {"error": str(e)}

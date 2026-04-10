@@ -27,17 +27,30 @@ _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템
 {_get_trading_knowledge()}
 
 ## 도구 사용 가이드
-- get_chart: 차트·지표 분석 (RSI, MA, 볼린저, 스토캐스틱 등) — 반드시 호출
-- get_deposit + get_portfolio: 현금 비중, 보유 현황 — entry/add 신호 시 필수
-- get_positions: 목표가/손절가/추가매수가 — 보유 종목(exit/add) 시 필수
-- get_dart / get_news: 공시·뉴스 — 판단에 영향 가능성 있을 때 호출
-- get_macro_news: 거시경제·지정학 뉴스 (관세·금리·전쟁 등) — 시장 전반 충격이 의심될 때 호출
-- get_sector_news: 업종 업황 뉴스 — 섹터 리스크/호재 파악 시 호출 (sector_name: 업종명 입력)
-- get_global_market: 나스닥·S&P500·달러원 — 해외 시장 영향 판단 시 호출
-- get_signal_history: 과거 AI 판단 이력 — 일관성 확인에 활용
-- get_market_index: 코스피·코스닥·섹터 지수 — 필요 시 호출
-- update_watchlist: 임계값 변경 — 구조적 오류 확인 시에만
-- execute_order: 주문 실행 — 사용자가 자동 실행 모드로 요청한 경우에만
+
+### 필수 (매 판단마다)
+- get_chart: 차트·지표 분석 (RSI, MA, 볼린저, 스토캐스틱, 캔들 패턴 등)
+- get_portfolio + get_deposit: 보유 현황·예수금 (entry/add 신호 시)
+- get_positions: 목표가·손절가·추가매수가 (exit/add 신호 시 — 보유 종목 필수)
+- get_signal_history: 이 종목 과거 AI 판단 이력 — 이전 판단과 일관성 체크
+- get_news: 최근 종목 관련 뉴스·이슈
+- get_dart: 최근 공시·재무 정보
+
+### 권장 (판단 강화)
+- search_similar_signals: 유사 지표 패턴의 과거 결과 조회 (RAG) — 비슷한 RSI·추세에서 어떤 결과였는지
+- search_text_context: 공시·뉴스 텍스트 유사도 기반 과거 판단 조회 (RAG)
+- get_entry_reason: 이 종목 진입 근거·매매 메모 (전략 노트)
+- get_condition_accuracy: 이번 신호 조건의 과거 적중률·평균 수익률 통계
+- get_pattern_accuracy: 감지된 차트 패턴의 과거 적중률 통계
+- get_global_market: 나스닥·S&P500·달러원 (해외 시장 영향 의심 시)
+- get_macro_news: 거시경제·관세·금리·지정학 이슈
+- get_sector_news: 업종 업황 이슈 (sector_name: 해당 업종명 입력)
+- get_market_index: 코스피·코스닥 지수
+
+### 제한적 사용
+- self_correction: 저성과 조건 자동 감지 + 임계값 조정 제안 — 판단 근거가 불확실할 때만
+- update_watchlist: RSI 기준값 변경 — 구조적 오류 확인된 경우에만 (자의적 조정 금지)
+- execute_order: 주문 실행 — 자동매매 모드에서만
 
 ## 운용 원칙 (변경 불가)
 - 물타기 최대 1회 원칙 (averaging_down add 신호)
@@ -94,6 +107,13 @@ class JudgmentAgent:
 
         conditions_text = "\n".join(f"  - {c}" for c in signal.triggered_conditions)
         horizon = getattr(signal, "horizon", "") or ""
+        is_holding = signal.in_portfolio
+        signal_type = signal.signal_type
+
+        # exit/add 신호 시 get_positions 필수 추가
+        positions_line = ""
+        if is_holding and signal_type in ("exit", "add"):
+            positions_line = "\n6. get_positions — 목표가·손절가·추가매수가 (보유 종목 필수)"
 
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})
@@ -104,12 +124,24 @@ class JudgmentAgent:
 - RSI(현재 계산값): {signal.rsi if signal.rsi else 'N/A'}
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 - 매매 기간(horizon): {horizon or '미설정'}
-- 보유 여부: {'보유 중' if signal.in_portfolio else '미보유'}
+- 보유 여부: {'보유 중' if is_holding else '미보유'}
 
 도구를 호출하여 필요한 데이터를 수집한 후 매매 판단을 내려주세요.
-필수 조회: get_chart (차트·지표), get_portfolio + get_deposit (잔고·예수금)
-권장 조회: get_global_market (글로벌 지수), get_macro_news (거시경제 이슈) — 시장 변동성이 큰 경우
-섹터 이슈 의심 시: get_sector_news에 업종명을 입력하여 업황 확인"""
+
+[필수 조회]
+1. get_chart — 차트·지표 분석 (horizon: {horizon or ''})
+2. get_portfolio + get_deposit — 보유 현황·예수금
+3. get_signal_history — 이 종목 과거 AI 판단 이력 (signal_type 필터 없이 전체 조회)
+4. get_news — 최근 종목 뉴스·이슈
+5. get_dart — 최근 공시 확인{positions_line}
+
+[권장 조회]
+- search_similar_signals — 유사 지표 패턴에서 과거 결과 조회 (RAG)
+- get_entry_reason — 이 종목 진입 근거·전략 메모 (stock_name="{signal.stock_name}" 전달 필수)
+- get_condition_accuracy — 이번 신호 조건의 과거 적중률 통계
+- get_global_market — 나스닥·S&P500·달러원
+- get_macro_news — 거시경제·관세·금리 이슈
+- get_sector_news — 업종 업황 이슈 (sector_name: 해당 업종명)"""
 
         opinion = self._agent.run(initial_message)
 

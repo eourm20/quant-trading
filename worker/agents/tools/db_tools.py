@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class GetSignalHistoryTool(BaseTool):
     name = "get_signal_history"
     label = "AI 판단 이력 조회"
-    description = "특정 종목의 과거 AI 판단 이력(판정, 날짜, 결과 수익률)을 조회합니다."
+    description = "특정 종목의 과거 AI 판단 이력(판정, 날짜, 결과 수익률)을 조회합니다. 일관성 확인 목적이라면 signal_type은 생략하여 전체 이력을 조회하세요."
     input_schema = {
         "properties": {
             "stock_code": {"type": "string", "description": "종목 코드"},
@@ -39,28 +39,35 @@ class GetSignalHistoryTool(BaseTool):
 class GetEntryReasonTool(BaseTool):
     name = "get_entry_reason"
     label = "진입 근거 조회"
-    description = "해당 종목의 최근 전략 노트(진입 근거, 매매 메모)를 조회합니다."
+    description = "해당 종목의 최근 전략 노트(진입 근거, 매매 메모)를 조회합니다. 전략 노트는 종목명(한글)으로 기록되므로 stock_name을 반드시 전달하세요."
     input_schema = {
         "properties": {
-            "stock_code": {
+            "stock_name": {
                 "type": "string",
-                "description": "종목 코드. 생략하면 전체 최근 노트 반환.",
+                "description": "종목명 (한글). 예: '경방', '동화약품'. 이 값으로 검색하는 것이 정확합니다.",
                 "default": "",
             },
-            "limit": {"type": "integer", "description": "최대 조회 건수", "default": 5},
+            "stock_code": {
+                "type": "string",
+                "description": "종목 코드 (보조 검색용). stock_name과 함께 OR 조건으로 검색.",
+                "default": "",
+            },
+            "limit": {"type": "integer", "description": "최대 조회 건수", "default": 10},
         },
         "required": [],
     }
 
-    def execute(self, stock_code: str = "", limit: int = 5) -> dict:
+    def execute(self, stock_name: str = "", stock_code: str = "", limit: int = 10) -> dict:
         try:
             from data.db import get_strategy_notes
-            notes = get_strategy_notes(limit=limit)
-            if stock_code:
-                # 전략 노트에는 stock_code 필드가 없으므로 summary/detail에서 키워드 검색
-                notes = [n for n in notes if stock_code in str(n.get("summary", "")) or
-                         stock_code in str(n.get("detail", ""))]
-            return {"notes": notes}
+            notes = get_strategy_notes(limit=50)
+            keywords = [kw for kw in [stock_name, stock_code] if kw]
+            if keywords:
+                def _match(n):
+                    text = str(n.get("summary", "")) + str(n.get("detail", ""))
+                    return any(kw in text for kw in keywords)
+                notes = [n for n in notes if _match(n)]
+            return {"notes": notes[:limit]}
         except Exception as e:
             return {"error": str(e)}
 
