@@ -1278,7 +1278,8 @@ def run_check():
                 dart_summary=dart_summary, news_summary=news_summary,
                 market_snapshot=market_snapshot, portfolio_snapshot=portfolio_snapshot,
             )
-            # Agent 모드 실행 시 tool_sequence + reasoning_chain 저장
+            # Agent 모드 실행 시 tool_sequence + reasoning_chain 저장 + 텔레그램 흐름 전송
+            agent_tools_summary = None
             if claude_opinion:
                 try:
                     trace = get_last_agent_trace()
@@ -1288,11 +1289,14 @@ def run_check():
                             trace["tool_sequence"],
                             trace.get("reasoning_chain", []),
                         )
+                        agent_tools_summary = " → ".join(trace["tool_sequence"])
                 except Exception as _e:
                     logger.debug(f"[AgentTrace] 저장 실패: {_e}")
             _rag_index_signal(signal, signal_id, claude_opinion,
                               dart_summary=dart_summary, news_summary=news_summary)
             send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
+            if agent_tools_summary:
+                send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
 
             if claude_opinion:
                 _maybe_save_hold_conditions(signal, claude_opinion)
