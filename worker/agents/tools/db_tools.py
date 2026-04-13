@@ -13,7 +13,11 @@ logger = logging.getLogger(__name__)
 class GetSignalHistoryTool(BaseTool):
     name = "get_signal_history"
     label = "AI 판단 이력 조회"
-    description = "특정 종목의 과거 AI 판단 이력(판정, 날짜, 결과 수익률)을 조회합니다. 일관성 확인 목적이라면 signal_type은 생략하여 전체 이력을 조회하세요."
+    description = (
+        "특정 종목의 과거 AI 판단 이력(판정, 날짜, 결과 수익률)을 조회합니다. "
+        "현재와 비슷한 국면에서 이 종목에 어떤 결정을 내렸는지, 같은 종목에 대해 너무 잦게 판단을 뒤집고 있지 않은지 확인할 때 유용합니다. "
+        "일관성 확인 목적이라면 signal_type은 생략해 전체 이력을 보세요."
+    )
     input_schema = {
         "properties": {
             "stock_code": {"type": "string", "description": "종목 코드"},
@@ -83,6 +87,7 @@ class UpdateWatchlistTool(BaseTool):
     description = (
         "watchlist의 신호 조건 임계값을 변경합니다. "
         "변경 가능 필드: rsi_oversold, rsi_overbought, rsi_oversold_intraday, volume_surge_ratio. "
+        "판단을 정당화하려고 임의로 숫자를 바꾸는 용도가 아니라, 구조적으로 기준이 잘못되었음이 명확할 때만 사용하세요. "
         "목표가/손절가는 quant_position_update를 사용하세요."
     )
     input_schema = {
@@ -127,7 +132,11 @@ class AddToWatchlistTool(BaseTool):
 
     name = "add_to_watchlist"
     label = "관심종목 등록"
-    description = "신규 종목을 관심종목(watchlist)에 등록합니다. 이미 존재하면 무시됩니다."
+    description = (
+        "신규 종목을 관심종목(watchlist)에 등록합니다. 이미 존재하면 무시됩니다. "
+        "Research Agent가 충분한 검증을 마친 뒤 최종 편입 결론을 실행할 때만 사용하세요. "
+        "스캔 결과만 보고 바로 등록하지 말고 기술적·기본적·뉴스 리스크를 먼저 확인하세요."
+    )
     input_schema = {
         "properties": {
             "stock_code": {"type": "string", "description": "종목 코드"},
@@ -151,6 +160,11 @@ class AddToWatchlistTool(BaseTool):
         "required": ["stock_code", "stock_name"],
     }
 
+    def __init__(self):
+        # Runtime guard (configured by ResearchAgent.run)
+        self.max_additions: int = 5
+        self.addition_count: int = 0
+
     def execute(
         self,
         stock_code: str,
@@ -162,13 +176,31 @@ class AddToWatchlistTool(BaseTool):
         conditions = conditions or {}
         try:
             from data.db import upsert_stock, get_watchlist
+            if self.addition_count >= int(self.max_additions or 0):
+                logger.warning(
+                    f"[Agent] add_to_watchlist 한도 도달: {self.addition_count}/{self.max_additions} "
+                    f"({stock_name} {stock_code})"
+                )
+                return {
+                    "error": (
+                        f"watchlist 등록 한도 도달: {self.addition_count}/{self.max_additions}. "
+                        "추가 등록 없이 분석만 수행하세요."
+                    )
+                }
             existing = [s for s in get_watchlist() if s["code"] == stock_code]
             if existing:
                 return {"ok": True, "already_exists": True, "stock_code": stock_code}
             payload = {"horizon": horizon, **conditions}
             upsert_stock(stock_code, stock_name, enabled=True, conditions=payload)
+            self.addition_count += 1
             logger.info(f"[Agent] watchlist 추가: {stock_name}({stock_code}) horizon={horizon} 근거={reason}")
-            return {"ok": True, "stock_code": stock_code, "stock_name": stock_name}
+            return {
+                "ok": True,
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "addition_count": self.addition_count,
+                "max_additions": self.max_additions,
+            }
         except Exception as e:
             return {"error": str(e)}
 
@@ -181,7 +213,8 @@ class SearchSimilarSignalsTool(BaseTool):
     description = (
         "현재 RSI, 추세, 거래량 등과 유사했던 과거 신호를 검색하여 "
         "당시 AI 판단(verdict)과 실제 수익률을 반환합니다. "
-        "과거 유사 상황의 성공/실패 패턴을 참고해 현재 판단에 활용하세요."
+        "주 판단 도구라기보다 확신이 애매한 상황에서 과거 유사 사례를 참고하는 보조 도구입니다. "
+        "현재 종목의 실제 포지션·현금·뉴스 확인을 대체하지는 않습니다."
     )
     input_schema = {
         "properties": {
@@ -225,7 +258,7 @@ class GetConditionAccuracyTool(BaseTool):
     label = "조건별 적중률"
     description = (
         "각 신호 조건(RSI 과매도, 골든크로스 등)별로 적중률과 평균 수익률을 반환합니다. "
-        "적중률이 낮은 조건을 파악하여 임계값 조정 여부를 판단할 때 활용하세요."
+        "개별 신호를 바로 매수/매도로 단정하기보다, 감지된 조건의 신뢰도를 보정하고 구조적 문제를 점검할 때 유용합니다."
     )
     input_schema = {
         "properties": {
@@ -251,7 +284,7 @@ class GetPatternAccuracyTool(BaseTool):
     label = "패턴별 적중률"
     description = (
         "망치형, 골든크로스 등 차트 패턴별 적중률과 평균 수익률을 반환합니다. "
-        "현재 감지된 패턴의 과거 성과를 참고해 판단 신뢰도를 높이세요."
+        "차트에서 감지한 패턴이 실제로 신뢰할 만한지 교차검증할 때 유용한 보조 도구입니다."
     )
     input_schema = {
         "properties": {
@@ -277,6 +310,7 @@ class SelfCorrectionTool(BaseTool):
     label = "자기보정 분석"
     description = (
         "적중률이 낮은 조건을 자동 감지하고 watchlist 임계값 변경을 제안합니다. "
+        "개별 종목 한 건의 결론이 애매하다는 이유로 남용하지 말고, 반복적으로 성과가 나쁜 조건이 보여 구조 개선이 필요할 때만 사용하세요. "
         "실제 변경은 update_watchlist를 통해 별도로 처리하세요."
     )
     input_schema = {

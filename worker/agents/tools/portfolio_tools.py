@@ -31,7 +31,11 @@ def _f(v) -> float:
 class GetPortfolioTool(BaseTool):
     name = "get_portfolio"
     label = "보유 현황 확인"
-    description = "현재 보유 종목 목록, 평단가, 평가손익, 수익률 등을 조회합니다."
+    description = (
+        "현재 보유 종목 목록, 평단가, 평가손익, 수익률 등을 조회합니다. "
+        "entry/add 판단에서 이미 들고 있는 종목인지, 포트 집중도가 과한지, 신규 매수 여지가 있는지 확인할 때 먼저 유용합니다. "
+        "Research Agent도 기존 보유 종목과 중복 편입을 피하고 전체 익스포저를 점검할 때 사용하세요."
+    )
     input_schema = {
         "properties": {},
         "required": [],
@@ -66,7 +70,11 @@ class GetPortfolioTool(BaseTool):
 class GetDepositTool(BaseTool):
     name = "get_deposit"
     label = "예수금 조회"
-    description = "주문 가능 예수금 및 주문가능금액을 조회합니다."
+    description = (
+        "주문 가능 예수금 및 주문가능금액을 조회합니다. "
+        "신규 매수나 추가매수 수량을 제안하기 전 현금 여력을 확인할 때 사용하세요. "
+        "현금이 부족하면 무리하게 매수 결론을 내리지 말고 보수적으로 판단하세요."
+    )
     input_schema = {
         "properties": {},
         "required": [],
@@ -84,8 +92,9 @@ class GetPositionsTool(BaseTool):
     label = "포지션 정보 조회"
     description = (
         "보유 종목의 포지션 관리 정보(목표가, 손절가, 추가매수가, 물타기 여부 등)를 조회합니다. "
-        "exit 신호: 손절가·목표가 도달 여부 확인 필수. "
-        "add 신호: 추가매수가 수준 및 물타기 1회 원칙 위반 여부 확인 필수."
+        "exit 신호에서는 목표가/손절가 판단의 기준점이므로 사실상 우선 확인 도구입니다. "
+        "add 신호에서는 추가매수 가격대와 물타기 1회 원칙 위반 여부를 확인할 때 중요합니다. "
+        "포지션 정보 없이 exit/add를 단정하지 마세요."
     )
     input_schema = {
         "properties": {
@@ -113,8 +122,8 @@ class GetOrderStatusTool(BaseTool):
     label = "당일 주문 현황 조회"
     description = (
         "당일 체결 내역과 미체결 주문을 Kiwoom에서 직접 조회합니다. "
-        "exit/add 신호 처리 시 이미 매도됐는지 확인하거나, "
-        "이전 주문이 체결됐는지 vs 아직 미체결로 남아 있는지 검증할 때 사용하세요. "
+        "exit/add 신호 처리 시 이미 같은 방향 주문이 나갔는지, 이미 매도됐는지, 미체결 주문이 남아 있는지 확인할 때 사용하세요. "
+        "중복 주문이나 이미 끝난 포지션에 대한 잘못된 판단을 막는 안전장치 역할입니다. "
         "stock_code를 지정하면 해당 종목만 필터링합니다."
     )
     input_schema = {

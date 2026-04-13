@@ -20,6 +20,45 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 
 ---
 
+## 최종 버전 핵심 업데이트 (Agent + 파싱 안정화)
+
+### 1) Agent 구조 정리 (프롬프트/도구 역할 분리)
+- Judgment/Research Agent 프롬프트를 `목표 + 절대 원칙 + 출력 형식` 중심으로 축소
+- 도구 선택 기준(언제/왜 쓰는지)은 각 tool description으로 이관
+- `BaseAgent`가 도구 카탈로그 요약을 system prompt에 자동 주입하여 자율 도구 선택 보조
+
+관련 코드:
+- `worker/agents/judgment_agent.py`
+- `worker/agents/research_agent.py`
+- `worker/agents/base_agent.py`
+- `worker/agents/tools/*.py`
+
+### 2) 안전한 결과 포맷 보장
+- `max_steps` 초과 시에도 다운스트림 파서가 처리 가능한 표준 verdict 포맷(`[홀드]`)으로 반환
+- 신호 이력 파싱에서 `[추가매수(매수)]`, `[물타기(매수)]`도 verdict로 인식하도록 확장
+
+관련 코드:
+- `worker/agents/base_agent.py`
+- `worker/claude_judge.py`
+
+### 3) ResearchAgent 등록 상한 강제
+- `max_candidates`를 프롬프트 지시가 아닌 실행 제약으로 연결
+- `add_to_watchlist` 도구에 런타임 카운터(`max_additions`, `addition_count`)를 적용해 과등록 방지
+
+관련 코드:
+- `worker/agents/research_agent.py`
+- `worker/agents/tools/db_tools.py`
+
+### 4) 텔레그램 Markdown 파싱 실패 폴백
+- Markdown entity 파싱 실패 시 plain text로 자동 재전송
+- 일반 알림/인라인 버튼/임계값 제안/봇 응답 모두 동일 폴백 적용
+
+관련 코드:
+- `notifications/telegram.py`
+- `notifications/telegram_bot.py`
+
+---
+
 ## 거래 세션
 
 | 세션 | 시간 | 매매구분(trde_tp) | 조건 필터 |

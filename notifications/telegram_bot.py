@@ -292,11 +292,23 @@ class TelegramBot:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
-            self._client.post(
+            resp = self._client.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                 json=payload,
                 timeout=10,
             )
+            if resp.status_code == 200:
+                return
+            body_preview = (resp.text or "")[:200]
+            if parse_mode and ("can't parse entities" in body_preview.lower() or "parse entities" in body_preview.lower()):
+                retry_payload: dict = {"chat_id": CHAT_ID, "text": text}
+                if reply_markup:
+                    retry_payload["reply_markup"] = reply_markup
+                self._client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json=retry_payload,
+                    timeout=10,
+                )
         except Exception as e:
             logger.warning(f"[bot] 메시지 발송 실패: {e}")
 

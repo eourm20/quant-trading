@@ -61,7 +61,8 @@ class GetChartTool(BaseTool):
     label = "차트·지표 분석"
     description = (
         "일봉 90일 데이터를 조회하고 RSI, MA, MACD, 볼린저, 스토캐스틱, CCI, "
-        "일목균형표, OBV, 캔들패턴, 차트패턴, 피보나치 등 기술적 지표를 계산합니다."
+        "일목균형표, OBV, 캔들패턴, 차트패턴, 피보나치 등 기술적 지표를 계산합니다. "
+        "Judgment Agent의 기본 사실 확인 도구이며, Research Agent도 후보별 기술적 검증에 우선 사용하세요."
     )
     input_schema = {
         "properties": {
@@ -166,7 +167,10 @@ class GetMarketIndexTool(BaseTool):
 class ScanVolumeSurgeTool(BaseTool):
     name = "scan_volume_surge"
     label = "거래량 급증 스캔"
-    description = "거래량이 급증한 종목을 스캔합니다 (ka10023)."
+    description = (
+        "거래량이 급증한 종목을 스캔합니다 (ka10023). "
+        "시장에 새 수급이 붙는 종목을 넓게 찾는 출발점으로 유용합니다."
+    )
     input_schema = {
         "properties": {
             "limit": {
@@ -196,7 +200,10 @@ class ScanVolumeSurgeTool(BaseTool):
 class ScanForeignBuyTool(BaseTool):
     name = "scan_foreign_buy"
     label = "외인 순매수 스캔"
-    description = "외국인 순매수 상위 종목을 스캔합니다 (ka10035)."
+    description = (
+        "외국인 순매수 상위 종목을 스캔합니다 (ka10035). "
+        "잠재성장이나 수급 축적 후보를 찾고 싶을 때 우선 고려하세요."
+    )
     input_schema = {
         "properties": {
             "limit": {
@@ -226,7 +233,10 @@ class ScanForeignBuyTool(BaseTool):
 class ScanDeclineRankTool(BaseTool):
     name = "scan_decline_rank"
     label = "하락 종목 스캔"
-    description = "등락률 하위 종목(하락 상위)을 스캔합니다 (ka10027)."
+    description = (
+        "등락률 하위 종목(하락 상위)을 스캔합니다 (ka10027). "
+        "눌림목이나 과도한 조정 후보를 찾을 때 유용하지만, 급락 악재주를 그대로 편입하지 않도록 뉴스·공시 검증이 뒤따라야 합니다."
+    )
     input_schema = {
         "properties": {
             "limit": {

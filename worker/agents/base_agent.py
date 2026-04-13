@@ -5,7 +5,7 @@ BaseAgent — Tool Use 루프 공통 구현 (OpenAI Function Calling 기반).
   1. 초기 메시지 전달
   2. GPT가 tool_calls 반환 → 도구 실행 → 결과 재전달
   3. finish_reason == "stop" → 최종 텍스트 반환
-  4. max_steps 초과 시 "[max_steps 초과 — 홀드]" 반환
+  4. max_steps 초과 시 표준 verdict 포맷의 "[홀드]" 반환
 """
 
 from __future__ import annotations
@@ -42,12 +42,105 @@ class BaseAgent:
         from worker.agents.tools.registry import build_schema
         self._tool_schemas = [build_schema(t) for t in tools]
         self._tool_map = {t.name: t for t in tools}
-        self._system_prompt = system_prompt
+        self._system_prompt = self._compose_system_prompt(system_prompt, tools)
         self._model = model
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._used_tools: list[str] = []
         self._reasoning_steps: list[str] = []
+
+    def _compose_system_prompt(self, base_prompt: str, tools: list) -> str:
+        """Attach a compact tool guide so model can choose tools more autonomously."""
+        return f"{base_prompt}\n\n{self._build_tool_guide(tools)}"
+
+    def _build_tool_guide(self, tools: list) -> str:
+        category_order = [
+            "핵심 시세/차트",
+            "포지션/자금",
+            "뉴스/공시/거시",
+            "이력/RAG/통계",
+            "실행/수정",
+            "스캔",
+            "기타",
+        ]
+        tool_category = {
+            "get_current_price": "핵심 시세/차트",
+            "get_chart": "핵심 시세/차트",
+            "get_market_index": "핵심 시세/차트",
+            "get_portfolio": "포지션/자금",
+            "get_deposit": "포지션/자금",
+            "get_positions": "포지션/자금",
+            "get_order_status": "포지션/자금",
+            "get_news": "뉴스/공시/거시",
+            "get_dart": "뉴스/공시/거시",
+            "get_macro_news": "뉴스/공시/거시",
+            "get_sector_news": "뉴스/공시/거시",
+            "get_global_market": "뉴스/공시/거시",
+            "get_signal_history": "이력/RAG/통계",
+            "get_entry_reason": "이력/RAG/통계",
+            "search_similar_signals": "이력/RAG/통계",
+            "search_text_context": "이력/RAG/통계",
+            "search_screening_context": "이력/RAG/통계",
+            "get_condition_accuracy": "이력/RAG/통계",
+            "get_pattern_accuracy": "이력/RAG/통계",
+            "self_correction": "이력/RAG/통계",
+            "update_watchlist": "실행/수정",
+            "execute_order": "실행/수정",
+            "add_to_watchlist": "실행/수정",
+            "scan_volume_surge": "스캔",
+            "scan_foreign_buy": "스캔",
+            "scan_decline_rank": "스캔",
+        }
+        restricted_tools = {
+            "self_correction": "불확실성 해소용이 아니라 구조 개선이 필요할 때만 사용",
+            "update_watchlist": "판단 정당화 목적의 임의 조정 금지",
+            "execute_order": "자동매매 모드에서만 사용",
+            "add_to_watchlist": "검증 완료 후 최종 편입 단계에서만 사용",
+        }
+
+        grouped: dict[str, list] = {k: [] for k in category_order}
+        grouped["기타"] = []
+
+        for t in tools:
+            name = getattr(t, "name", "")
+            cat = tool_category.get(name, "기타")
+            grouped.setdefault(cat, []).append(t)
+
+        lines = [
+            "## 도구 카탈로그 (요약)",
+            "- 호출 순서는 고정하지 말고 불확실성 감소 효과가 큰 도구부터 사용.",
+            "- 이력/RAG는 보조 도구이며 1차 사실 확인(시세·차트·포지션·뉴스) 대체 금지.",
+        ]
+
+        for cat in category_order:
+            items = grouped.get(cat) or []
+            if not items:
+                continue
+            tool_names = []
+            for t in items:
+                n = getattr(t, "name", "")
+                if n:
+                    tool_names.append(n)
+            if tool_names:
+                lines.append(f"- [{cat}] {', '.join(tool_names)}")
+
+        restricted_lines = []
+        for n, msg in restricted_tools.items():
+            if n in self._tool_map:
+                restricted_lines.append(f"{n}: {msg}")
+        if restricted_lines:
+            lines.append("- 제한 도구:")
+            lines.extend([f"  - {x}" for x in restricted_lines])
+
+        return "\n".join(lines)
+
+    def configure_tool(self, name: str, **attrs) -> None:
+        """Set runtime attributes on a tool instance when a run needs hard guards."""
+        tool = self._tool_map.get(name)
+        if not tool:
+            return
+        for key, value in attrs.items():
+            setattr(tool, key, value)
 
     def run(self, initial_message: str) -> str:
         """Agent 루프 실행 후 최종 텍스트 반환."""
@@ -102,7 +195,8 @@ class BaseAgent:
             return choice.message.content or ""
 
         logger.warning(f"[Agent] max_steps({self._max_steps}) 초과")
-        return "[max_steps 초과 — 홀드]"
+        # Keep a parse-safe verdict format so downstream logic treats this as a normal HOLD.
+        return "[홀드]\n• 근거1: 분석 단계 수(max_steps) 초과로 보수적으로 홀드를 선택합니다."
 
     def _execute(self, name: str, inputs: dict):
         tool = self._tool_map.get(name)

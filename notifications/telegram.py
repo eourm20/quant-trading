@@ -31,9 +31,27 @@ def _post(text: str, parse_mode: str | None = "Markdown", reply_markup: dict | N
             json=payload,
             timeout=10,
         )
-        if resp.status_code != 200:
-            _logger.warning(f"[텔레그램] 발송 실패: status={resp.status_code} body={resp.text[:200]}")
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            return True
+
+        body_preview = resp.text[:200]
+        _logger.warning(f"[텔레그램] 발송 실패: status={resp.status_code} body={body_preview}")
+
+        # Markdown entity parse error fallback: resend as plain text.
+        if parse_mode and ("can't parse entities" in body_preview.lower() or "parse entities" in body_preview.lower()):
+            retry_payload: dict = {"chat_id": CHAT_ID, "text": text}
+            if reply_markup:
+                retry_payload["reply_markup"] = reply_markup
+            retry = httpx.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json=retry_payload,
+                timeout=10,
+            )
+            if retry.status_code == 200:
+                _logger.warning("[텔레그램] Markdown 파싱 실패로 plain text 재전송 성공")
+                return True
+            _logger.warning(f"[텔레그램] plain text 재전송 실패: status={retry.status_code} body={retry.text[:200]}")
+        return False
     except Exception as e:
         _logger.warning(f"[텔레그램] 발송 예외: {e}")
         return False
@@ -71,6 +89,18 @@ def send_message_with_inline_buttons(text: str, buttons: list[list[dict]]) -> in
         )
         if resp.status_code == 200:
             return resp.json().get("result", {}).get("message_id")
+        if "parse entities" in (resp.text or "").lower():
+            retry_payload = {
+                "chat_id": CHAT_ID,
+                "text": text,
+                "reply_markup": {"inline_keyboard": buttons},
+            }
+            retry = httpx.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json=retry_payload, timeout=10,
+            )
+            if retry.status_code == 200:
+                return retry.json().get("result", {}).get("message_id")
     except Exception:
         pass
     return None
@@ -121,6 +151,18 @@ def send_threshold_proposal(
         )
         if resp.status_code == 200:
             return resp.json().get("result", {}).get("message_id")
+        if "parse entities" in (resp.text or "").lower():
+            retry_payload = {
+                "chat_id": CHAT_ID,
+                "text": text,
+                "reply_markup": {"inline_keyboard": keyboard},
+            }
+            retry = httpx.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json=retry_payload, timeout=10,
+            )
+            if retry.status_code == 200:
+                return retry.json().get("result", {}).get("message_id")
     except Exception:
         pass
     return None

@@ -521,7 +521,18 @@ def _fmt_signal_history(stock_code: str, signal_type: str = "") -> str:
             price = r["current_price"]
             opinion = str(r["claude_opinion"] or "")
             first_line = opinion.strip().splitlines()[0] if opinion.strip() else ""
-            verdict = next((tag for tag in ["[매수]", "[매도]", "[홀드]"] if tag in first_line), "?")
+            verdict = next(
+                (
+                    tag for tag in [
+                        "[추가매수(매수)]",
+                        "[물타기(매수)]",
+                        "[매수]",
+                        "[매도]",
+                        "[홀드]",
+                    ] if tag in first_line
+                ),
+                "?",
+            )
             action = r.get("action") or ""
             result = r.get("result_pct")
             result_str = f"{result:+.1f}%" if result is not None else "집계 중"
@@ -590,7 +601,18 @@ def _fmt_last_ai_decision(stock_code: str) -> str:
         dt = str(row["created_at"])[11:16]
         opinion = str(row["claude_opinion"] or "")
         first_line = opinion.strip().splitlines()[0] if opinion.strip() else ""
-        verdict = next((tag for tag in ["[매수]", "[매도]", "[홀드]"] if tag in first_line), "")
+        verdict = next(
+            (
+                tag for tag in [
+                    "[추가매수(매수)]",
+                    "[물타기(매수)]",
+                    "[매수]",
+                    "[매도]",
+                    "[홀드]",
+                ] if tag in first_line
+            ),
+            "",
+        )
         # 첫 줄은 verdict 태그 자체이므로 두 번째 줄(첫 번째 근거)을 표시
         lines = [l.strip() for l in opinion.strip().splitlines() if l.strip() and not l.strip().startswith("[")]
         summary = lines[0][:80] if lines else ""
