@@ -83,6 +83,62 @@ def _parse_rr_ratio(value) -> float | None:
         return None
 
 
+def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
+    """Compress free-form agent output into a short Telegram-friendly summary."""
+    text = (result_text or "").replace("\r", "").strip()
+    if not text:
+        return "- No analysis text."
+
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    picks: list[str] = []
+    watchlist_status: list[str] = []
+
+    for ln in lines:
+        norm = re.sub(r"^[#>*\\-\\s]+", "", ln).strip()
+        norm = norm.strip("`")
+        if not norm:
+            continue
+
+        # Example: "1. 남해화학(025860): 편입 적합"
+        if re.match(r"^\d+\.\s+", norm):
+            picks.append(re.sub(r"\s+", " ", norm)[:140])
+            continue
+
+        # Capture registration/watchlist status lines.
+        lower = norm.lower()
+        if ("watchlist" in lower) or ("등록" in norm) or ("미등록" in norm):
+            watchlist_status.append(re.sub(r"\s+", " ", norm)[:140])
+
+    # De-duplicate while preserving order.
+    def _uniq(items: list[str]) -> list[str]:
+        seen = set()
+        out = []
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out
+
+    picks = _uniq(picks)[:max_items]
+    watchlist_status = _uniq(watchlist_status)[:max_items]
+
+    out: list[str] = []
+    if picks:
+        out.append("Top decisions:")
+        out.extend(f"- {p}" for p in picks)
+    if watchlist_status:
+        if out:
+            out.append("")
+        out.append("Watchlist status:")
+        out.extend(f"- {w}" for w in watchlist_status)
+
+    if not out:
+        snippet = re.sub(r"\s+", " ", text)[:900]
+        return f"- Summary fallback: {snippet}"
+    return "\n".join(out)
+
+
 def _build_market_text(kiwoom) -> str:
     parts = []
     try:
@@ -1380,11 +1436,37 @@ def run_daily_screening():
             _kosdaq = _rate(_kw.get_market_index("kosdaq"))
             _agent = ResearchAgent()
             result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq)
-            logger.info(f"[ResearchAgent 스크리닝] 완료\n{result[:300]}")
-            if _agent.used_tools:
-                from notifications.telegram import send_message as _send
-                _send(f"🔍 *스크리닝 분석 경로*\n{' → '.join(_agent.used_tools)}")
-            return
+            logger.info(f"[ResearchAgent Screening] completed\n{result[:300]}")
+            from notifications.telegram import send_message as _send
+            tools_summary = " -> ".join(_agent.used_tools) if _agent.used_tools else "none"
+            result_text = (result or "").strip() or "(empty result)"
+            summary_text = _build_agent_telegram_summary(result_text)
+            msg = (
+                f"[ResearchAgent Screening] completed\n"
+                f"- tools: {tools_summary}\n\n"
+                f"{summary_text}"
+            )
+            if not _send(msg):
+                logger.warning("[ResearchAgent Screening] telegram send failed")
+
+            added_count = int(getattr(_agent, "addition_count", 0) or 0)
+
+            # Agent mode does not write per-candidate screening_log by default; keep a trace in strategy_notes.
+            try:
+                from data.db import save_strategy_note as _save_strategy_note
+                _save_strategy_note(
+                    "watchlist",
+                    "ResearchAgent daily screening completed",
+                    f"tools={tools_summary}\nadded_count={added_count}\n\n{result_text[:3000]}",
+                )
+            except Exception as _note_e:
+                logger.warning(f"[ResearchAgent Screening] strategy_note save failed: {_note_e}")
+
+            # If agent did not add anything, fallback to legacy pipeline so screening_log/watchlist flow still runs.
+            if added_count <= 0:
+                logger.warning("[ResearchAgent Screening] no add_to_watchlist call; fallback to legacy screening")
+            else:
+                return
         except Exception as _e:
             logger.warning(f"[스크리닝] ResearchAgent 실패, 레거시로 폴백: {_e}")
 

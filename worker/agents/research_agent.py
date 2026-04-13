@@ -5,6 +5,7 @@ Research Agent: 장 마감 후 유망 종목 발굴.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
 
 from worker.agents.base_agent import BaseAgent
@@ -124,6 +125,43 @@ class ResearchAgent:
             logger.warning(f"[ResearchAgent] 성과 요약 생성 실패: {e}")
             return "- 성과 요약 생성 실패"
 
+    def _compact_result(self, text: str, max_lines: int = 12) -> str:
+        """Keep only high-signal lines from free-form agent output."""
+        raw = (text or "").replace("\r", "").strip()
+        if not raw:
+            return "- 결과 없음"
+
+        lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+        keep: list[str] = []
+
+        for ln in lines:
+            norm = re.sub(r"^[#>*\-\s]+", "", ln).strip()
+            if not norm:
+                continue
+
+            if re.match(r"^\d+\.\s+", norm):
+                keep.append(norm)
+                continue
+
+            if any(k in norm for k in ["watchlist", "등록", "미등록", "보류", "부적합", "편입", "요약", "완료"]):
+                keep.append(norm)
+
+        out: list[str] = []
+        seen = set()
+        for ln in keep:
+            if ln in seen:
+                continue
+            seen.add(ln)
+            out.append(ln)
+            if len(out) >= max_lines:
+                break
+
+        if out:
+            return "\n".join(out)
+
+        fallback = [re.sub(r"\s+", " ", ln) for ln in lines[:max_lines]]
+        return "\n".join(fallback)
+
     def run(
         self,
         kospi_rate: float = 0.0,
@@ -151,9 +189,15 @@ class ResearchAgent:
 적합한 종목을 관심종목에 등록하세요.
 add_to_watchlist 호출은 최대 {limit}회까지만 허용됩니다.
 
+
+Output format constraints (keep concise):
+- Maximum 12 lines total.
+- For each selected stock, output only: "<stock>(<code>): decision" / "reason" / "watchlist: done|not added(reason)".
+- No long background explanation, no duplicated wording.
 이미 watchlist에 있는 종목은 건너뛰어도 됩니다."""
 
         result = self._agent.run(initial_message)
+        result = self._compact_result(result)
 
         if self._agent._used_tools:
             tools_summary = " -> ".join(self._agent._used_tools)
@@ -165,3 +209,9 @@ add_to_watchlist 호출은 최대 {limit}회까지만 허용됩니다.
     def used_tools(self) -> list[str]:
         return list(self._agent._used_tools)
 
+    @property
+    def addition_count(self) -> int:
+        tool = self._agent._tool_map.get("add_to_watchlist")
+        if not tool:
+            return 0
+        return int(getattr(tool, "addition_count", 0) or 0)

@@ -175,7 +175,7 @@ class AddToWatchlistTool(BaseTool):
     ) -> dict:
         conditions = conditions or {}
         try:
-            from data.db import upsert_stock, get_watchlist
+            from data.db import upsert_stock, get_watchlist, save_screening_log, update_screening_action
             if self.addition_count >= int(self.max_additions or 0):
                 logger.warning(
                     f"[Agent] add_to_watchlist 한도 도달: {self.addition_count}/{self.max_additions} "
@@ -189,10 +189,32 @@ class AddToWatchlistTool(BaseTool):
                 }
             existing = [s for s in get_watchlist() if s["code"] == stock_code]
             if existing:
+                try:
+                    _log_id = save_screening_log(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        source="research_agent",
+                        recommendation="관심종목 등록",
+                        reason=reason or "already exists in watchlist",
+                    )
+                    update_screening_action(_log_id, "auto_accepted")
+                except Exception:
+                    pass
                 return {"ok": True, "already_exists": True, "stock_code": stock_code}
             payload = {"horizon": horizon, **conditions}
             upsert_stock(stock_code, stock_name, enabled=True, conditions=payload)
             self.addition_count += 1
+            try:
+                _log_id = save_screening_log(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    source="research_agent",
+                    recommendation="관심종목 등록",
+                    reason=reason or "",
+                )
+                update_screening_action(_log_id, "auto_accepted")
+            except Exception as _log_e:
+                logger.warning(f"[Agent] screening_log 저장 실패: {stock_name}({stock_code}) {_log_e}")
             logger.info(f"[Agent] watchlist 추가: {stock_name}({stock_code}) horizon={horizon} 근거={reason}")
             return {
                 "ok": True,
