@@ -1,8 +1,21 @@
-anthropic>=0.40.0
-openai>=1.0.0
+# AI
+anthropic>=0.40.0       # 레거시 판단 모드 (claude_judge.py)
+openai>=1.0.0           # Agent 모드 + RAG 임베딩 (base_agent.py, rag_tools.py)
+
+# 스케줄러
 apscheduler>=3.10.0
+
+# HTTP
 httpx>=0.28.1
+requests>=2.31.0
+
+# 설정
 python-dotenv>=1.0.1
 pyyaml>=6.0
-websockets>=12.0
+
+# 실시간 데이터
+websockets>=12.0        # 키움 실시간 웹소켓 (kiwoom_client.py)
+
+# 벡터 RAG
 faiss-cpu>=1.7.0
+numpy>=1.26.0
