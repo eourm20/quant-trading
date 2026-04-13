@@ -1,9 +1,10 @@
-"""
+﻿"""
 DB 도구: 신호 이력, 진입 근거, watchlist 업데이트, 관심종목 추가,
          유사 신호 검색, 조건별/패턴별 적중률, 자기보정.
 """
 
 from __future__ import annotations
+import json
 import logging
 from worker.agents.tools.registry import BaseTool
 
@@ -196,6 +197,23 @@ class AddToWatchlistTool(BaseTool):
                         source="research_agent",
                         recommendation="관심종목 등록",
                         reason=reason or "already exists in watchlist",
+                        ai_response=(
+                            "registered by research_agent (already exists)\n\n"
+                            "[RAG_CONTEXT_JSON]\n"
+                            "```json\n"
+                            + json.dumps(
+                                {
+                                    "stock_code": stock_code,
+                                    "stock_name": stock_name,
+                                    "recommendation": "관심종목 등록",
+                                    "reason": reason or "already exists in watchlist",
+                                    "source": "research_agent",
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                            + "\n```"
+                        ),
                     )
                     update_screening_action(_log_id, "auto_accepted")
                 except Exception:
@@ -211,6 +229,24 @@ class AddToWatchlistTool(BaseTool):
                     source="research_agent",
                     recommendation="관심종목 등록",
                     reason=reason or "",
+                    ai_response=(
+                        "registered by research_agent\n\n"
+                        "[RAG_CONTEXT_JSON]\n"
+                        "```json\n"
+                        + json.dumps(
+                            {
+                                "stock_code": stock_code,
+                                "stock_name": stock_name,
+                                "recommendation": "관심종목 등록",
+                                "reason": reason or "",
+                                "source": "research_agent",
+                                "horizon": horizon,
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        + "\n```"
+                    ),
                 )
                 update_screening_action(_log_id, "auto_accepted")
             except Exception as _log_e:

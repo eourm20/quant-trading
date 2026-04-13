@@ -1,4 +1,4 @@
-"""
+﻿"""
 자동 종목 스크리닝 (워커 전용)
 - 장 마감 후(15:40) 유망 종목 자동 발굴 → AI 분석 → watchlist 자동 추가
 - 수동 종목 분석은 Claude Desktop에서 MCP 도구로 직접 수행
@@ -81,6 +81,24 @@ def _parse_rr_ratio(value) -> float | None:
         return float(s)
     except Exception:
         return None
+
+
+def _build_rag_text_block(human_text: str, payload: dict | None = None, human_limit: int = 1200) -> str:
+    """Compose a human + structured block format for RAG indexing."""
+    body = (human_text or "").strip()
+    if human_limit and len(body) > human_limit:
+        body = body[:human_limit] + " ..."
+    payload = payload or {}
+    try:
+        payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception:
+        payload_json = "{}"
+    return (
+        f"{body}\n\n"
+        f"---\n"
+        f"[RAG_CONTEXT_JSON]\n"
+        f"```json\n{payload_json}\n```"
+    )
 
 
 def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
@@ -1255,7 +1273,18 @@ def _analyze_candidate(
             result["_current_price"] = current_price
             result["_dart_summary"] = dart_text or None
             result["_news_summary"] = news_text or None
-            result["_ai_response"] = ai_text
+            result["_ai_response"] = _build_rag_text_block(
+                ai_text,
+                {
+                    "stock_code": stock_code,
+                    "stock_name": stock_name,
+                    "recommendation": result.get("recommendation"),
+                    "reason": result.get("reason"),
+                    "met_conditions": result.get("met_conditions"),
+                    "rr_ratio": result.get("rr_ratio"),
+                    "current_price": current_price,
+                },
+            )
             return result
 
         return {"recommendation": "분석 실패"}
@@ -1441,15 +1470,20 @@ def run_daily_screening():
             tools_summary = " -> ".join(_agent.used_tools) if _agent.used_tools else "none"
             result_text = (result or "").strip() or "(empty result)"
             summary_text = _build_agent_telegram_summary(result_text)
+            added_count = int(getattr(_agent, "addition_count", 0) or 0)
+            status_line = (
+                "0 additions (no eligible candidates or all filtered)"
+                if added_count <= 0
+                else f"{added_count} additions"
+            )
             msg = (
                 f"[ResearchAgent Screening] completed\n"
-                f"- tools: {tools_summary}\n\n"
+                f"- tools: {tools_summary}\n"
+                f"- add_to_watchlist: {status_line}\n\n"
                 f"{summary_text}"
             )
             if not _send(msg):
                 logger.warning("[ResearchAgent Screening] telegram send failed")
-
-            added_count = int(getattr(_agent, "addition_count", 0) or 0)
 
             # Agent mode does not write per-candidate screening_log by default; keep a trace in strategy_notes.
             try:
@@ -1461,14 +1495,18 @@ def run_daily_screening():
                 )
             except Exception as _note_e:
                 logger.warning(f"[ResearchAgent Screening] strategy_note save failed: {_note_e}")
-
-            # If agent did not add anything, fallback to legacy pipeline so screening_log/watchlist flow still runs.
-            if added_count <= 0:
-                logger.warning("[ResearchAgent Screening] no add_to_watchlist call; fallback to legacy screening")
-            else:
-                return
+            return
         except Exception as _e:
-            logger.warning(f"[스크리닝] ResearchAgent 실패, 레거시로 폴백: {_e}")
+            logger.warning(f"[스크리닝] ResearchAgent 실패(에이전트 단독 모드): {_e}")
+            try:
+                from notifications.telegram import send_message as _send
+                _send(
+                    "[ResearchAgent Screening] failed\n"
+                    f"- error: {str(_e)[:300]}"
+                )
+            except Exception:
+                pass
+            return
 
     from notifications.telegram import send_message, send_message_with_inline_buttons
     from data.db import save_strategy_note
@@ -1554,6 +1592,7 @@ def run_daily_screening():
                             "dart_summary": analysis.get("_dart_summary"),
                             "news_summary": analysis.get("_news_summary"),
                             "indicator_snapshot": analysis.get("indicator_snapshot"),
+                            "ai_response": analysis.get("_ai_response"),
                         },
                         daemon=True,
                     ).start()
@@ -1761,6 +1800,19 @@ def run_daily_review():
 
 총 300자 이내. 마크다운 헤더(#) 금지."""
 
+    user_prompt += """
+
+Additional output rules (must follow):
+- First part must be human-readable (max 18 lines).
+- Use these exact section headers in order:
+  [Executive Summary]
+  [What Worked]
+  [What Failed]
+  [Action Items Tomorrow]
+- Keep each section concise; avoid long background explanation.
+"""
+
+
     system_prompt = (
         "당신은 퀀트 트레이딩 시스템의 일일 복기 분석가입니다. "
         "데이터 기반으로 냉정하게 평가하고, 구체적 개선점을 제시합니다. "
@@ -1791,17 +1843,69 @@ def run_daily_review():
         return
 
     # ── 전략노트 저장 ──
+    # Build structured payload for RAG-friendly indexing.
+    review_payload = {
+        "date": today_str,
+        "signal_count": len(signals),
+        "today_trade_count": len(today_trades),
+        "portfolio_count": len(portfolio),
+        "portfolio_eval_amount": total_eval,
+        "portfolio_profit_loss": total_pl,
+        "verdict_accuracy_14d": accuracy_14d,
+        "screening_accuracy_30d": screening_acc or {},
+        "top_signals": [
+            {
+                "stock_name": s.get("stock_name"),
+                "verdict": s.get("verdict"),
+                "current_price": s.get("current_price"),
+                "triggered_conditions": s.get("triggered_conditions"),
+                "result_1d": s.get("result_1d"),
+            }
+            for s in signals[:10]
+        ],
+        "today_trades": [
+            {
+                "stock_name": t.get("stock_name"),
+                "side": t.get("side"),
+                "quantity": t.get("quantity"),
+                "price": t.get("price"),
+                "executed_at": t.get("executed_at"),
+            }
+            for t in today_trades[:20]
+        ],
+        "portfolio_snapshot": [
+            {
+                "stock_name": p.get("stock_name"),
+                "quantity": p.get("quantity"),
+                "avg_price": p.get("avg_price"),
+                "current_price": p.get("current_price"),
+                "profit_rate": p.get("profit_rate"),
+                "eval_amount": p.get("eval_amount"),
+                "profit_loss": p.get("profit_loss"),
+            }
+            for p in portfolio[:20]
+        ],
+    }
+    rag_json = json.dumps(review_payload, ensure_ascii=False, indent=2)
+    review_text_human = (review_text or "").strip()
+    review_text_full = (
+        f"{review_text_human}\n\n"
+        f"---\n"
+        f"[RAG_CONTEXT_JSON]\n"
+        f"```json\n{rag_json}\n```"
+    )
+
+    # ── 전략노트 저장 (human + structured) ──
     summary = f"{today_str} 자동 복기"
-    save_strategy_note("daily_review", summary, review_text)
+    save_strategy_note("daily_review", summary, review_text_full)
     logger.info(f"[일일복기] 전략노트 저장 완료")
 
-    # ── 텔레그램 발송 (4000자 제한) ──
-    tg_text = f"📊 *{today_str} 일일 복기*\n\n{review_text}"
+    # ── 텔레그램 발송 (human-readable only) ──
+    tg_text = f"📊 *{today_str} 일일 복기*\n\n{review_text_human}"
     if len(tg_text) > 3900:
         tg_text = tg_text[:3900] + "\n\n_(이하 생략)_"
     send_message(tg_text)
     logger.info(f"[일일복기] 텔레그램 발송 완료")
-
 
 # ═══════════════════════════ watchlist 조건 재평가 ═══════════════════════════
 

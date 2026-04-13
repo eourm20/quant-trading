@@ -1,4 +1,4 @@
-"""
+﻿"""
 벡터 RAG 도구 — FAISS + OpenAI 임베딩 기반 텍스트 유사도 검색.
 
 대상: signals 테이블의 dart_summary + news_summary + triggered_conditions
@@ -16,6 +16,8 @@
 from __future__ import annotations
 import logging
 import os
+import json
+import re
 import threading
 from pathlib import Path
 from dotenv import load_dotenv
@@ -77,6 +79,7 @@ def _build_document(
     dart_summary: str | None,
     news_summary: str | None,
     indicator_snapshot: str | dict | None = None,
+    ai_response: str | None = None,
 ) -> str:
     """임베딩할 텍스트 조합."""
     import json as _json
@@ -98,6 +101,33 @@ def _build_document(
     if news_summary:
         parts.append(f"[뉴스] {news_summary[:300]}")
     return "\n".join(parts)
+
+
+def _extract_rag_json_summary(text: str | None, max_len: int = 600) -> str:
+    """Extract compact text from [RAG_CONTEXT_JSON] block if present."""
+    if not text:
+        return ""
+    raw = str(text)
+    m = re.search(r"\[RAG_CONTEXT_JSON\]\s*```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if not m:
+        return re.sub(r"\s+", " ", raw)[:max_len]
+    try:
+        obj = json.loads(m.group(1))
+        if isinstance(obj, dict):
+            keys = [
+                "stock_name", "stock_code", "recommendation", "reason",
+                "met_conditions", "rr_ratio", "current_price",
+            ]
+            parts = []
+            for k in keys:
+                if k in obj and obj[k] not in (None, "", []):
+                    parts.append(f"{k}:{obj[k]}")
+            if not parts:
+                parts = [f"{k}:{v}" for k, v in list(obj.items())[:8]]
+            return " | ".join(parts)[:max_len]
+    except Exception:
+        pass
+    return re.sub(r"\s+", " ", raw)[:max_len]
 
 
 def index_signal(
@@ -360,12 +390,16 @@ def index_screening_result(
     dart_summary: str | None = None,
     news_summary: str | None = None,
     indicator_snapshot: str | dict | None = None,
+    ai_response: str | None = None,
 ) -> bool:
     """스크리닝 결과 1건을 별도 FAISS 인덱스에 추가."""
     if not _OPENAI_KEY:
         return False
 
-    cond_text = f"추천:{recommendation} {reason or ''}"
+    ai_ctx = _extract_rag_json_summary(ai_response) if ai_response else ""
+    cond_text = f"recommendation:{recommendation} {reason or ''}"
+    if ai_ctx:
+        cond_text += f"\n[AI_CONTEXT] {ai_ctx}"
     document = _build_document(cond_text, dart_summary, news_summary, indicator_snapshot)
 
     try:
@@ -432,7 +466,7 @@ def search_similar_screening_context(query: str, n_results: int = 5) -> list[dic
         placeholders = ",".join("?" * len(valid_ids))
         with get_conn() as conn:
             rows = conn.execute(
-                f"""SELECT id, stock_name, recommendation, reason, dart_summary, news_summary
+                f"""SELECT id, stock_name, recommendation, reason, dart_summary, news_summary, ai_response
                     FROM screening_log WHERE id IN ({placeholders})""",
                 valid_ids,
             ).fetchall()
@@ -443,7 +477,11 @@ def search_similar_screening_context(query: str, n_results: int = 5) -> list[dic
             row = row_map.get(lid)
             if not row:
                 continue
-            preview = f"추천:{row.get('recommendation','')} {(row.get('reason') or '')[:100]}"
+            ai_ctx = _extract_rag_json_summary(row.get("ai_response"), max_len=180)
+            reason = (row.get("reason") or "")[:100]
+            preview = f"추천:{row.get('recommendation','')} {reason}"
+            if ai_ctx:
+                preview += f" | {ai_ctx}"
             output.append({
                 "log_id": lid,
                 "stock_name": row.get("stock_name"),
