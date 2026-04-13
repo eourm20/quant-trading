@@ -43,17 +43,17 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
 
     # 매매 내역
     try:
-        if getattr(client, "_is_mock", False):
-            # 모의투자: kt00015 미지원 → kt00007(당일 체결) 기반 동기화
+        # 주문/매매내역(kt00015) 우선 사용. 실패/미지원 시 체결내역(kt00007)로 fallback.
+        trades = client.get_trade_history(days=30)
+        if trades:
+            upsert_trades(trades)
+            result["trades"] = len(trades)
+            logger.info(f"매매 내역 동기화(kt00015) 완료: {len(trades)}건")
+        else:
             executions = client.get_executions()
             synced = upsert_trades_from_executions(executions)
             result["trades"] = int(synced or 0)
-            logger.info(f"매매 내역 동기화(모의/kt00007) 완료: {synced}건")
-        else:
-            trades = client.get_trade_history(days=30)
-            upsert_trades(trades)
-            result["trades"] = len(trades)
-            logger.info(f"매매 내역 동기화 완료: {len(trades)}건")
+            logger.info(f"매매 내역 동기화(fallback/kt00007) 완료: {synced}건")
     except Exception as e:
         result["errors"].append(f"매매 내역: {e}")
         logger.error(f"매매 내역 동기화 실패: {e}")

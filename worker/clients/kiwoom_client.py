@@ -342,10 +342,13 @@ class KiwoomClient:
             logger.warning(f"지수 조회 실패 ({market}): {e}")
             return {}
 
-    def get_trade_history(self, days: int = 30) -> list[dict]:
-        """매매 내역 조회 (kt00015, tp=3:매수 + tp=4:매도)"""
-        end_dt = datetime.now(tz=KST).strftime("%Y%m%d")
-        start_dt = (datetime.now(tz=KST) - timedelta(days=days)).strftime("%Y%m%d")
+    def get_trade_history_range(self, start_dt: str, end_dt: str) -> list[dict]:
+        """매매 내역 조회 (kt00015, tp=3:매수 + tp=4:매도, 기간 지정)."""
+        start_dt = str(start_dt or "").replace("-", "").strip()
+        end_dt = str(end_dt or "").replace("-", "").strip()
+        if not (len(start_dt) == 8 and start_dt.isdigit() and len(end_dt) == 8 and end_dt.isdigit()):
+            raise ValueError(f"잘못된 조회 기간: start_dt={start_dt}, end_dt={end_dt}")
+
         results = []
         for market in self._trade_history_markets:
             for tp in ("3", "4"):
@@ -369,6 +372,12 @@ class KiwoomClient:
                 except Exception as e:
                     logger.warning(f"매매 내역 조회 실패 (tp={tp}, market={market}): {e}")
         return results
+
+    def get_trade_history(self, days: int = 30) -> list[dict]:
+        """매매 내역 조회 (kt00015, tp=3:매수 + tp=4:매도)."""
+        end_dt = datetime.now(tz=KST).strftime("%Y%m%d")
+        start_dt = (datetime.now(tz=KST) - timedelta(days=days)).strftime("%Y%m%d")
+        return self.get_trade_history_range(start_dt, end_dt)
 
     @staticmethod
     def _to_num(value) -> float | None:
