@@ -111,7 +111,7 @@ class BaseAgent:
             return {"error": f"도구 없음: {name}"}
 
         label = getattr(tool, "label", name)
-        logger.info(f"[Agent] 도구 호출: {label} | 입력: {json.dumps(inputs, ensure_ascii=False)}")
+        # logger.info(f"[Agent] 도구 호출: {label} | 입력: {json.dumps(inputs, ensure_ascii=False)}")
         self._used_tools.append(label)
 
         try:
