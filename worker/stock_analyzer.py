@@ -1304,8 +1304,12 @@ def run_daily_screening():
             _kospi = _rate(_kw.get_market_index("kospi"))
             _t.sleep(0.5)
             _kosdaq = _rate(_kw.get_market_index("kosdaq"))
-            result = ResearchAgent().run(kospi_rate=_kospi, kosdaq_rate=_kosdaq)
+            _agent = ResearchAgent()
+            result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq)
             logger.info(f"[ResearchAgent 스크리닝] 완료\n{result[:300]}")
+            if _agent.used_tools:
+                from notifications.telegram import send_message as _send
+                _send(f"🔍 *스크리닝 분석 경로*\n{' → '.join(_agent.used_tools)}")
             return
         except Exception as _e:
             logger.warning(f"[스크리닝] ResearchAgent 실패, 레거시로 폴백: {_e}")
