@@ -82,22 +82,41 @@ def _print_sql_from_trade_rows(rows: list[dict]) -> int:
 
         if qty <= 0:
             continue
-        # 수동 보정 목적: 가격/금액이 0인 값은 출력해도 의미가 적어 제외
-        if price <= 0 and amount <= 0 and fee <= 0 and tax <= 0:
-            continue
 
         print(
-            "UPDATE trades SET "
-            f"executed_at={_sql_str(executed_at)}, "
-            f"stock_code={_sql_str(code)}, "
-            f"stock_name={_sql_str(stock_name)}, "
-            f"side={_sql_str(side)}, "
-            f"quantity={qty}, "
-            f"price={price}, "
-            f"amount={amount}, "
-            f"fee={fee}, "
-            f"tax={tax} "
-            f"WHERE trade_id={_sql_str(trade_id)};"
+            "INSERT INTO trades (trade_id, executed_at, stock_code, stock_name, side, quantity, price, amount, fee, tax) "
+            f"VALUES ({_sql_str(trade_id)}, {_sql_str(executed_at)}, {_sql_str(code)}, {_sql_str(stock_name)}, {_sql_str(side)}, {qty}, {price}, {amount}, {fee}, {tax}) "
+            "ON CONFLICT(trade_id) DO UPDATE SET "
+            "executed_at=excluded.executed_at, stock_code=excluded.stock_code, stock_name=excluded.stock_name, side=excluded.side, "
+            "quantity=excluded.quantity, price=excluded.price, amount=excluded.amount, fee=excluded.fee, tax=excluded.tax;"
+        )
+        printed += 1
+    return printed
+
+
+def _print_sql_from_execution_rows(rows: list[dict], ymd: str) -> int:
+    printed = 0
+    fallback_idx = 0
+    executed_day = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}" if len(ymd) == 8 and ymd.isdigit() else ymd
+    for e in rows or []:
+        code = str(e.get("stock_code") or "").replace("A", "").strip()
+        stock_name = str(e.get("stock_name") or "").strip()
+        side = str(e.get("side") or "").strip() or "매수"
+        qty = _to_int(e.get("quantity"))
+        price = _to_int(e.get("price"))
+        order_no = str(e.get("order_no") or "").strip()
+        if not code:
+            continue
+        if not order_no:
+            fallback_idx += 1
+            order_no = f"EXE-{ymd}-{code}-{side}-{fallback_idx}"
+        amount = qty * price
+        print(
+            "INSERT INTO trades (trade_id, executed_at, stock_code, stock_name, side, quantity, price, amount, fee, tax) "
+            f"VALUES ({_sql_str(order_no)}, {_sql_str(executed_day)}, {_sql_str(code)}, {_sql_str(stock_name)}, {_sql_str(side)}, {qty}, {price}, {amount}, 0, 0) "
+            "ON CONFLICT(trade_id) DO UPDATE SET "
+            "executed_at=excluded.executed_at, stock_code=excluded.stock_code, stock_name=excluded.stock_name, side=excluded.side, "
+            "quantity=excluded.quantity, price=excluded.price, amount=excluded.amount;"
         )
         printed += 1
     return printed
@@ -106,6 +125,8 @@ def _print_sql_from_trade_rows(rows: list[dict]) -> int:
 def run(start: str, end: str, print_sql: bool = False) -> dict:
     client = KiwoomClient()
     init_db()
+    db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "trading.db"))
+    logging.info("[백필] 대상 DB: %s", db_path)
 
     start_ymd = start.replace("-", "")
     end_ymd = end.replace("-", "")
@@ -132,6 +153,7 @@ def run(start: str, end: str, print_sql: bool = False) -> dict:
                 upsert_trades(trade_rows)
                 total_trades_rows += len(trade_rows)
                 if print_sql:
+                    print(f"-- {ymd} kt00015 rows={len(trade_rows)}")
                     total_printed_sql += _print_sql_from_trade_rows(trade_rows)
 
             # 2) 체결상세(kt00007)로 추가 보정
@@ -152,6 +174,10 @@ def run(start: str, end: str, print_sql: bool = False) -> dict:
                         continue
                     seen_order_no_dates.setdefault(no, ymd)
                 filtered_exec.append(e)
+
+            if print_sql and executions:
+                print(f"-- {ymd} kt00007 rows={len(executions)} filtered={len(filtered_exec)}")
+                total_printed_sql += _print_sql_from_execution_rows(filtered_exec, ymd)
 
             exec_cnt = len(filtered_exec)
             up_cnt = upsert_trades_from_executions(filtered_exec, executed_at=ymd)
