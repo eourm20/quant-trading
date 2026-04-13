@@ -73,7 +73,7 @@ class ExecuteOrderTool(BaseTool):
             "quantity": {"type": "integer", "description": "주문 수량"},
             "price": {
                 "type": "integer",
-                "description": "주문 가격 (0 = 시장가)",
+                "description": "주문 가격. 0 = 시장가(손절/긴급 매도 전용). 지정가 시 1 이상 입력하면 실제 현재가로 자동 강제됨.",
                 "default": 0,
             },
             "order_market": {

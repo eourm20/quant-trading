@@ -822,6 +822,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
 
     qty = None
     order_market = None
+    order_price = 0  # 기본 시장가
     for line in claude_opinion.splitlines():
         if line.strip().startswith("[추천수량]"):
             m = re.search(r"(\d+)\s*주", line)
@@ -834,6 +835,25 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
             if m:
                 order_market = m.group(1)
             break
+    for line in claude_opinion.splitlines():
+        if line.strip().startswith("[주문방식]") and "지정가" in line:
+            # 지정가 → 현재가로 설정 (슬리피지 방지)
+            if signal.current_price > 0:
+                order_price = signal.current_price
+
+    # 매도인데 추천수량 없으면 보유 전량으로 처리
+    if not qty and order_type == "2":
+        holdings = get_portfolio()
+        qty = next(
+            (int(h.get("quantity") or 0) for h in holdings
+             if str(h.get("stock_code", "")) == signal.stock_code),
+            0,
+        )
+        if qty > 0:
+            logger.info(f"[{signal.stock_name}] 매도 추천수량 미기재 → 보유 전량 {qty}주로 처리")
+        else:
+            logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
+            return
 
     if not qty:
         logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
@@ -855,9 +875,9 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
 
     # 하드캡: 매도 — 보유 수량 초과 방지
     if order_type == "2":
-        holdings = get_portfolio()
+        # 전량 매도 처리 시 위에서 이미 조회했을 수 있으나 재조회해도 무방 (캐시됨)
         held_qty = next(
-            (int(h.get("quantity") or 0) for h in holdings
+            (int(h.get("quantity") or 0) for h in get_portfolio()
              if str(h.get("stock_code", "")) == signal.stock_code),
             0,
         )
@@ -871,7 +891,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
             qty = held_qty
 
     try:
-        result = kiwoom.place_order(signal.stock_code, order_type, qty, order_market=order_market)
+        result = kiwoom.place_order(signal.stock_code, order_type, qty, price=order_price, order_market=order_market)
         ord_no = result.get("ord_no") or result.get("order_no") or "-"
         logger.info(
             f"[{signal.stock_name}] 자동 {side}: {qty}주, 주문시장 {order_market or '기본값'}, 주문번호 {ord_no}"

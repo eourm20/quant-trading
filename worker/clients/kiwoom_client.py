@@ -194,6 +194,81 @@ class KiwoomClient:
             results.extend(rows if isinstance(rows, list) else [])
         return results
 
+    def get_executions(self, stock_code: str = "") -> list[dict]:
+        """당일 체결 내역 조회 (kt00007 계좌별주문체결내역상세요청).
+        stock_code 지정 시 해당 종목만 필터링하여 반환.
+        반환: [{"stock_code", "stock_name", "side", "quantity", "price", "time"}, ...]
+        """
+        payload = self._post(
+            "/api/dostk/acnt",
+            "kt00007",
+            {"qry_tp": "1", "stk_bond_tp": "1", "sell_tp": "0", "dmst_stex_tp": "0"},
+        )
+        rows = payload.get("acnt_ord_cntr_prps_dtl", [])
+        if not isinstance(rows, list):
+            return []
+        result = []
+        for r in rows:
+            code = str(r.get("stk_cd") or "").strip().lstrip("A")
+            if stock_code and code != stock_code:
+                continue
+            io_nm = str(r.get("io_tp_nm") or "")
+            side = "매도" if "매도" in io_nm else "매수"
+
+            def _i(key):
+                return abs(int(str(r.get(key) or "0").replace(",", "").lstrip("0") or "0"))
+
+            result.append({
+                "stock_code": code,
+                "stock_name": str(r.get("stk_nm") or "").strip(),
+                "side": side,
+                "quantity": _i("cntr_qty"),    # 체결수량
+                "price": _i("cntr_uv"),        # 체결가격
+                "order_qty": _i("ord_qty"),    # 주문수량
+                "remain_qty": _i("ord_remnq"), # 잔량(미체결)
+                "time": str(r.get("cnfm_tm") or r.get("ord_tm") or ""),
+                "order_no": str(r.get("ord_no") or ""),
+                "market": str(r.get("dmst_stex_tp") or ""),
+            })
+        return result
+
+    def get_pending_orders(self, stock_code: str = "") -> list[dict]:
+        """당일 미체결 주문 조회 (ka10075 미체결요청).
+        stock_code 지정 시 해당 종목만 필터링하여 반환.
+        반환: [{"stock_code", "stock_name", "order_no", "side", "order_qty", "exec_qty", "remain_qty", "order_price", "time"}, ...]
+        """
+        payload = self._post(
+            "/api/dostk/acnt",
+            "ka10075",
+            {"all_stk_tp": "0", "stk_cd": stock_code, "trde_tp": "0", "stex_tp": "0"},
+        )
+        rows = payload.get("oso", [])
+        if not isinstance(rows, list):
+            return []
+        result = []
+        for r in rows:
+            code = str(r.get("stk_cd") or "").strip().lstrip("A")
+            if stock_code and code != stock_code:
+                continue
+            io_nm = str(r.get("io_tp_nm") or r.get("seln_byov_tp") or "")
+            side = "매도" if ("매도" in io_nm or io_nm == "1") else "매수"
+
+            def _i(key):
+                return abs(int(str(r.get(key) or "0").replace(",", "").lstrip("0") or "0"))
+
+            result.append({
+                "stock_code": code,
+                "stock_name": str(r.get("stk_nm") or "").strip(),
+                "order_no": str(r.get("ord_no") or ""),
+                "side": side,
+                "order_qty": _i("ord_qty"),
+                "exec_qty": _i("cntr_qty") or _i("exec_qty"),
+                "remain_qty": _i("ord_remnq") or _i("rema_qty"),
+                "order_price": _i("ord_uv"),
+                "time": str(r.get("ord_tm") or r.get("ord_tmd") or ""),
+            })
+        return result
+
     def get_deposit(self) -> dict:
         """주문 가능 예수금 조회 (kt00001 예수금상세현황요청).
         반환: {"deposit": int, "order_available": int}
@@ -376,6 +451,17 @@ class KiwoomClient:
           - 시간외단일가: 62
         """
         api_id = "kt10000" if order_type == "1" else "kt10001"
+        # 지정가 요청 시 항상 현재가로 강제 — 임의 금액 입력 방지
+        if price != 0:
+            try:
+                pd = self.get_current_price(stock_code)
+                real_price = abs(int(str(pd.get("cur_prc") or "0").replace(",", "")))
+                if real_price > 0:
+                    if real_price != price:
+                        logger.info(f"[주문] 지정가 {price:,}원 → 현재가 {real_price:,}원으로 강제 적용")
+                    price = real_price
+            except Exception as e:
+                logger.warning(f"[주문] 현재가 조회 실패, 요청 가격 {price:,}원 유지: {e}")
         trde_tp = self._get_trde_tp(price)
         # 시간외단일가(62): 지정가 필수 — 시장가 요청 시 현재가로 자동 변환
         if trde_tp == "62" and price == 0:

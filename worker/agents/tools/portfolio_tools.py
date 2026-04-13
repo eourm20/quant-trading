@@ -106,3 +106,38 @@ class GetPositionsTool(BaseTool):
             return {"positions": get_positions()}
         except Exception as e:
             return {"error": str(e)}
+
+
+class GetOrderStatusTool(BaseTool):
+    name = "get_order_status"
+    label = "당일 주문 현황 조회"
+    description = (
+        "당일 체결 내역과 미체결 주문을 Kiwoom에서 직접 조회합니다. "
+        "exit/add 신호 처리 시 이미 매도됐는지 확인하거나, "
+        "이전 주문이 체결됐는지 vs 아직 미체결로 남아 있는지 검증할 때 사용하세요. "
+        "stock_code를 지정하면 해당 종목만 필터링합니다."
+    )
+    input_schema = {
+        "properties": {
+            "stock_code": {
+                "type": "string",
+                "description": "특정 종목만 조회할 경우 종목 코드. 생략하면 전체 반환.",
+                "default": "",
+            },
+        },
+        "required": [],
+    }
+
+    def execute(self, stock_code: str = "") -> dict:
+        try:
+            kw = _kiwoom()
+            executions = kw.get_executions(stock_code=stock_code)
+            pending = kw.get_pending_orders(stock_code=stock_code)
+            return {
+                "executions": executions,
+                "executions_count": len(executions),
+                "pending_orders": pending,
+                "pending_count": len(pending),
+            }
+        except Exception as e:
+            return {"error": str(e)}

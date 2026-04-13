@@ -48,6 +48,7 @@ def load_judgment_tools() -> list[BaseTool]:
         GetPortfolioTool,
         GetDepositTool,
         GetPositionsTool,
+        GetOrderStatusTool,
     )
     from worker.agents.tools.info_tools import (
         GetNewsTool,
@@ -75,6 +76,7 @@ def load_judgment_tools() -> list[BaseTool]:
         GetPortfolioTool(),
         GetDepositTool(),
         GetPositionsTool(),
+        GetOrderStatusTool(),
         GetNewsTool(),
         GetDartTool(),
         GetMacroNewsTool(),
