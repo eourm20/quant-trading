@@ -185,12 +185,7 @@ class ScanVolumeSurgeTool(BaseTool):
     def execute(self, limit: int = 20) -> dict:
         try:
             kiwoom = _kiwoom()
-            payload = kiwoom._post(
-                "/api/dostk/stkinfo",
-                "ka10023",
-                {"mrkt_tp": "0", "sort_tp": "1"},
-            )
-            rows = payload.get("volm_surg_rnk_array", []) or []
+            rows = kiwoom.get_volume_surge() or []
             return {"stocks": rows[:limit]}
         except Exception as e:
             logger.warning("[ScanVolumeSurgeTool] 거래량 급증 스캔 실패: %s", e, exc_info=True)
@@ -218,12 +213,7 @@ class ScanForeignBuyTool(BaseTool):
     def execute(self, limit: int = 20) -> dict:
         try:
             kiwoom = _kiwoom()
-            payload = kiwoom._post(
-                "/api/dostk/stkinfo",
-                "ka10035",
-                {"mrkt_tp": "0", "sort_tp": "1"},
-            )
-            rows = payload.get("frgn_ntby_rnk_array", []) or []
+            rows = kiwoom.get_foreign_net_buy() or []
             return {"stocks": rows[:limit]}
         except Exception as e:
             logger.warning("[ScanForeignBuyTool] 외인 순매수 스캔 실패: %s", e, exc_info=True)
@@ -251,12 +241,7 @@ class ScanDeclineRankTool(BaseTool):
     def execute(self, limit: int = 20) -> dict:
         try:
             kiwoom = _kiwoom()
-            payload = kiwoom._post(
-                "/api/dostk/stkinfo",
-                "ka10027",
-                {"mrkt_tp": "0", "sort_tp": "2"},  # sort_tp=2: 하락률순
-            )
-            rows = payload.get("flu_rt_rnk_array", []) or []
+            rows = kiwoom.get_decline_rank() or []
             return {"stocks": rows[:limit]}
         except Exception as e:
             logger.warning("[ScanDeclineRankTool] 하락 종목 스캔 실패: %s", e, exc_info=True)
