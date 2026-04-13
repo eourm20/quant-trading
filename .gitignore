@@ -17,3 +17,9 @@ trading_real.db
 .claude/
 .dart_cache/
 data/faiss_index.bin
+data/faiss_screening_index.bin
+data/faiss_news_index.bin
+data/faiss_market_regime_index.bin
+data/faiss_postmortem_index.bin
+data/faiss_tool_trace_index.bin
+data/faiss_watchlist_decision_index.bin

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Research Agent: 장 마감 후 유망 종목 발굴.
 """
 
@@ -32,7 +32,7 @@ _SYSTEM_PROMPT = """당신은 개인 투자자의 퀀트 트레이딩 시스템�
 - 도구 사용 순서는 고정하지 말고 상황에 맞게 선택
 - 등록 여부는 확인된 데이터 기반으로만 판단
 - 애매하면 보류 또는 미등록
-- 유사 사례가 필요하면 search_screening_context / search_text_context / search_similar_signals 활용
+- 유사 사례가 필요하면 search_screening_context / search_text_context / search_similar_signals / search_agent_memory_context 활용
 
 ## 출력 형식
 분석한 종목별로:
@@ -174,6 +174,7 @@ class ResearchAgent:
         """
         limit = max(1, int(max_candidates or 1))
         self._agent.configure_tool("add_to_watchlist", max_additions=limit, addition_count=0)
+        self._agent.configure_run(target_unique_tools=7)
         perf_summary = self._build_performance_summary()
 
         initial_message = f"""## 오늘 시장 환경
@@ -194,14 +195,19 @@ Output format constraints (keep concise):
 - Maximum 12 lines total.
 - For each selected stock, output only: "<stock>(<code>): decision" / "reason" / "watchlist: done|not added(reason)".
 - No long background explanation, no duplicated wording.
+Tool coverage constraints:
+- Use at least 7 distinct tools before final answer, unless hard failures occur.
+- Include at least one memory/history tool among: search_agent_memory_context, search_screening_context, search_text_context, search_similar_signals, get_screening_history.
+- If scan APIs fail, compensate with history/memory/performance tools instead of stopping early.
+- Fallback chain when scan fails: search_agent_memory_context -> get_screening_history -> get_trade_performance -> search_text_context.
 이미 watchlist에 있는 종목은 건너뛰어도 됩니다."""
 
         result = self._agent.run(initial_message)
         result = self._compact_result(result)
 
-        if self._agent._used_tools:
-            tools_summary = " -> ".join(self._agent._used_tools)
-            logger.info(f"[ResearchAgent] 분석 과정: {tools_summary}")
+        tools_summary = " -> ".join(self._agent._used_tools) if self._agent._used_tools else "none"
+        logger.info(f"[ResearchAgent] 분석 과정: {tools_summary}")
+        logger.info(f"[ResearchAgent] tool_coverage_score: {self._agent.coverage_score}")
 
         return result
 
@@ -215,3 +221,8 @@ Output format constraints (keep concise):
         if not tool:
             return 0
         return int(getattr(tool, "addition_count", 0) or 0)
+
+    @property
+    def coverage_score(self) -> str:
+        return self._agent.coverage_score
+

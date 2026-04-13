@@ -1468,6 +1468,7 @@ def run_daily_screening():
             logger.info(f"[ResearchAgent Screening] completed\n{result[:300]}")
             from notifications.telegram import send_message as _send
             tools_summary = " -> ".join(_agent.used_tools) if _agent.used_tools else "none"
+            coverage_score = getattr(_agent, "coverage_score", "N/A")
             result_text = (result or "").strip() or "(empty result)"
             summary_text = _build_agent_telegram_summary(result_text)
             added_count = int(getattr(_agent, "addition_count", 0) or 0)
@@ -1479,6 +1480,7 @@ def run_daily_screening():
             msg = (
                 f"[ResearchAgent Screening] completed\n"
                 f"- tools: {tools_summary}\n"
+                f"- tool_coverage_score: {coverage_score}\n"
                 f"- add_to_watchlist: {status_line}\n\n"
                 f"{summary_text}"
             )
@@ -1491,13 +1493,61 @@ def run_daily_screening():
                 _save_strategy_note(
                     "watchlist",
                     "ResearchAgent daily screening completed",
-                    f"tools={tools_summary}\nadded_count={added_count}\n\n{result_text[:3000]}",
+                    f"tools={tools_summary}\ntool_coverage_score={coverage_score}\nadded_count={added_count}\n\n{result_text[:3000]}",
                 )
+                try:
+                    from worker.agents.tools.rag_tools import (
+                        index_tool_trace_memory as _index_tool_trace_memory,
+                        index_market_regime_memory as _index_market_regime_memory,
+                        index_postmortem_memory as _index_postmortem_memory,
+                    )
+                    _trace_text = (
+                        f"tools={tools_summary} | add_to_watchlist={added_count} | "
+                        f"kospi={_kospi:+.2f}% kosdaq={_kosdaq:+.2f}%"
+                    )
+                    _index_tool_trace_memory(
+                        source_key=f"agent_screening_trace:{now_kst().strftime('%Y%m%d_%H%M%S')}",
+                        tool_trace=_trace_text,
+                        extra={"mode": "agent", "status": "success"},
+                    )
+                    _index_market_regime_memory(
+                        source_key=f"agent_market:{now_kst().strftime('%Y%m%d_%H%M%S')}",
+                        market_snapshot=f"KOSPI={_kospi:+.2f}% KOSDAQ={_kosdaq:+.2f}% tools={tools_summary}",
+                        extra={"mode": "agent"},
+                    )
+                    if added_count <= 0:
+                        _index_postmortem_memory(
+                            source_key=f"agent_zero_add:{now_kst().strftime('%Y%m%d_%H%M%S')}",
+                            title="ResearchAgent zero additions",
+                            content=f"{_trace_text}\n{result_text[:2000]}",
+                            extra={"mode": "agent", "type": "zero_add"},
+                        )
+                except Exception as _rag_e:
+                    logger.warning(f"[ResearchAgent Screening] memory index failed: {_rag_e}")
             except Exception as _note_e:
                 logger.warning(f"[ResearchAgent Screening] strategy_note save failed: {_note_e}")
             return
         except Exception as _e:
             logger.warning(f"[스크리닝] ResearchAgent 실패(에이전트 단독 모드): {_e}")
+            try:
+                from worker.agents.tools.rag_tools import (
+                    index_postmortem_memory as _index_postmortem_memory,
+                    index_tool_trace_memory as _index_tool_trace_memory,
+                )
+                _err = str(_e)[:600]
+                _index_postmortem_memory(
+                    source_key=f"agent_failure:{now_kst().strftime('%Y%m%d_%H%M%S')}",
+                    title="ResearchAgent screening failed",
+                    content=_err,
+                    extra={"mode": "agent", "type": "exception"},
+                )
+                _index_tool_trace_memory(
+                    source_key=f"agent_failure_trace:{now_kst().strftime('%Y%m%d_%H%M%S')}",
+                    tool_trace=f"research_agent_failed error={_err}",
+                    extra={"mode": "agent", "type": "exception"},
+                )
+            except Exception:
+                pass
             try:
                 from notifications.telegram import send_message as _send
                 _send(

@@ -1,4 +1,4 @@
-"""
+﻿"""
 BaseAgent — Tool Use 루프 공통 구현 (OpenAI Function Calling 기반).
 
 흐름:
@@ -42,12 +42,16 @@ class BaseAgent:
         from worker.agents.tools.registry import build_schema
         self._tool_schemas = [build_schema(t) for t in tools]
         self._tool_map = {t.name: t for t in tools}
+        self._available_tool_names = [t.name for t in tools if getattr(t, "name", "")]
         self._system_prompt = self._compose_system_prompt(system_prompt, tools)
         self._model = model
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._used_tools: list[str] = []
+        self._used_tool_names: list[str] = []
         self._reasoning_steps: list[str] = []
+        self._target_unique_tools: int = 0
+        self._diversity_nudge_used: bool = False
 
     def _compose_system_prompt(self, base_prompt: str, tools: list) -> str:
         """Attach a compact tool guide so model can choose tools more autonomously."""
@@ -82,6 +86,7 @@ class BaseAgent:
             "search_similar_signals": "이력/RAG/통계",
             "search_text_context": "이력/RAG/통계",
             "search_screening_context": "이력/RAG/통계",
+            "search_agent_memory_context": "이력/RAG/통계",
             "get_screening_history": "이력/RAG/통계",
             "get_trade_performance": "이력/RAG/통계",
             "get_condition_accuracy": "이력/RAG/통계",
@@ -114,6 +119,9 @@ class BaseAgent:
             "- 호출 순서는 고정하지 말고 불확실성 감소 효과가 큰 도구부터 사용.",
             "- 이력/RAG는 보조 도구이며 1차 사실 확인(시세·차트·포지션·뉴스) 대체 금지.",
         ]
+        lines.append("- Rule of thumb: use tools that reduce uncertainty fastest.")
+        lines.append("- If one API fails, switch to a complementary tool and continue.")
+        lines.append("- Avoid repeated same-tool calls unless parameters materially differ.")
 
         for cat in category_order:
             items = grouped.get(cat) or []
@@ -145,6 +153,22 @@ class BaseAgent:
         for key, value in attrs.items():
             setattr(tool, key, value)
 
+    def configure_run(self, target_unique_tools: int = 0) -> None:
+        """Configure per-run soft guardrails (no hard enforcement)."""
+        self._target_unique_tools = max(0, int(target_unique_tools or 0))
+        self._diversity_nudge_used = False
+
+    @property
+    def unique_tool_count(self) -> int:
+        return len(set(self._used_tool_names))
+
+    @property
+    def coverage_score(self) -> str:
+        total = len(self._available_tool_names) or 1
+        used = self.unique_tool_count
+        pct = int(round((used / total) * 100))
+        return f"{used}/{total} ({pct}%)"
+
     def run(self, initial_message: str) -> str:
         """Agent 루프 실행 후 최종 텍스트 반환."""
         messages = [
@@ -152,7 +176,9 @@ class BaseAgent:
             {"role": "user",   "content": initial_message},
         ]
         self._used_tools = []
+        self._used_tool_names = []
         self._reasoning_steps = []
+        self._diversity_nudge_used = False
 
         for step in range(self._max_steps):
             response = _client.chat.completions.create(
@@ -166,6 +192,26 @@ class BaseAgent:
 
             # 최종 응답
             if choice.finish_reason == "stop":
+                unique_tool_count = len(set(self._used_tool_names))
+                if self._target_unique_tools > 0 and unique_tool_count < self._target_unique_tools:
+                    logger.info(
+                        f"[Agent] soft-guardrail: low tool diversity "
+                        f"({unique_tool_count}/{self._target_unique_tools})"
+                    )
+                    # Soft nudge only once: offer one extra exploration turn, then accept final answer.
+                    if not self._diversity_nudge_used and step < (self._max_steps - 1):
+                        self._diversity_nudge_used = True
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Tool coverage is currently {unique_tool_count}/{self._target_unique_tools}. "
+                                    "Please do one more brief cross-check with complementary tools before finalizing. "
+                                    "If a tool fails or is unsupported, use an alternative and proceed."
+                                ),
+                            }
+                        )
+                        continue
                 return choice.message.content or ""
 
             # 도구 호출
@@ -210,6 +256,7 @@ class BaseAgent:
         label = getattr(tool, "label", name)
         # logger.info(f"[Agent] 도구 호출: {label} | 입력: {json.dumps(inputs, ensure_ascii=False)}")
         self._used_tools.append(label)
+        self._used_tool_names.append(name)
 
         try:
             result = tool.execute(**inputs)

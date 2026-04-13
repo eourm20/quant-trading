@@ -1,4 +1,4 @@
-"""
+﻿"""
 Judgment Agent — 신호 수신 시 AI가 도구를 스스로 호출하여 매수/매도/홀드 판단.
 
 기존 claude_judge.get_trade_opinion()의 Agent 버전.
@@ -89,6 +89,8 @@ class JudgmentAgent:
         is_holding = signal.in_portfolio
         signal_type = signal.signal_type
 
+        self._agent.configure_run(target_unique_tools=5)
+
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})
 - 신호 유형: {signal_type_label}
@@ -100,14 +102,13 @@ class JudgmentAgent:
 - 매매 기간(horizon): {horizon or '미설정'}
 - 보유 여부: {'보유 중' if is_holding else '미보유'}
 
-상황을 파악하고 필요한 도구를 직접 선택하여 매매 판단을 내려주세요."""
+상황을 파악하고 필요한 도구를 직접 선택하여 매매 판단을 내려주세요.
+Fallback chain if primary tool fails: search_agent_memory_context -> search_similar_signals -> get_trade_performance -> search_text_context."""
 
         opinion = self._agent.run(initial_message)
-
-        if self._agent._used_tools:
-            tools_summary = " → ".join(self._agent._used_tools)
-            logger.info(f"[JudgmentAgent] {signal.stock_name} 분석 과정: {tools_summary}")
-
+        tools_summary = " -> ".join(self._agent._used_tools) if self._agent._used_tools else "none"
+        logger.info(f"[JudgmentAgent] {signal.stock_name} analysis flow: {tools_summary}")
+        logger.info(f"[JudgmentAgent] tool_coverage_score: {self._agent.coverage_score}")
         return opinion
 
     @property
@@ -117,3 +118,8 @@ class JudgmentAgent:
     @property
     def reasoning_chain(self) -> list[str]:
         return list(self._agent._reasoning_steps)
+
+    @property
+    def coverage_score(self) -> str:
+        return self._agent.coverage_score
+

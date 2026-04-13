@@ -19,6 +19,7 @@ import os
 import json
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -29,9 +30,161 @@ logger = logging.getLogger(__name__)
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 _INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_index.bin')
 _INDEX_LOCK = threading.Lock()
+_NEWS_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_news_index.bin')
+_MARKET_REGIME_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_market_regime_index.bin')
+_POSTMORTEM_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_postmortem_index.bin')
+_TOOL_TRACE_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_tool_trace_index.bin')
+_WATCHLIST_DECISION_INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data', 'faiss_watchlist_decision_index.bin')
 
 EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIM = 1536  # text-embedding-3-small 차원
+KST = datetime.now().astimezone().tzinfo
+
+
+def _ensure_memory_tables() -> None:
+    from data.db import get_conn
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_memory_docs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT UNIQUE NOT NULL,
+                memory_type TEXT NOT NULL,
+                ref_table TEXT DEFAULT NULL,
+                ref_id INTEGER DEFAULT NULL,
+                created_at TEXT NOT NULL,
+                stock_code TEXT DEFAULT NULL,
+                stock_name TEXT DEFAULT NULL,
+                title TEXT DEFAULT NULL,
+                content TEXT NOT NULL,
+                extra_json TEXT DEFAULT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_memory_type_date ON rag_memory_docs (memory_type, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_memory_stock_date ON rag_memory_docs (stock_code, created_at)")
+        conn.commit()
+
+
+def _upsert_memory_doc(
+    source_key: str,
+    memory_type: str,
+    content: str,
+    created_at: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    stock_code: str | None = None,
+    stock_name: str | None = None,
+    title: str | None = None,
+    extra: dict | None = None,
+) -> int:
+    from data.db import get_conn, _now_kst
+
+    _ensure_memory_tables()
+    created = created_at or _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    extra_json = json.dumps(extra or {}, ensure_ascii=False) if extra else None
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM rag_memory_docs WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """UPDATE rag_memory_docs
+                   SET memory_type=?, ref_table=?, ref_id=?, created_at=?, stock_code=?, stock_name=?,
+                       title=?, content=?, extra_json=?
+                   WHERE source_key=?""",
+                (
+                    memory_type, ref_table, ref_id, created, stock_code, stock_name,
+                    title, content, extra_json, source_key,
+                ),
+            )
+            conn.commit()
+            return int(row["id"])
+
+        cur = conn.execute(
+            """INSERT INTO rag_memory_docs
+               (source_key, memory_type, ref_table, ref_id, created_at, stock_code, stock_name, title, content, extra_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_key, memory_type, ref_table, ref_id, created,
+                stock_code, stock_name, title, content, extra_json,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def _parse_dt(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _recency_weight(created_at: str | None) -> float:
+    dt = _parse_dt(created_at)
+    if not dt:
+        return 1.0
+    now = datetime.now()
+    age_days = max(0.0, (now - dt).total_seconds() / 86400.0)
+    # 0d=1.15, 7d~1.08, 30d~1.0, 90d~0.9, 180d~0.8
+    return max(0.75, 1.15 - min(age_days, 180.0) * 0.002)
+
+
+def _lexical_score(query: str, text: str) -> float:
+    q = set(re.findall(r"[A-Za-z0-9가-힣_]+", (query or "").lower()))
+    d = set(re.findall(r"[A-Za-z0-9가-힣_]+", (text or "").lower()))
+    if not q or not d:
+        return 0.0
+    return len(q & d) / max(1.0, len(q))
+
+
+def _load_or_create_index(path: str):
+    import faiss
+
+    p = Path(path)
+    if p.exists():
+        return faiss.read_index(str(p))
+    flat = faiss.IndexFlatIP(EMBED_DIM)
+    return faiss.IndexIDMap(flat)
+
+
+def _save_index_to_path(index, path: str) -> None:
+    import faiss
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(index, str(p))
+
+
+def _index_memory_document(index_path: str, doc_id: int, document: str) -> bool:
+    try:
+        import faiss
+        import numpy as np
+
+        vec = np.array([_embed(document)], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        ids = np.array([doc_id], dtype=np.int64)
+
+        with _INDEX_LOCK:
+            index = _load_or_create_index(index_path)
+            try:
+                index.remove_ids(ids)
+            except Exception:
+                pass
+            index.add_with_ids(vec, ids)
+            _save_index_to_path(index, index_path)
+        return True
+    except Exception as e:
+        logger.warning(f"[RAG-memory] index failed path={index_path} doc_id={doc_id}: {e}")
+        return False
 
 
 # ── 임베딩 ────────────────────────────────────────────────────────────────────
@@ -166,6 +319,24 @@ def index_signal(
             _save_index(index)
 
         logger.debug(f"[RAG] 인덱싱 완료: signal_id={signal_id} ({stock_name})")
+        # Extra memory indices for agent retrieval.
+        if news_summary:
+            index_news_memory(
+                source_key=f"signals_news:{signal_id}",
+                title=f"{stock_name} signal news",
+                content=news_summary,
+                ref_table="signals",
+                ref_id=signal_id,
+                stock_name=stock_name,
+            )
+        trace = f"signal_type={signal_type} verdict={verdict or ""} conditions={triggered_conditions or ""}"
+        index_tool_trace_memory(
+            source_key=f"signals_trace:{signal_id}",
+            tool_trace=trace,
+            ref_table="signals",
+            ref_id=signal_id,
+            stock_name=stock_name,
+        )
         return True
 
     except Exception as e:
@@ -301,6 +472,380 @@ def get_index_stats() -> dict:
 
 # ── Agent 도구 ─────────────────────────────────────────────────────────────────
 
+
+def index_news_memory(
+    source_key: str,
+    title: str,
+    content: str,
+    created_at: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    stock_code: str | None = None,
+    stock_name: str | None = None,
+) -> bool:
+    text = re.sub(r"\s+", " ", f"{title or ''}\n{content or ''}").strip()
+    if not text:
+        return False
+    doc_id = _upsert_memory_doc(
+        source_key=source_key,
+        memory_type="news",
+        ref_table=ref_table,
+        ref_id=ref_id,
+        created_at=created_at,
+        stock_code=stock_code,
+        stock_name=stock_name,
+        title=title,
+        content=text[:3000],
+    )
+    return _index_memory_document(_NEWS_INDEX_PATH, doc_id, text[:3000])
+
+
+def index_market_regime_memory(
+    source_key: str,
+    market_snapshot: str,
+    created_at: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    extra: dict | None = None,
+) -> bool:
+    text = re.sub(r"\s+", " ", market_snapshot or "").strip()
+    if not text:
+        return False
+    doc_id = _upsert_memory_doc(
+        source_key=source_key,
+        memory_type="market_regime",
+        ref_table=ref_table,
+        ref_id=ref_id,
+        created_at=created_at,
+        title="market regime",
+        content=text[:3000],
+        extra=extra,
+    )
+    return _index_memory_document(_MARKET_REGIME_INDEX_PATH, doc_id, text[:3000])
+
+
+def index_postmortem_memory(
+    source_key: str,
+    title: str,
+    content: str,
+    created_at: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    extra: dict | None = None,
+) -> bool:
+    text = re.sub(r"\s+", " ", f"{title or ''}\n{content or ''}").strip()
+    if not text:
+        return False
+    doc_id = _upsert_memory_doc(
+        source_key=source_key,
+        memory_type="postmortem",
+        ref_table=ref_table,
+        ref_id=ref_id,
+        created_at=created_at,
+        title=title,
+        content=text[:4000],
+        extra=extra,
+    )
+    return _index_memory_document(_POSTMORTEM_INDEX_PATH, doc_id, text[:4000])
+
+
+def index_tool_trace_memory(
+    source_key: str,
+    tool_trace: str,
+    created_at: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    stock_code: str | None = None,
+    stock_name: str | None = None,
+    extra: dict | None = None,
+) -> bool:
+    text = re.sub(r"\s+", " ", tool_trace or "").strip()
+    if not text:
+        return False
+    doc_id = _upsert_memory_doc(
+        source_key=source_key,
+        memory_type="tool_trace",
+        ref_table=ref_table,
+        ref_id=ref_id,
+        created_at=created_at,
+        stock_code=stock_code,
+        stock_name=stock_name,
+        title="tool trace",
+        content=text[:3000],
+        extra=extra,
+    )
+    return _index_memory_document(_TOOL_TRACE_INDEX_PATH, doc_id, text[:3000])
+
+
+def index_watchlist_decision_memory(
+    source_key: str,
+    stock_code: str,
+    stock_name: str,
+    recommendation: str,
+    reason: str,
+    created_at: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    ai_response: str | None = None,
+    extra: dict | None = None,
+) -> bool:
+    ai_ctx = _extract_rag_json_summary(ai_response, max_len=350) if ai_response else ""
+    text = f"stock:{stock_name}({stock_code}) recommendation:{recommendation} reason:{reason}"
+    if ai_ctx:
+        text += f" ai:{ai_ctx}"
+    doc_id = _upsert_memory_doc(
+        source_key=source_key,
+        memory_type="watchlist_decision",
+        ref_table=ref_table,
+        ref_id=ref_id,
+        created_at=created_at,
+        stock_code=stock_code,
+        stock_name=stock_name,
+        title=f"{stock_name} decision",
+        content=text[:3500],
+        extra=extra,
+    )
+    return _index_memory_document(_WATCHLIST_DECISION_INDEX_PATH, doc_id, text[:3500])
+
+
+def _search_memory_index(index_path: str, memory_type: str, query: str, n_results: int = 5) -> list[dict]:
+    if not _OPENAI_KEY:
+        return []
+    p = Path(index_path)
+    if not p.exists():
+        return []
+    try:
+        import faiss
+        import numpy as np
+        from data.db import get_conn
+
+        index = faiss.read_index(str(p))
+        if index.ntotal == 0:
+            return []
+
+        vec = np.array([_embed(query)], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        k = min(max(1, int(n_results * 2)), index.ntotal)
+        scores, ids = index.search(vec, k)
+        valid_ids = [int(i) for i in ids[0] if i >= 0]
+        if not valid_ids:
+            return []
+
+        placeholders = ",".join("?" * len(valid_ids))
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"""SELECT id, created_at, stock_code, stock_name, title, content, extra_json
+                    FROM rag_memory_docs
+                    WHERE memory_type = ? AND id IN ({placeholders})""",
+                [memory_type, *valid_ids],
+            ).fetchall()
+
+        row_map = {int(r["id"]): dict(r) for r in rows}
+        out = []
+        for i, rid in enumerate(valid_ids):
+            row = row_map.get(rid)
+            if not row:
+                continue
+            vec_score = float(scores[0][i])
+            lex = _lexical_score(query, f"{row.get('title') or ''} {row.get('content') or ''}")
+            recency = _recency_weight(row.get("created_at"))
+            hybrid = (0.75 * vec_score + 0.25 * lex) * recency
+            out.append(
+                {
+                    "memory_id": rid,
+                    "memory_type": memory_type,
+                    "created_at": row.get("created_at"),
+                    "stock_code": row.get("stock_code"),
+                    "stock_name": row.get("stock_name"),
+                    "title": row.get("title"),
+                    "similarity": round(vec_score, 4),
+                    "hybrid_score": round(hybrid, 4),
+                    "context_preview": re.sub(r"\s+", " ", row.get("content") or "")[:220],
+                }
+            )
+        out.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        return out[:n_results]
+    except Exception as e:
+        logger.warning(f"[RAG-memory] search failed type={memory_type}: {e}")
+        return []
+
+
+def search_news_context(query: str, n_results: int = 5) -> list[dict]:
+    return _search_memory_index(_NEWS_INDEX_PATH, "news", query, n_results=n_results)
+
+
+def search_market_regime_context(query: str, n_results: int = 5) -> list[dict]:
+    return _search_memory_index(_MARKET_REGIME_INDEX_PATH, "market_regime", query, n_results=n_results)
+
+
+def search_postmortem_context(query: str, n_results: int = 5) -> list[dict]:
+    return _search_memory_index(_POSTMORTEM_INDEX_PATH, "postmortem", query, n_results=n_results)
+
+
+def search_tool_trace_context(query: str, n_results: int = 5) -> list[dict]:
+    return _search_memory_index(_TOOL_TRACE_INDEX_PATH, "tool_trace", query, n_results=n_results)
+
+
+def search_watchlist_decision_context(query: str, n_results: int = 5) -> list[dict]:
+    return _search_memory_index(_WATCHLIST_DECISION_INDEX_PATH, "watchlist_decision", query, n_results=n_results)
+
+
+def search_agent_memory_context(query: str, n_results: int = 6) -> list[dict]:
+    buckets = [
+        *search_news_context(query, n_results=max(2, n_results // 2)),
+        *search_market_regime_context(query, n_results=max(2, n_results // 2)),
+        *search_postmortem_context(query, n_results=max(2, n_results // 2)),
+        *search_tool_trace_context(query, n_results=max(2, n_results // 2)),
+        *search_watchlist_decision_context(query, n_results=max(2, n_results // 2)),
+    ]
+    buckets.sort(key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
+    return buckets[:n_results]
+
+
+def bulk_index_agent_memory(days: int = 180) -> dict:
+    from data.db import get_conn
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    kst = ZoneInfo("Asia/Seoul")
+    since = (datetime.now(tz=kst) - timedelta(days=days)).strftime("%Y-%m-%d")
+    counts = {
+        "news": 0,
+        "market_regime": 0,
+        "postmortem": 0,
+        "tool_trace": 0,
+        "watchlist_decision": 0,
+    }
+
+    with get_conn() as conn:
+        s_rows = conn.execute(
+            """SELECT id, created_at, stock_code, stock_name, news_summary, tool_sequence, reasoning_chain
+               FROM signals
+               WHERE created_at >= ?""",
+            (since,),
+        ).fetchall()
+        sc_rows = conn.execute(
+            """SELECT id, created_at, stock_code, stock_name, recommendation, reason, ai_response, news_summary, market_snapshot
+               FROM screening_log
+               WHERE created_at >= ?""",
+            (since,),
+        ).fetchall()
+        note_rows = conn.execute(
+            """SELECT id, created_at, category, summary, detail
+               FROM strategy_notes
+               WHERE created_at >= ?""",
+            (since,),
+        ).fetchall()
+
+    for r in s_rows:
+        sid = int(r["id"])
+        if r["news_summary"]:
+            if index_news_memory(
+                source_key=f"signals_news:{sid}",
+                title=f"{r['stock_name'] or ''} news",
+                content=r["news_summary"],
+                created_at=r["created_at"],
+                ref_table="signals",
+                ref_id=sid,
+                stock_code=r["stock_code"],
+                stock_name=r["stock_name"],
+            ):
+                counts["news"] += 1
+        trace = " -> ".join([x for x in [r.get("tool_sequence"), r.get("reasoning_chain")] if x])
+        if trace:
+            if index_tool_trace_memory(
+                source_key=f"signals_trace:{sid}",
+                tool_trace=trace,
+                created_at=r["created_at"],
+                ref_table="signals",
+                ref_id=sid,
+                stock_code=r["stock_code"],
+                stock_name=r["stock_name"],
+            ):
+                counts["tool_trace"] += 1
+
+    for r in sc_rows:
+        lid = int(r["id"])
+        if r["news_summary"]:
+            if index_news_memory(
+                source_key=f"screening_news:{lid}",
+                title=f"{r['stock_name'] or ''} screening news",
+                content=r["news_summary"],
+                created_at=r["created_at"],
+                ref_table="screening_log",
+                ref_id=lid,
+                stock_code=r["stock_code"],
+                stock_name=r["stock_name"],
+            ):
+                counts["news"] += 1
+
+        if r["market_snapshot"]:
+            if index_market_regime_memory(
+                source_key=f"screening_market:{lid}",
+                market_snapshot=r["market_snapshot"],
+                created_at=r["created_at"],
+                ref_table="screening_log",
+                ref_id=lid,
+                extra={"stock_name": r["stock_name"]},
+            ):
+                counts["market_regime"] += 1
+
+        if index_watchlist_decision_memory(
+            source_key=f"screening_decision:{lid}",
+            stock_code=r["stock_code"] or "",
+            stock_name=r["stock_name"] or "",
+            recommendation=r["recommendation"] or "",
+            reason=r["reason"] or "",
+            created_at=r["created_at"],
+            ref_table="screening_log",
+            ref_id=lid,
+            ai_response=r["ai_response"],
+        ):
+            counts["watchlist_decision"] += 1
+
+        ai_ctx = _extract_rag_json_summary(r["ai_response"], max_len=500) if r["ai_response"] else ""
+        trace = f"recommendation={r['recommendation'] or ''} reason={r['reason'] or ''} {ai_ctx}".strip()
+        if trace:
+            if index_tool_trace_memory(
+                source_key=f"screening_trace:{lid}",
+                tool_trace=trace,
+                created_at=r["created_at"],
+                ref_table="screening_log",
+                ref_id=lid,
+                stock_code=r["stock_code"],
+                stock_name=r["stock_name"],
+            ):
+                counts["tool_trace"] += 1
+
+    for r in note_rows:
+        nid = int(r["id"])
+        cat = (r["category"] or "").lower()
+        text = f"{r['summary'] or ''}\n{r['detail'] or ''}"
+        if not text.strip():
+            continue
+        if cat in ("daily_review", "postmortem", "review"):
+            if index_postmortem_memory(
+                source_key=f"note_postmortem:{nid}",
+                title=r["summary"] or "daily review",
+                content=text,
+                created_at=r["created_at"],
+                ref_table="strategy_notes",
+                ref_id=nid,
+                extra={"category": r["category"]},
+            ):
+                counts["postmortem"] += 1
+        if cat in ("watchlist", "market", "screening"):
+            if index_market_regime_memory(
+                source_key=f"note_market:{nid}",
+                market_snapshot=text,
+                created_at=r["created_at"],
+                ref_table="strategy_notes",
+                ref_id=nid,
+                extra={"category": r["category"]},
+            ):
+                counts["market_regime"] += 1
+
+    return counts
 from worker.agents.tools.registry import BaseTool
 
 
@@ -426,6 +971,34 @@ def index_screening_result(
             faiss.write_index(index, str(path))
 
         logger.debug(f"[RAG-screening] 인덱싱 완료: log_id={log_id} ({stock_name}) → {recommendation}")
+        if news_summary:
+            index_news_memory(
+                source_key=f"screening_news:{log_id}",
+                title=f"{stock_name} screening news",
+                content=news_summary,
+                ref_table="screening_log",
+                ref_id=log_id,
+                stock_name=stock_name,
+            )
+        index_watchlist_decision_memory(
+            source_key=f"screening_decision:{log_id}",
+            stock_code="",
+            stock_name=stock_name,
+            recommendation=recommendation,
+            reason=reason or "",
+            ref_table="screening_log",
+            ref_id=log_id,
+            ai_response=ai_response,
+        )
+        trace = f"recommendation={recommendation} reason={reason or ''} {ai_ctx}".strip()
+        if trace:
+            index_tool_trace_memory(
+                source_key=f"screening_trace:{log_id}",
+                tool_trace=trace,
+                ref_table="screening_log",
+                ref_id=log_id,
+                stock_name=stock_name,
+            )
         return True
 
     except Exception as e:
@@ -526,6 +1099,40 @@ class SearchScreeningContextTool(BaseTool):
             return {"error": "OPENAI_API_KEY 미설정"}
         try:
             results = search_similar_screening_context(query, n_results=n_results)
+            return {"count": len(results), "results": results}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class SearchAgentMemoryContextTool(BaseTool):
+    """Hybrid retrieval over multi-index agent memory."""
+
+    name = "search_agent_memory_context"
+    label = "에이전트 메모리 검색"
+    description = (
+        "뉴스/장세/복기/툴실행흔적/워치리스트결정의 통합 메모리에서 유사 문맥을 찾습니다. "
+        "벡터 유사도 + 키워드 중첩 + 최근성 가중치가 함께 반영됩니다."
+    )
+    input_schema = {
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "검색 쿼리",
+            },
+            "n_results": {
+                "type": "integer",
+                "description": "최대 결과 수",
+                "default": 6,
+            },
+        },
+        "required": ["query"],
+    }
+
+    def execute(self, query: str, n_results: int = 6) -> dict:
+        if not _OPENAI_KEY:
+            return {"error": "OPENAI_API_KEY 미설정"}
+        try:
+            results = search_agent_memory_context(query, n_results=n_results)
             return {"count": len(results), "results": results}
         except Exception as e:
             return {"error": str(e)}

@@ -69,7 +69,11 @@ def load_judgment_tools() -> list[BaseTool]:
         GetPatternAccuracyTool,
         SelfCorrectionTool,
     )
-    from worker.agents.tools.rag_tools import SearchTextContextTool, SearchScreeningContextTool
+    from worker.agents.tools.rag_tools import (
+        SearchTextContextTool,
+        SearchScreeningContextTool,
+        SearchAgentMemoryContextTool,
+    )
     from worker.agents.tools.order_tools import ExecuteOrderTool, AUTO_TRADE
 
     tools = [
@@ -96,6 +100,7 @@ def load_judgment_tools() -> list[BaseTool]:
         SelfCorrectionTool(),
         SearchTextContextTool(),
         SearchScreeningContextTool(),
+        SearchAgentMemoryContextTool(),
         UpdateWatchlistTool(),
     ]
     if AUTO_TRADE:
@@ -131,7 +136,11 @@ def load_research_tools() -> list[BaseTool]:
         GetScreeningHistoryTool,
         GetTradePerformanceTool,
     )
-    from worker.agents.tools.rag_tools import SearchScreeningContextTool, SearchTextContextTool
+    from worker.agents.tools.rag_tools import (
+        SearchScreeningContextTool,
+        SearchTextContextTool,
+        SearchAgentMemoryContextTool,
+    )
 
     return [
         GetCurrentPriceTool(),
@@ -150,6 +159,7 @@ def load_research_tools() -> list[BaseTool]:
         GetGlobalMarketTool(),
         SearchTextContextTool(),
         SearchScreeningContextTool(),
+        SearchAgentMemoryContextTool(),
         SearchSimilarSignalsTool(),
         GetScreeningHistoryTool(),
         GetTradePerformanceTool(),
