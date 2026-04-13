@@ -823,11 +823,11 @@ def upsert_trades(trades: list[dict]):
                     stock_code = excluded.stock_code,
                     stock_name = excluded.stock_name,
                     side = excluded.side,
-                    quantity = excluded.quantity,
-                    price = excluded.price,
-                    amount = excluded.amount,
-                    fee = excluded.fee,
-                    tax = excluded.tax
+                    quantity = CASE WHEN excluded.quantity > 0 THEN excluded.quantity ELSE trades.quantity END,
+                    price = CASE WHEN excluded.price > 0 THEN excluded.price ELSE trades.price END,
+                    amount = CASE WHEN excluded.amount > 0 THEN excluded.amount ELSE trades.amount END,
+                    fee = CASE WHEN excluded.fee > 0 THEN excluded.fee ELSE trades.fee END,
+                    tax = CASE WHEN excluded.tax > 0 THEN excluded.tax ELSE trades.tax END
                 """,
                 (
                     trade_id,
@@ -1004,9 +1004,9 @@ def upsert_trades_from_executions(executions: list[dict], executed_at: str | Non
                     stock_code = excluded.stock_code,
                     stock_name = excluded.stock_name,
                     side = excluded.side,
-                    quantity = excluded.quantity,
-                    price = excluded.price,
-                    amount = excluded.amount
+                    quantity = CASE WHEN excluded.quantity > 0 THEN excluded.quantity ELSE trades.quantity END,
+                    price = CASE WHEN excluded.price > 0 THEN excluded.price ELSE trades.price END,
+                    amount = CASE WHEN excluded.amount > 0 THEN excluded.amount ELSE trades.amount END
                 """,
                 (trade_id, executed_day, code, stock_name, side, qty, avg_price, amt),
             )

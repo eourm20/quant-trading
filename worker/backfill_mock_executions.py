@@ -58,6 +58,7 @@ def run(start: str, end: str) -> dict:
     total_exec = 0
     total_upsert = 0
     total_matched = 0
+    total_skipped_duplicates = 0
     days = 0
     seen_order_no_dates: dict[str, str] = {}
 
@@ -65,23 +66,34 @@ def run(start: str, end: str) -> dict:
         days += 1
         try:
             executions = client.get_executions(trade_date=ymd)
-            exec_cnt = len(executions)
-            up_cnt = upsert_trades_from_executions(executions, executed_at=ymd)
-            order_nos = sorted({str(e.get("order_no") or "").strip() for e in executions if str(e.get("order_no") or "").strip()})
+            order_nos_all = [str(e.get("order_no") or "").strip() for e in executions]
+            unique_order_nos = sorted({no for no in order_nos_all if no})
+            # 날짜 필터 무시 대응: 과거 날짜에서 이미 본 주문번호는 스킵
+            filtered_exec = []
+            for e in executions:
+                no = str(e.get("order_no") or "").strip()
+                if no:
+                    prev = seen_order_no_dates.get(no)
+                    if prev and prev != ymd:
+                        total_skipped_duplicates += 1
+                        logging.warning(
+                            "[백필] 주문번호 %s 가 날짜 %s/%s에 중복 발견 → 스킵 (kt00007 날짜필터 무시 가능성)",
+                            no, prev, ymd
+                        )
+                        continue
+                    seen_order_no_dates.setdefault(no, ymd)
+                filtered_exec.append(e)
+
+            exec_cnt = len(filtered_exec)
+            up_cnt = upsert_trades_from_executions(filtered_exec, executed_at=ymd)
+            order_nos = sorted({str(e.get("order_no") or "").strip() for e in filtered_exec if str(e.get("order_no") or "").strip()})
             matched = _count_matched_order_nos(order_nos)
             total_matched += matched
-            # 동일 주문번호가 여러 날짜에서 반복되면 날짜 필터가 무시됐을 가능성이 큼
-            for no in order_nos:
-                prev = seen_order_no_dates.get(no)
-                if prev and prev != ymd:
-                    logging.warning("[백필] 주문번호 %s 가 날짜 %s/%s에 중복 발견 (kt00007 날짜필터 무시 가능성)", no, prev, ymd)
-                else:
-                    seen_order_no_dates[no] = ymd
             total_exec += exec_cnt
             total_upsert += up_cnt
             logging.info(
-                "[백필] %s executions=%s upserted=%s matched_order_no=%s",
-                ymd, exec_cnt, up_cnt, matched
+                "[백필] %s executions=%s(%s원본) upserted=%s matched_order_no=%s",
+                ymd, exec_cnt, len(executions), up_cnt, matched
             )
             time.sleep(0.5)
         except Exception as e:
@@ -92,6 +104,7 @@ def run(start: str, end: str) -> dict:
         "executions": total_exec,
         "upserted": total_upsert,
         "matched_order_no": total_matched,
+        "skipped_duplicates": total_skipped_duplicates,
         "start": start_ymd,
         "end": end_ymd,
     }
@@ -108,5 +121,5 @@ if __name__ == "__main__":
     print(
         f"[완료] {result['start']}~{result['end']} "
         f"{result['days']}일 | 체결행 {result['executions']}건 | 저장/갱신 {result['upserted']}건 "
-        f"| 주문번호 매칭 {result['matched_order_no']}건"
+        f"| 주문번호 매칭 {result['matched_order_no']}건 | 중복스킵 {result['skipped_duplicates']}건"
     )
