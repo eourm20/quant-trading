@@ -1402,9 +1402,9 @@ if __name__ == "__main__":
     parser.add_argument("--env", type=str, default=None, help=".env 파일 경로 (예: .env.real)")
     args = parser.parse_args()
 
-    # if args.test:
-    TEST_MODE = True
-    logger.info("=== 테스트 모드 ===")
+    if args.test:
+        TEST_MODE = True
+        logger.info("=== 테스트 모드 ===")
 
     from data.db import DB_PATH as _db_path
     _trade_env = "모의투자" if kiwoom._is_mock else "실전투자"
