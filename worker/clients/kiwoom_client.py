@@ -199,6 +199,11 @@ class KiwoomClient:
         if not isinstance(rows, list):
             return []
         result = []
+
+        def _norm_date(raw: str) -> str:
+            s = str(raw or "").strip().replace("-", "")
+            return s if len(s) == 8 and s.isdigit() else ""
+
         for r in rows:
             code = str(r.get("stk_cd") or "").strip().lstrip("A")
             if stock_code and code != stock_code:
@@ -209,6 +214,13 @@ class KiwoomClient:
             def _i(key):
                 return abs(int(str(r.get(key) or "0").replace(",", "").lstrip("0") or "0"))
 
+            executed_date = (
+                _norm_date(r.get("cntr_dt"))
+                or _norm_date(r.get("trde_dt"))
+                or _norm_date(r.get("ord_dt"))
+                or ""
+            )
+
             result.append({
                 "stock_code": code,
                 "stock_name": str(r.get("stk_nm") or "").strip(),
@@ -218,6 +230,7 @@ class KiwoomClient:
                 "order_qty": _i("ord_qty"),    # 주문수량
                 "remain_qty": _i("ord_remnq"), # 잔량(미체결)
                 "time": str(r.get("cnfm_tm") or r.get("ord_tm") or ""),
+                "executed_date": executed_date,  # YYYYMMDD(있으면)
                 "order_no": str(r.get("ord_no") or ""),
                 "market": str(r.get("dmst_stex_tp") or ""),
             })
@@ -230,42 +243,75 @@ class KiwoomClient:
             return s
         return ""
 
-    def get_executions(self, stock_code: str = "", trade_date: str = "") -> list[dict]:
+    def get_executions(
+        self,
+        stock_code: str = "",
+        trade_date: str = "",
+        fill_missing_date: bool = True,
+    ) -> list[dict]:
         """체결 내역 조회 (kt00007 계좌별주문체결내역상세요청).
 
-        - trade_date 미지정: 당일 조회
-        - trade_date 지정(YYYYMMDD / YYYY-MM-DD): 일자 지정 조회 시도
+        문서 스펙 기준:
+        - body: ord_dt, qry_tp, stk_bond_tp, sell_tp, stk_cd, fr_ord_no, dmst_stex_tp
+        - header: cont-yn, next-key(연속조회)
         """
-        base = {"qry_tp": "1", "stk_bond_tp": "1", "sell_tp": "0", "dmst_stex_tp": "0"}
-        ymd = self._normalize_yyyymmdd(trade_date)
-        bodies = [base]
-        if ymd:
-            # 환경/계좌별 차이를 고려해 날짜 필드 후보를 순차 시도
-            bodies = [
-                {**base, "qry_dt": ymd},
-                {**base, "ord_dt": ymd},
-                {**base, "trde_dt": ymd},
-                {**base, "strt_dt": ymd, "end_dt": ymd},
-            ]
+        ymd = self._normalize_yyyymmdd(trade_date) or datetime.now(tz=KST).strftime("%Y%m%d")
+        dmst_stex_tp = "KRX" if self._is_mock else "%"
+        body = {
+            "ord_dt": ymd,
+            "qry_tp": "1",       # 1: 주문
+            "stk_bond_tp": "0",  # 0: 전체
+            "sell_tp": "0",      # 0: 전체
+            "stk_cd": stock_code or "",
+            "fr_ord_no": "",
+            "dmst_stex_tp": dmst_stex_tp,
+        }
 
-        merged: dict[tuple[str, str, str, str], dict] = {}
-        for body in bodies:
-            try:
-                payload = self._post("/api/dostk/acnt", "kt00007", body)
-            except Exception:
-                continue
+        merged: dict[tuple[str, str, str, str, int, int], dict] = {}
+        cont_yn = ""
+        next_key = ""
+
+        while True:
+            headers = self._headers("kt00007")
+            if cont_yn:
+                headers["cont-yn"] = cont_yn
+                headers["next-key"] = next_key
+
+            resp = self._post_with_retry(
+                f"{BASE_URL}/api/dostk/acnt",
+                json_body=body,
+                headers=headers,
+                api_name="kt00007",
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            code = payload.get("return_code")
+            if code not in (None, 0, "0"):
+                raise RuntimeError(f"API 오류 [kt00007] code={code} msg={payload.get('return_msg')}")
+
             rows = payload.get("acnt_ord_cntr_prps_dtl", [])
             for item in self._parse_executions_rows(rows, stock_code=stock_code):
+                # 응답에 체결일이 없을 수 있어, 해당 API 요청일을 보조 메타로 채움
+                if fill_missing_date and not str(item.get("executed_date") or "").strip():
+                    item["executed_date"] = ymd
                 k = (
                     str(item.get("order_no") or ""),
                     str(item.get("stock_code") or ""),
                     str(item.get("side") or ""),
                     str(item.get("time") or ""),
+                    int(item.get("quantity") or 0),
+                    int(item.get("price") or 0),
                 )
                 merged[k] = item
-            if merged:
-                # 첫 성공 응답이 있으면 추가 요청은 중단
+
+            cont_yn = resp.headers.get("cont-yn", "")
+            next_key = resp.headers.get("next-key", "")
+            if cont_yn != "Y":
                 break
+            # 문서상 fr_ord_no(시작주문번호)도 함께 전달
+            if next_key:
+                body["fr_ord_no"] = next_key
+
         return list(merged.values())
 
     def get_pending_orders(self, stock_code: str = "") -> list[dict]:
@@ -447,6 +493,7 @@ class KiwoomClient:
             ("ka10077", [{"tp": "0"}, {"tp": "1"}, {"tp": "2"}]),
             ("ka10074", [{"qry_tp": "2"}, {"tp": "0"}]),
         ]
+        errors: list[str] = []
         for api_id, bodies in api_candidates:
             for body in bodies:
                 try:
@@ -454,8 +501,9 @@ class KiwoomClient:
                     metrics = self._extract_realized_metrics(payload)
                     return {"ok": True, "scope": "today", "api_id": api_id, "body": body, **metrics, "raw": payload}
                 except Exception as e:
+                    errors.append(f"{api_id} body={body}: {e}")
                     logger.debug(f"[실현손익] {api_id} 실패 body={body}: {e}")
-        return {"ok": False, "scope": "today", "error": "실현손익 API 호출 실패"}
+        return {"ok": False, "scope": "today", "error": "실현손익 API 호출 실패", "attempt_errors": errors}
 
     def get_realized_pnl_period(self, days: int = 30) -> dict:
         """기간 실현손익 조회 (ka10073 우선, ka10074 폴백)."""
@@ -475,6 +523,7 @@ class KiwoomClient:
             ("ka10073", [body_full, {"strt_dt": start_dt, "end_dt": end_dt}]),
             ("ka10074", [body_full, {"strt_dt": start_dt, "end_dt": end_dt}]),
         ]
+        errors: list[str] = []
         for api_id, bodies in api_candidates:
             for body in bodies:
                 try:
@@ -491,8 +540,16 @@ class KiwoomClient:
                         "raw": payload,
                     }
                 except Exception as e:
+                    errors.append(f"{api_id} body_keys={list(body.keys())}: {e}")
                     logger.debug(f"[실현손익] {api_id} 실패 body_keys={list(body.keys())}: {e}")
-        return {"ok": False, "scope": "period", "start_dt": start_dt, "end_dt": end_dt, "error": "실현손익 API 호출 실패"}
+        return {
+            "ok": False,
+            "scope": "period",
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "error": "실현손익 API 호출 실패",
+            "attempt_errors": errors,
+        }
 
     def _load_stock_map(self) -> None:
         """당일 캐시가 없으면 ka10099로 코스피/코스닥 전종목 로드."""

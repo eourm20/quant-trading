@@ -150,3 +150,40 @@ class GetOrderStatusTool(BaseTool):
             }
         except Exception as e:
             return {"error": str(e)}
+
+
+class GetRealizedPnlTool(BaseTool):
+    name = "get_realized_pnl"
+    label = "실현손익 조회"
+    description = (
+        "실현손익을 조회합니다. scope=today는 당일 실현손익, scope=period는 기간 실현손익, "
+        "scope=both는 둘 다 반환합니다. 워커 자동 스케줄이 아닌 필요 시점 수동 조회용입니다."
+    )
+    input_schema = {
+        "properties": {
+            "scope": {
+                "type": "string",
+                "enum": ["today", "period", "both"],
+                "default": "both",
+                "description": "조회 범위",
+            },
+            "days": {
+                "type": "integer",
+                "default": 30,
+                "description": "기간 조회 일수(scope=period/both에서 사용)",
+            },
+        },
+        "required": [],
+    }
+
+    def execute(self, scope: str = "both", days: int = 30) -> dict:
+        try:
+            kw = _kiwoom()
+            result: dict = {"scope": scope}
+            if scope in ("today", "both"):
+                result["today"] = kw.get_realized_pnl_today()
+            if scope in ("period", "both"):
+                result["period"] = kw.get_realized_pnl_period(days=max(1, int(days)))
+            return result
+        except Exception as e:
+            return {"error": str(e)}

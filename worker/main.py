@@ -637,7 +637,7 @@ def sync_realized_pnl():
                 f"손익={today.get('realized_pnl')} fee={today.get('fee')} tax={today.get('tax')}"
             )
         else:
-            logger.warning(f"[실현손익] today 조회 실패: {today.get('error')}")
+            logger.warning(f"[실현손익] today 조회 실패: {today.get('error')} | attempts={today.get('attempt_errors')}")
     except Exception as e:
         logger.warning(f"[실현손익] today 저장 실패: {e}")
 
@@ -659,7 +659,7 @@ def sync_realized_pnl():
                 f"손익={period.get('realized_pnl')} fee={period.get('fee')} tax={period.get('tax')}"
             )
         else:
-            logger.warning(f"[실현손익] 30d 조회 실패: {period.get('error')}")
+            logger.warning(f"[실현손익] 30d 조회 실패: {period.get('error')} | attempts={period.get('attempt_errors')}")
     except Exception as e:
         logger.warning(f"[실현손익] 30d 저장 실패: {e}")
 
@@ -1482,9 +1482,6 @@ def main():
     scheduler.add_job(run_weekly_self_correction, "cron",
                       day_of_week="mon", hour=9, minute=5,
                       id="weekly_self_correction")
-    scheduler.add_job(sync_realized_pnl, "cron",
-                      day_of_week="mon-fri", hour="9,16,18", minute=20,
-                      id="realized_pnl_sync")
     scheduler.add_job(update_paper_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="paper_result_update")

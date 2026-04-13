@@ -952,13 +952,19 @@ def upsert_trades_from_executions(executions: list[dict], executed_at: str | Non
     if not executions:
         return 0
 
+    default_day = _now_kst().strftime("%Y-%m-%d")
     if executed_at:
         dt = str(executed_at).replace("-", "").strip()
-        executed_day = f"{dt[:4]}-{dt[4:6]}-{dt[6:]}" if len(dt) == 8 and dt.isdigit() else _now_kst().strftime("%Y-%m-%d")
-    else:
-        executed_day = _now_kst().strftime("%Y-%m-%d")
+        if len(dt) == 8 and dt.isdigit():
+            default_day = f"{dt[:4]}-{dt[4:6]}-{dt[6:]}"
 
-    grouped: dict[tuple[str, str, str], dict] = defaultdict(lambda: {
+    def _norm_day(raw) -> str:
+        s = str(raw or "").strip().replace("-", "")
+        if len(s) == 8 and s.isdigit():
+            return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+        return ""
+
+    grouped: dict[tuple[str, str, str, str], dict] = defaultdict(lambda: {
         "stock_name": "",
         "qty_sum": 0,
         "amt_sum": 0,
@@ -973,10 +979,11 @@ def upsert_trades_from_executions(executions: list[dict], executed_at: str | Non
         price = _p(e.get("price"))
         if not code or qty <= 0 or price <= 0:
             continue
+        executed_day = _norm_day(e.get("executed_date")) or _norm_day(e.get("executed_at")) or default_day
         if not order_no:
             fallback_idx += 1
             order_no = f"EXE-{executed_day}-{code}-{side}-{fallback_idx}"
-        key = (order_no, code, side)
+        key = (order_no, code, side, executed_day)
         grouped[key]["stock_name"] = str(e.get("stock_name") or "").strip() or grouped[key]["stock_name"]
         grouped[key]["qty_sum"] += qty
         grouped[key]["amt_sum"] += qty * price
@@ -986,7 +993,7 @@ def upsert_trades_from_executions(executions: list[dict], executed_at: str | Non
 
     upserted = 0
     with get_conn() as conn:
-        for (trade_id, code, side), agg in grouped.items():
+        for (trade_id, code, side, executed_day), agg in grouped.items():
             qty = int(agg["qty_sum"])
             amt = int(agg["amt_sum"])
             if qty <= 0 or amt <= 0:

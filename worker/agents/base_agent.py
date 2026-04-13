@@ -71,6 +71,7 @@ class BaseAgent:
             "get_deposit": "포지션/자금",
             "get_positions": "포지션/자금",
             "get_order_status": "포지션/자금",
+            "get_realized_pnl": "포지션/자금",
             "get_news": "뉴스/공시/거시",
             "get_dart": "뉴스/공시/거시",
             "get_macro_news": "뉴스/공시/거시",

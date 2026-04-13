@@ -49,6 +49,7 @@ def load_judgment_tools() -> list[BaseTool]:
         GetDepositTool,
         GetPositionsTool,
         GetOrderStatusTool,
+        GetRealizedPnlTool,
     )
     from worker.agents.tools.info_tools import (
         GetNewsTool,
@@ -77,6 +78,7 @@ def load_judgment_tools() -> list[BaseTool]:
         GetDepositTool(),
         GetPositionsTool(),
         GetOrderStatusTool(),
+        GetRealizedPnlTool(),
         GetNewsTool(),
         GetDartTool(),
         GetMacroNewsTool(),
@@ -110,6 +112,7 @@ def load_research_tools() -> list[BaseTool]:
     from worker.agents.tools.portfolio_tools import (
         GetPortfolioTool,
         GetDepositTool,
+        GetRealizedPnlTool,
     )
     from worker.agents.tools.info_tools import (
         GetNewsTool,
@@ -130,6 +133,7 @@ def load_research_tools() -> list[BaseTool]:
         ScanDeclineRankTool(),
         GetPortfolioTool(),
         GetDepositTool(),
+        GetRealizedPnlTool(),
         GetNewsTool(),
         GetDartTool(),
         GetMacroNewsTool(),
