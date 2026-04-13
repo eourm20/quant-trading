@@ -82,6 +82,8 @@ class BaseAgent:
             "search_similar_signals": "이력/RAG/통계",
             "search_text_context": "이력/RAG/통계",
             "search_screening_context": "이력/RAG/통계",
+            "get_screening_history": "이력/RAG/통계",
+            "get_trade_performance": "이력/RAG/통계",
             "get_condition_accuracy": "이력/RAG/통계",
             "get_pattern_accuracy": "이력/RAG/통계",
             "self_correction": "이력/RAG/통계",

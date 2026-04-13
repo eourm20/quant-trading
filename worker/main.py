@@ -108,6 +108,54 @@ def get_current_session() -> str | None:
     return None
 
 
+def _safe_int_price(value) -> int:
+    try:
+        return abs(int(str(value or "0").replace(",", "").strip()))
+    except Exception:
+        return 0
+
+
+def _parse_ymd(value: str) -> str:
+    s = str(value or "").replace("-", "").strip()
+    return s if len(s) == 8 and s.isdigit() else ""
+
+
+def _resolve_eval_price(stock_code: str, target_dt, today_dt):
+    """성과 평가 가격 결정.
+    - target이 오늘이고 정규장(main) 진행 중이면 현재가
+    - 그 외에는 target일(없으면 직전 영업일) 종가
+    """
+    target_ymd = target_dt.strftime("%Y%m%d")
+    today_ymd = today_dt.strftime("%Y%m%d")
+
+    if target_ymd == today_ymd and get_current_session() == "main":
+        pd = kiwoom.get_current_price(stock_code)
+        now_price = _safe_int_price(pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr"))
+        return now_price, "current"
+
+    daily = kiwoom.get_daily_ohlcv(stock_code, period=40) or []
+    candidate_price = 0
+    candidate_ymd = ""
+    for d in daily:
+        row_ymd = (
+            _parse_ymd(d.get("dt"))
+            or _parse_ymd(d.get("trde_dt"))
+            or _parse_ymd(d.get("stck_bsop_date"))
+            or _parse_ymd(d.get("bsop_date"))
+            or _parse_ymd(d.get("date"))
+        )
+        if not row_ymd or row_ymd > target_ymd:
+            continue
+        cp = _safe_int_price(d.get("cur_prc") or d.get("stck_clpr") or d.get("close"))
+        if cp <= 0:
+            continue
+        if not candidate_ymd or row_ymd > candidate_ymd:
+            candidate_ymd = row_ymd
+            candidate_price = cp
+
+    return candidate_price, (f"close:{candidate_ymd}" if candidate_ymd else "close:none")
+
+
 def _rag_index_signal(
     signal,
     signal_id: int,
@@ -619,6 +667,101 @@ def update_trade_results():
                 logger.warning(f"[실거래 결과 실패] {row['stock_name']}: {e}")
 
 
+def update_paper_results():
+    """모의투자 1일/3일/5일 수익률 업데이트.
+    기준가:
+    - 평가일이 오늘이고 장중(main)이면 현재가
+    - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
+    """
+    from datetime import timedelta
+    from data.db import get_conn, update_paper_result
+
+    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
+    now_kst = _now_kst()
+    today_kst = now_kst.date()
+
+    for period_name, days_after, days_before, col_name in periods:
+        cutoff_from = (now_kst - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (now_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, stock_code, stock_name, price, created_at FROM paper_trades "
+                f"WHERE {col_name} IS NULL AND created_at >= ? AND created_at < ?",
+                (cutoff_from, cutoff_to),
+            ).fetchall()
+
+        for row in rows:
+            try:
+                base = int(row["price"] or 0)
+                if base <= 0:
+                    continue
+                created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
+                target_dt = created_dt + timedelta(days=days_after)
+                if target_dt > today_kst:
+                    continue
+
+                eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
+                if eval_price <= 0:
+                    continue
+
+                pct = (eval_price - base) / base * 100
+                update_paper_result(row["id"], round(pct, 2), period=period_name)
+                logger.debug(f"[모의투자 결과 {period_name}] {row['stock_name']}: {pct:+.2f}% ({price_src})")
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[모의투자 결과 실패] {row['stock_name']}: {e}")
+
+
+def update_trade_results():
+    """실거래 1일/3일/5일 성과 업데이트 (매수/매도 방향 반영).
+    기준가:
+    - 평가일이 오늘이고 장중(main)이면 현재가
+    - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
+    """
+    from datetime import timedelta
+    from data.db import get_conn, update_trade_result
+
+    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
+    now_kst = _now_kst()
+    today_kst = now_kst.date()
+
+    for period_name, days_after, days_before, col_name in periods:
+        cutoff_from = (now_kst - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (now_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT trade_id, stock_code, stock_name, side, price, executed_at FROM trades "
+                f"WHERE {col_name} IS NULL AND price > 0 AND executed_at >= ? AND executed_at < ?",
+                (cutoff_from, cutoff_to),
+            ).fetchall()
+
+        for row in rows:
+            try:
+                base = int(row["price"] or 0)
+                if base <= 0:
+                    continue
+                executed_dt = datetime.strptime(str(row["executed_at"])[:10], "%Y-%m-%d").date()
+                target_dt = executed_dt + timedelta(days=days_after)
+                if target_dt > today_kst:
+                    continue
+
+                eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
+                if eval_price <= 0:
+                    continue
+
+                raw_pct = (eval_price - base) / base * 100
+                side = str(row["side"] or "")
+                signed_pct = -raw_pct if side in ("매도", "SELL", "sell") else raw_pct
+                update_trade_result(row["trade_id"], round(signed_pct, 2), period=period_name)
+                logger.debug(
+                    f"[실거래 결과 {period_name}] {row['stock_name']} {side}: "
+                    f"원시 {raw_pct:+.2f}% / 반영 {signed_pct:+.2f}% ({price_src})"
+                )
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[실거래 결과 실패] {row['stock_name']}: {e}")
+
+
 def sync_realized_pnl():
     """실현손익(당일/30일) 조회 후 스냅샷 저장."""
     try:
@@ -700,6 +843,54 @@ def update_screening_results():
                     update_screening_result(row["id"], round(pct, 2), period=period_name)
                     logger.debug(f"[스크리닝 결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
                 time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[스크리닝 결과 {period_name} 실패] {row['stock_name']}: {e}")
+
+
+def update_screening_results():
+    """스크리닝 종목의 7일/30일 후 수익률 자동 업데이트.
+    누락 방지:
+    - 기존 좁은 시간창(7~8일, 30~31일) 대신
+    - 기준일이 지난 NULL 레코드를 모두 보정
+    가격 기준:
+    - 평가일이 오늘이고 장중(main)이면 현재가
+    - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
+    """
+    from datetime import timedelta
+    from data.db import get_conn, update_screening_result
+
+    now_kst = _now_kst()
+    today_kst = now_kst.date()
+    periods = [("7d", 7, "result_7d"), ("30d", 30, "result_30d")]
+
+    for period_name, days_after, col in periods:
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, stock_code, stock_name, current_price, created_at "
+                f"FROM screening_log "
+                f"WHERE {col} IS NULL AND current_price IS NOT NULL AND current_price > 0"
+            ).fetchall()
+
+        for row in rows:
+            try:
+                base = int(row["current_price"] or 0)
+                if base <= 0:
+                    continue
+                created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
+                target_dt = created_dt + timedelta(days=days_after)
+                if target_dt > today_kst:
+                    continue
+
+                eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
+                if eval_price <= 0:
+                    continue
+
+                pct = (eval_price - base) / base * 100
+                update_screening_result(row["id"], round(pct, 2), period=period_name)
+                logger.debug(
+                    f"[스크리닝 결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}% ({price_src})"
+                )
+                time.sleep(0.3)
             except Exception as e:
                 logger.warning(f"[스크리닝 결과 {period_name} 실패] {row['stock_name']}: {e}")
 

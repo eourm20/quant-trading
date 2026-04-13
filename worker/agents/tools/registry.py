@@ -63,6 +63,8 @@ def load_judgment_tools() -> list[BaseTool]:
         GetEntryReasonTool,
         UpdateWatchlistTool,
         SearchSimilarSignalsTool,
+        GetScreeningHistoryTool,
+        GetTradePerformanceTool,
         GetConditionAccuracyTool,
         GetPatternAccuracyTool,
         SelfCorrectionTool,
@@ -87,6 +89,8 @@ def load_judgment_tools() -> list[BaseTool]:
         GetSignalHistoryTool(),
         GetEntryReasonTool(),
         SearchSimilarSignalsTool(),
+        GetScreeningHistoryTool(),
+        GetTradePerformanceTool(),
         GetConditionAccuracyTool(),
         GetPatternAccuracyTool(),
         SelfCorrectionTool(),
@@ -121,7 +125,12 @@ def load_research_tools() -> list[BaseTool]:
         GetSectorNewsTool,
         GetGlobalMarketTool,
     )
-    from worker.agents.tools.db_tools import AddToWatchlistTool, SearchSimilarSignalsTool
+    from worker.agents.tools.db_tools import (
+        AddToWatchlistTool,
+        SearchSimilarSignalsTool,
+        GetScreeningHistoryTool,
+        GetTradePerformanceTool,
+    )
     from worker.agents.tools.rag_tools import SearchScreeningContextTool, SearchTextContextTool
 
     return [
@@ -142,5 +151,7 @@ def load_research_tools() -> list[BaseTool]:
         SearchTextContextTool(),
         SearchScreeningContextTool(),
         SearchSimilarSignalsTool(),
+        GetScreeningHistoryTool(),
+        GetTradePerformanceTool(),
         AddToWatchlistTool(),
     ]

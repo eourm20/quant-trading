@@ -369,6 +369,145 @@ class GetPatternAccuracyTool(BaseTool):
             return {"error": str(e)}
 
 
+class GetScreeningHistoryTool(BaseTool):
+    """스크리닝 로그 조회 (7d/30d 성과 포함)."""
+
+    name = "get_screening_history"
+    label = "스크리닝 성과 조회"
+    description = (
+        "screening_log에서 스크리닝 이력과 사후 성과(result_7d/result_30d)를 조회합니다. "
+        "특정 종목의 과거 추천 근거, 추천 타입, 사후 성과를 함께 확인해 "
+        "후보 유지/제외 판단의 일관성을 높일 때 유용합니다."
+    )
+    input_schema = {
+        "properties": {
+            "stock_code": {"type": "string", "description": "종목코드(선택)"},
+            "days": {"type": "integer", "description": "조회 기간(일)", "default": 30},
+            "limit": {"type": "integer", "description": "최대 조회 건수", "default": 20},
+            "recommendation": {
+                "type": "string",
+                "description": "추천 필터(예: 관심종목 등록/보류/부적합)",
+                "default": "",
+            },
+            "only_with_results": {
+                "type": "boolean",
+                "description": "성과 컬럼(result_7d/30d)이 하나라도 있는 행만 조회",
+                "default": False,
+            },
+        },
+        "required": [],
+    }
+
+    def execute(
+        self,
+        stock_code: str = "",
+        days: int = 30,
+        limit: int = 20,
+        recommendation: str = "",
+        only_with_results: bool = False,
+    ) -> dict:
+        try:
+            from data.db import get_conn, _now_kst
+            from datetime import timedelta
+
+            since = (_now_kst() - timedelta(days=max(1, int(days)))).strftime("%Y-%m-%d")
+            where = ["created_at >= ?"]
+            params: list = [since]
+
+            if stock_code:
+                where.append("stock_code = ?")
+                params.append(stock_code)
+            if recommendation:
+                where.append("recommendation = ?")
+                params.append(recommendation)
+            if only_with_results:
+                where.append("(result_7d IS NOT NULL OR result_30d IS NOT NULL)")
+
+            sql = (
+                "SELECT id, created_at, stock_code, stock_name, source, recommendation, reason, "
+                "rr_ratio, current_price, result_7d, result_30d, market_snapshot "
+                "FROM screening_log "
+                f"WHERE {' AND '.join(where)} "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+            params.append(max(1, int(limit)))
+            with get_conn() as conn:
+                rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+            return {"count": len(rows), "rows": rows}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class GetTradePerformanceTool(BaseTool):
+    """실거래 성과 조회 (1d/3d/5d)."""
+
+    name = "get_trade_performance"
+    label = "실거래 성과 조회"
+    description = (
+        "trades 테이블에서 체결 이력과 사후 성과(result_1d/result_3d/result_5d)를 조회합니다. "
+        "종목/매수·매도 방향별 성과를 점검해 AI 판단 품질을 검증할 때 사용합니다."
+    )
+    input_schema = {
+        "properties": {
+            "stock_code": {"type": "string", "description": "종목코드(선택)"},
+            "days": {"type": "integer", "description": "조회 기간(일)", "default": 60},
+            "limit": {"type": "integer", "description": "최대 조회 건수", "default": 30},
+            "side": {
+                "type": "string",
+                "description": "매수/매도 필터(예: 매수, 매도, BUY, SELL)",
+                "default": "",
+            },
+            "only_with_results": {
+                "type": "boolean",
+                "description": "성과 컬럼(result_1d/3d/5d)이 하나라도 있는 행만 조회",
+                "default": True,
+            },
+        },
+        "required": [],
+    }
+
+    def execute(
+        self,
+        stock_code: str = "",
+        days: int = 60,
+        limit: int = 30,
+        side: str = "",
+        only_with_results: bool = True,
+    ) -> dict:
+        try:
+            from data.db import get_conn, _now_kst
+            from datetime import timedelta
+
+            since = (_now_kst() - timedelta(days=max(1, int(days)))).strftime("%Y-%m-%d")
+            where = ["executed_at >= ?"]
+            params: list = [since]
+
+            if stock_code:
+                where.append("stock_code = ?")
+                params.append(stock_code)
+            if side:
+                where.append("side = ?")
+                params.append(side)
+            if only_with_results:
+                where.append("(result_1d IS NOT NULL OR result_3d IS NOT NULL OR result_5d IS NOT NULL)")
+
+            sql = (
+                "SELECT trade_id, executed_at, stock_code, stock_name, side, quantity, price, "
+                "result_1d, result_3d, result_5d "
+                "FROM trades "
+                f"WHERE {' AND '.join(where)} "
+                "ORDER BY executed_at DESC, trade_id DESC LIMIT ?"
+            )
+            params.append(max(1, int(limit)))
+            with get_conn() as conn:
+                rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+            return {"count": len(rows), "rows": rows}
+        except Exception as e:
+            return {"error": str(e)}
+
+
 class SelfCorrectionTool(BaseTool):
     """자기보정 — 저성과 조건을 감지하고 임계값 변경을 제안."""
 

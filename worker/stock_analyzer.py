@@ -63,6 +63,26 @@ def _fmt_int(value, default: int = 0) -> int:
         return default
 
 
+def _parse_rr_ratio(value) -> float | None:
+    """R/R 문자열/숫자를 안전하게 float로 변환.
+    - "1.6:1" -> 1.6
+    - "N/A", "", None -> None
+    - 0 -> 0.0
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.upper() == "N/A":
+        return None
+    if ":" in s:
+        s = s.split(":", 1)[0].strip()
+    s = s.replace(",", "")
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
 def _build_market_text(kiwoom) -> str:
     parts = []
     try:
@@ -570,6 +590,13 @@ def run_intraday_scan():
 
             # screening_log 저장
             try:
+                indicator_snapshot = json.dumps(
+                    {
+                        k: v for k, v in analysis.get("enabled_conditions", {}).items()
+                        if isinstance(v, dict) and v.get("enabled")
+                    },
+                    ensure_ascii=False,
+                ) if analysis.get("enabled_conditions") else None
                 log_id = save_screening_log(
                     stock_code=cand["stock_code"],
                     stock_name=cand["stock_name"],
@@ -577,8 +604,9 @@ def run_intraday_scan():
                     recommendation=rec,
                     reason=reason,
                     met_conditions=analysis.get("met_conditions"),
-                    rr_ratio=float(rr) if rr and rr != "N/A" else None,
+                    rr_ratio=_parse_rr_ratio(rr),
                     current_price=analysis.get("_current_price"),
+                    indicator_snapshot=indicator_snapshot,
                     dart_summary=analysis.get("_dart_summary"),
                     news_summary=analysis.get("_news_summary"),
                     market_snapshot=market_text,
@@ -588,6 +616,12 @@ def run_intraday_scan():
                 log_id = None
 
             if rec != "관심종목 등록":
+                if auto_mode and log_id:
+                    try:
+                        from data.db import update_screening_action
+                        update_screening_action(log_id, "auto_rejected")
+                    except Exception:
+                        pass
                 time.sleep(2)
                 continue
 
@@ -1407,7 +1441,7 @@ def run_daily_screening():
                     recommendation=rec,
                     reason=reason,
                     met_conditions=analysis.get("met_conditions"),
-                    rr_ratio=float(rr) if rr and rr != "N/A" else None,
+                    rr_ratio=_parse_rr_ratio(rr),
                     current_price=analysis.get("_current_price"),
                     indicator_snapshot=json.dumps(
                         {k: v for k, v in analysis.get("enabled_conditions", {}).items()
@@ -1445,6 +1479,12 @@ def run_daily_screening():
                     pass
 
             if analysis.get("recommendation") != "관심종목 등록":
+                if auto_mode and log_id:
+                    try:
+                        from data.db import update_screening_action
+                        update_screening_action(log_id, "auto_rejected")
+                    except Exception:
+                        pass
                 time.sleep(2)
                 continue
 

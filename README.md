@@ -70,6 +70,24 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 - `worker/agents/tools/registry.py`
 - `worker/agents/research_agent.py`
 
+### 6) 성과 반영/로그 품질 강화 (2026-04 최종)
+- 실거래/모의 성과(1d/3d/5d), 스크리닝 성과(7d/30d) 계산 시 기준가를 통일:
+  - 평가일이 오늘이고 장중(main)이면 현재가
+  - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
+- 스크리닝 결과 업데이트는 좁은 윈도우(7~8일, 30~31일) 방식 대신
+  미채움(NULL) 과거 행을 재평가해 누락 복구 가능하게 변경.
+- `rr_ratio` 저장 파싱 강화:
+  - `"1.6:1" -> 1.6`, `"N/A"/빈값 -> NULL`, `0 -> 0.0`
+- 자동 스크리닝 모드에서 `user_action`이 비지 않도록 기록:
+  - 자동 등록: `auto_accepted`
+  - 자동 미등록(보류/부적합/분석실패): `auto_rejected`
+- Agent 도구 확장:
+  - `get_screening_history` (screening_log + result_7d/30d)
+  - `get_trade_performance` (trades + result_1d/3d/5d)
+- 종목 추천 Agent는 하이브리드 모드:
+  - 도구 선택/검증 순서는 자율
+  - 최근 30일 성과 요약은 고정 규칙으로 프롬프트에 강제 반영
+
 ---
 
 ## 거래 세션
