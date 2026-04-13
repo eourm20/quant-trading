@@ -676,18 +676,17 @@ def update_paper_results():
     from datetime import timedelta
     from data.db import get_conn, update_paper_result
 
-    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
+    periods = [("1d", 1, "result_1d"), ("3d", 3, "result_3d"), ("5d", 5, "result_5d")]
     now_kst = _now_kst()
     today_kst = now_kst.date()
 
-    for period_name, days_after, days_before, col_name in periods:
-        cutoff_from = (now_kst - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (now_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
+    for period_name, days_after, col_name in periods:
+        eligible_to = (today_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
         with get_conn() as conn:
             rows = conn.execute(
                 f"SELECT id, stock_code, stock_name, price, created_at FROM paper_trades "
-                f"WHERE {col_name} IS NULL AND created_at >= ? AND created_at < ?",
-                (cutoff_from, cutoff_to),
+                f"WHERE {col_name} IS NULL AND substr(created_at, 1, 10) <= ?",
+                (eligible_to,),
             ).fetchall()
 
         for row in rows:
@@ -721,18 +720,17 @@ def update_trade_results():
     from datetime import timedelta
     from data.db import get_conn, update_trade_result
 
-    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
+    periods = [("1d", 1, "result_1d"), ("3d", 3, "result_3d"), ("5d", 5, "result_5d")]
     now_kst = _now_kst()
     today_kst = now_kst.date()
 
-    for period_name, days_after, days_before, col_name in periods:
-        cutoff_from = (now_kst - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (now_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
+    for period_name, days_after, col_name in periods:
+        eligible_to = (today_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
         with get_conn() as conn:
             rows = conn.execute(
                 f"SELECT trade_id, stock_code, stock_name, side, price, executed_at FROM trades "
-                f"WHERE {col_name} IS NULL AND price > 0 AND executed_at >= ? AND executed_at < ?",
-                (cutoff_from, cutoff_to),
+                f"WHERE {col_name} IS NULL AND price > 0 AND executed_at <= ?",
+                (eligible_to,),
             ).fetchall()
 
         for row in rows:
@@ -857,6 +855,7 @@ def update_screening_results():
     - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
     """
     from datetime import timedelta
+    import json
     from data.db import get_conn, update_screening_result
 
     now_kst = _now_kst()
@@ -866,14 +865,38 @@ def update_screening_results():
     for period_name, days_after, col in periods:
         with get_conn() as conn:
             rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, current_price, created_at "
+                f"SELECT id, stock_code, stock_name, current_price, created_at, ai_response, indicator_snapshot "
                 f"FROM screening_log "
-                f"WHERE {col} IS NULL AND current_price IS NOT NULL AND current_price > 0"
+                f"WHERE {col} IS NULL"
             ).fetchall()
 
         for row in rows:
             try:
                 base = int(row["current_price"] or 0)
+                # 하위호환: 과거 로그(current_price NULL)도 ai_response/indicator_snapshot에서 복구 시도
+                if base <= 0:
+                    for src_key in ("ai_response", "indicator_snapshot"):
+                        raw = row[src_key]
+                        if not raw:
+                            continue
+                        try:
+                            obj = json.loads(raw) if isinstance(raw, str) else raw
+                        except Exception:
+                            obj = None
+                        if isinstance(obj, dict):
+                            cand = (
+                                obj.get("current_price")
+                                or obj.get("cur_prc")
+                                or obj.get("stk_prpr")
+                                or obj.get("price")
+                            )
+                            try:
+                                cand_i = int(str(cand or "0").replace(",", "").strip())
+                            except Exception:
+                                cand_i = 0
+                            if cand_i > 0:
+                                base = cand_i
+                                break
                 if base <= 0:
                     continue
                 created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
@@ -887,6 +910,17 @@ def update_screening_results():
 
                 pct = (eval_price - base) / base * 100
                 update_screening_result(row["id"], round(pct, 2), period=period_name)
+                # 복구한 기준가는 current_price에도 저장해 이후 계산/분석 일관성 확보
+                if int(row["current_price"] or 0) <= 0:
+                    try:
+                        with get_conn() as conn:
+                            conn.execute(
+                                "UPDATE screening_log SET current_price = COALESCE(current_price, ?) WHERE id = ?",
+                                (base, row["id"]),
+                            )
+                            conn.commit()
+                    except Exception:
+                        pass
                 logger.debug(
                     f"[스크리닝 결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}% ({price_src})"
                 )
