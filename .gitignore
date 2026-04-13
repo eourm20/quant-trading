@@ -8,6 +8,7 @@
 .env.real
 .vscode/
 .pytest_cache/
+scripts/
 scripts/__pycache__/
 scripts/.ipynb_checkpoints/
 logs/
