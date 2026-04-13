@@ -751,7 +751,7 @@ def bulk_index_agent_memory(days: int = 180) -> dict:
                 stock_name=r["stock_name"],
             ):
                 counts["news"] += 1
-        trace = " -> ".join([x for x in [r.get("tool_sequence"), r.get("reasoning_chain")] if x])
+        trace = " -> ".join([x for x in [r["tool_sequence"], r["reasoning_chain"]] if x])
         if trace:
             if index_tool_trace_memory(
                 source_key=f"signals_trace:{sid}",
