@@ -329,7 +329,7 @@ def index_signal(
                 ref_id=signal_id,
                 stock_name=stock_name,
             )
-        trace = f"signal_type={signal_type} verdict={verdict or ""} conditions={triggered_conditions or ""}"
+        trace = f"signal_type={signal_type} verdict={verdict or ''} conditions={triggered_conditions or ''}"
         index_tool_trace_memory(
             source_key=f"signals_trace:{signal_id}",
             tool_trace=trace,
