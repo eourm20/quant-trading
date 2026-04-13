@@ -146,6 +146,17 @@ def _resolve_stock(name_or_code: str, kiwoom=None) -> tuple[str, str]:
     raise ValueError(f"'{query}' 종목을 찾을 수 없습니다.\n종목코드(6자리)로 입력해 주세요.")
 
 
+def _resolve_name_by_code(code: str, kiwoom=None) -> str:
+    """코드로 종목명을 최대한 안전하게 조회 (실패 시 code 반환)."""
+    try:
+        if code:
+            _, name = _resolve_stock(code, kiwoom=kiwoom)
+            return name or code
+    except Exception:
+        pass
+    return code
+
+
 class _PendingOrder:
     def __init__(
         self,
@@ -406,23 +417,41 @@ class TelegramBot:
             return
 
         # 추천수량 버튼: rec_buy_market / rec_sell_market / rec_buy_limit / rec_sell_limit
+        # 신규 포맷: rec_*:{qty}:{code}:{signal_id}
+        # 하위호환: rec_*:{qty}:{code}:{name[:signal_id]}
         if data.startswith(("rec_buy_market:", "rec_sell_market:", "rec_buy_limit:", "rec_sell_limit:")):
-            rec_parts = data.split(":", 3)
-            if len(rec_parts) != 4:
+            rec_parts = data.split(":")
+            if len(rec_parts) < 4:
                 self._answer_callback(callback_id)
                 return
-            _, rec_qty_str, rec_code, rec_name = rec_parts
+            action_token = rec_parts[0]
+            rec_qty_str = rec_parts[1]
+            rec_code = rec_parts[2]
             try:
                 rec_qty = int(rec_qty_str)
             except ValueError:
                 self._answer_callback(callback_id)
                 return
+
+            rec_signal_id = None
+            rec_name = _resolve_name_by_code(rec_code, kiwoom=self._kiwoom)
+            # 신규 포맷
+            if len(rec_parts) == 4 and rec_parts[3].isdigit():
+                rec_signal_id = int(rec_parts[3]) if rec_parts[3] != "0" else None
+            # 레거시 포맷
+            elif len(rec_parts) >= 4:
+                if rec_parts[-1].isdigit():
+                    rec_signal_id = int(rec_parts[-1]) if rec_parts[-1] != "0" else None
+                    rec_name = ":".join(rec_parts[3:-1]) or rec_name
+                else:
+                    rec_name = ":".join(rec_parts[3:]) or rec_name
+
             if not ALLOW_TRADE:
                 self._answer_callback(callback_id, "매매 비활성화 상태입니다.")
                 self._send("🔒 매매 실행이 비활성화되어 있습니다.")
                 return
-            order_action = "buy" if "buy" in data else "sell"
-            price_type = "limit" if "limit" in data else "market"
+            order_action = "buy" if "buy" in action_token else "sell"
+            price_type = "limit" if "limit" in action_token else "market"
             side = "매수" if order_action == "buy" else "매도"
             self._answer_callback(callback_id, f"추천 {rec_qty:,}주 {side} — 주문시장 선택.")
             self._prompt_market_selection(
@@ -430,6 +459,7 @@ class TelegramBot:
                 price_type=price_type,
                 code=rec_code,
                 name=rec_name,
+                signal_id=rec_signal_id,
                 rec_qty=rec_qty,
             )
             return
@@ -593,19 +623,26 @@ class TelegramBot:
             self._send(result)
             return
 
-        parts = data.split(":", 3)
-        if len(parts) < 3:
+        parts = data.split(":")
+        if len(parts) < 2:
             self._answer_callback(callback_id)
             return
         action, code = parts[0], parts[1]
-        # name에 signal_id가 붙어 있을 수 있음: "한국전력:5" → split으로 분리
-        name_sid = parts[2] if len(parts) > 2 else ""
-        extra = parts[3] if len(parts) > 3 else ""
-        # extra가 숫자면 signal_id, 아니면 name의 일부 (하위호환)
-        if extra.isdigit():
-            name, _signal_id = name_sid, int(extra)
-        else:
-            name, _signal_id = (name_sid + (":" + extra if extra else "")), None
+        _signal_id = None
+        name = _resolve_name_by_code(code, kiwoom=self._kiwoom)
+
+        # 신규 포맷: action:code:signal_id
+        if len(parts) == 3 and parts[2].isdigit():
+            _signal_id = int(parts[2]) if parts[2] != "0" else None
+        # 레거시 포맷: action:code:name[:signal_id]
+        elif len(parts) >= 3:
+            if parts[-1].isdigit():
+                _signal_id = int(parts[-1]) if parts[-1] != "0" else None
+                legacy_name = ":".join(parts[2:-1]).strip()
+            else:
+                legacy_name = ":".join(parts[2:]).strip()
+            if legacy_name:
+                name = legacy_name
 
         if action == "hold":
             self._answer_callback(callback_id, "홀드 유지.")

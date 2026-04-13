@@ -31,6 +31,7 @@ _SYSTEM_PROMPT = """당신은 개인 투자자의 퀀트 트레이딩 시스템�
 - 도구 사용 순서는 고정하지 말고 상황에 맞게 자율적으로 선택할 것
 - 등록 여부는 실제 확인한 데이터에만 근거할 것
 - 애매하면 등록하지 말고 보류 또는 미등록으로 남길 것
+- 유사 사례 참고가 필요하면 search_screening_context / search_text_context / search_similar_signals를 선택적으로 활용할 것
 
 ## 출력 형식
 분석한 종목별로:

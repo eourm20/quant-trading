@@ -214,6 +214,7 @@ class SearchSimilarSignalsTool(BaseTool):
         "현재 RSI, 추세, 거래량 등과 유사했던 과거 신호를 검색하여 "
         "당시 AI 판단(verdict)과 실제 수익률을 반환합니다. "
         "주 판단 도구라기보다 확신이 애매한 상황에서 과거 유사 사례를 참고하는 보조 도구입니다. "
+        "결과가 0건이면 내부적으로 범위를 완화해 재검색합니다(엄격→완화→광범위). "
         "현재 종목의 실제 포지션·현금·뉴스 확인을 대체하지는 않습니다."
     )
     input_schema = {
@@ -241,12 +242,77 @@ class SearchSimilarSignalsTool(BaseTool):
     ) -> dict:
         try:
             from data.db import search_similar_signals
+            # 1) strict: 요청값 그대로
             rows = search_similar_signals(
                 rsi=rsi, trend=trend, signal_type=signal_type,
                 volume_ratio=volume_ratio, above_ma20=above_ma20,
                 limit=limit, days=days,
             )
-            return {"count": len(rows), "signals": rows}
+            stage = "strict"
+            used_filters = {
+                "rsi": rsi,
+                "trend": trend,
+                "signal_type": signal_type or "",
+                "volume_ratio": volume_ratio,
+                "above_ma20": above_ma20,
+                "days": days,
+            }
+
+            # 2) relaxed: 허용 오차 확대 + above_ma20 완화 + 기간 확장
+            if not rows:
+                rows = search_similar_signals(
+                    rsi=rsi,
+                    trend=trend,
+                    signal_type=signal_type,
+                    volume_ratio=volume_ratio,
+                    above_ma20=None,
+                    limit=limit,
+                    days=min(max(days, 180), 365),
+                    rsi_tolerance=10.0,
+                    volume_low_multiplier=0.25,
+                    volume_high_multiplier=3.0,
+                )
+                if rows:
+                    stage = "relaxed"
+                    used_filters.update({
+                        "above_ma20": None,
+                        "days": min(max(days, 180), 365),
+                        "rsi_tolerance": 10.0,
+                        "volume_range": "x0.25~x3.0",
+                    })
+
+            # 3) broad: trend/signal_type까지 완화
+            if not rows:
+                rows = search_similar_signals(
+                    rsi=rsi,
+                    trend=None,
+                    signal_type="",
+                    volume_ratio=volume_ratio,
+                    above_ma20=None,
+                    limit=limit,
+                    days=365,
+                    rsi_tolerance=12.0,
+                    volume_low_multiplier=0.2,
+                    volume_high_multiplier=4.0,
+                )
+                if rows:
+                    stage = "broad"
+                    used_filters.update({
+                        "trend": None,
+                        "signal_type": "",
+                        "above_ma20": None,
+                        "days": 365,
+                        "rsi_tolerance": 12.0,
+                        "volume_range": "x0.2~x4.0",
+                    })
+
+            return {
+                "count": len(rows),
+                "signals": rows,
+                "search_stage": stage,
+                "fallback_used": stage != "strict",
+                "used_filters": used_filters,
+            }
         except Exception as e:
             return {"error": str(e)}
 

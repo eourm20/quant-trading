@@ -194,17 +194,8 @@ class KiwoomClient:
             results.extend(rows if isinstance(rows, list) else [])
         return results
 
-    def get_executions(self, stock_code: str = "") -> list[dict]:
-        """당일 체결 내역 조회 (kt00007 계좌별주문체결내역상세요청).
-        stock_code 지정 시 해당 종목만 필터링하여 반환.
-        반환: [{"stock_code", "stock_name", "side", "quantity", "price", "time"}, ...]
-        """
-        payload = self._post(
-            "/api/dostk/acnt",
-            "kt00007",
-            {"qry_tp": "1", "stk_bond_tp": "1", "sell_tp": "0", "dmst_stex_tp": "0"},
-        )
-        rows = payload.get("acnt_ord_cntr_prps_dtl", [])
+    def _parse_executions_rows(self, rows: list, stock_code: str = "") -> list[dict]:
+        """kt00007 raw rows 파싱."""
         if not isinstance(rows, list):
             return []
         result = []
@@ -231,6 +222,51 @@ class KiwoomClient:
                 "market": str(r.get("dmst_stex_tp") or ""),
             })
         return result
+
+    @staticmethod
+    def _normalize_yyyymmdd(trade_date: str) -> str:
+        s = str(trade_date or "").strip().replace("-", "")
+        if len(s) == 8 and s.isdigit():
+            return s
+        return ""
+
+    def get_executions(self, stock_code: str = "", trade_date: str = "") -> list[dict]:
+        """체결 내역 조회 (kt00007 계좌별주문체결내역상세요청).
+
+        - trade_date 미지정: 당일 조회
+        - trade_date 지정(YYYYMMDD / YYYY-MM-DD): 일자 지정 조회 시도
+        """
+        base = {"qry_tp": "1", "stk_bond_tp": "1", "sell_tp": "0", "dmst_stex_tp": "0"}
+        ymd = self._normalize_yyyymmdd(trade_date)
+        bodies = [base]
+        if ymd:
+            # 환경/계좌별 차이를 고려해 날짜 필드 후보를 순차 시도
+            bodies = [
+                {**base, "qry_dt": ymd},
+                {**base, "ord_dt": ymd},
+                {**base, "trde_dt": ymd},
+                {**base, "strt_dt": ymd, "end_dt": ymd},
+            ]
+
+        merged: dict[tuple[str, str, str, str], dict] = {}
+        for body in bodies:
+            try:
+                payload = self._post("/api/dostk/acnt", "kt00007", body)
+            except Exception:
+                continue
+            rows = payload.get("acnt_ord_cntr_prps_dtl", [])
+            for item in self._parse_executions_rows(rows, stock_code=stock_code):
+                k = (
+                    str(item.get("order_no") or ""),
+                    str(item.get("stock_code") or ""),
+                    str(item.get("side") or ""),
+                    str(item.get("time") or ""),
+                )
+                merged[k] = item
+            if merged:
+                # 첫 성공 응답이 있으면 추가 요청은 중단
+                break
+        return list(merged.values())
 
     def get_pending_orders(self, stock_code: str = "") -> list[dict]:
         """당일 미체결 주문 조회 (ka10075 미체결요청).
@@ -333,6 +369,121 @@ class KiwoomClient:
                 except Exception as e:
                     logger.warning(f"매매 내역 조회 실패 (tp={tp}, market={market}): {e}")
         return results
+
+    @staticmethod
+    def _to_num(value) -> float | None:
+        try:
+            s = str(value or "").replace(",", "").strip()
+            if not s:
+                return None
+            return float(s)
+        except Exception:
+            return None
+
+    def _extract_realized_metrics(self, payload: dict) -> dict:
+        """실현손익 관련 수치 후보를 payload에서 최대한 보수적으로 추출."""
+        import re
+
+        pnl_candidates: list[tuple[str, float]] = []
+        fee_candidates: list[float] = []
+        tax_candidates: list[float] = []
+
+        def _walk(obj, prefix: str = ""):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    key = f"{prefix}.{k}" if prefix else str(k)
+                    _walk(v, key)
+                return
+            if isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    _walk(item, f"{prefix}[{i}]")
+                return
+            n = self._to_num(obj)
+            if n is None:
+                return
+            lk = prefix.lower()
+            # 수수료 / 세금
+            if any(x in lk for x in ("fee", "수수료")):
+                fee_candidates.append(n)
+            if any(x in lk for x in ("tax", "세금")):
+                tax_candidates.append(n)
+            # 실현손익 계열 후보
+            if any(x in lk for x in ("실현", "손익", "prft", "profit", "pnl", "손익금", "pl")):
+                # 비율/퍼센트로 보이는 필드는 제외
+                if re.search(r"(rate|rt|율|퍼센트|pct)", lk):
+                    return
+                pnl_candidates.append((prefix, n))
+
+        _walk(payload)
+
+        realized_pnl = None
+        source_key = ""
+        if pnl_candidates:
+            # 절대값이 가장 큰 값을 대표치로 사용
+            source_key, realized_pnl = max(pnl_candidates, key=lambda x: abs(x[1]))
+
+        fee = sum(fee_candidates) if fee_candidates else None
+        tax = sum(tax_candidates) if tax_candidates else None
+        return {
+            "realized_pnl": realized_pnl,
+            "fee": fee,
+            "tax": tax,
+            "pnl_source_key": source_key,
+            "pnl_candidates": len(pnl_candidates),
+        }
+
+    def get_realized_pnl_today(self) -> dict:
+        """당일 실현손익 조회 (ka10077 우선, ka10074 폴백)."""
+        api_candidates = [
+            ("ka10077", [{"tp": "0"}, {"tp": "1"}, {"tp": "2"}]),
+            ("ka10074", [{"qry_tp": "2"}, {"tp": "0"}]),
+        ]
+        for api_id, bodies in api_candidates:
+            for body in bodies:
+                try:
+                    payload = self._post("/api/dostk/acnt", api_id, body)
+                    metrics = self._extract_realized_metrics(payload)
+                    return {"ok": True, "scope": "today", "api_id": api_id, "body": body, **metrics, "raw": payload}
+                except Exception as e:
+                    logger.debug(f"[실현손익] {api_id} 실패 body={body}: {e}")
+        return {"ok": False, "scope": "today", "error": "실현손익 API 호출 실패"}
+
+    def get_realized_pnl_period(self, days: int = 30) -> dict:
+        """기간 실현손익 조회 (ka10073 우선, ka10074 폴백)."""
+        end_dt = datetime.now(tz=KST).strftime("%Y%m%d")
+        start_dt = (datetime.now(tz=KST) - timedelta(days=max(1, int(days)))).strftime("%Y%m%d")
+        stex = self._trade_history_markets[0]
+        body_full = {
+            "strt_dt": start_dt,
+            "end_dt": end_dt,
+            "stk_cd": "",
+            "crnc_cd": "KRW",
+            "gds_tp": "1",
+            "dmst_stex_tp": stex,
+            "frgn_stex_code": "",
+        }
+        api_candidates = [
+            ("ka10073", [body_full, {"strt_dt": start_dt, "end_dt": end_dt}]),
+            ("ka10074", [body_full, {"strt_dt": start_dt, "end_dt": end_dt}]),
+        ]
+        for api_id, bodies in api_candidates:
+            for body in bodies:
+                try:
+                    payload = self._post("/api/dostk/acnt", api_id, body)
+                    metrics = self._extract_realized_metrics(payload)
+                    return {
+                        "ok": True,
+                        "scope": "period",
+                        "api_id": api_id,
+                        "body": body,
+                        "start_dt": start_dt,
+                        "end_dt": end_dt,
+                        **metrics,
+                        "raw": payload,
+                    }
+                except Exception as e:
+                    logger.debug(f"[실현손익] {api_id} 실패 body_keys={list(body.keys())}: {e}")
+        return {"ok": False, "scope": "period", "start_dt": start_dt, "end_dt": end_dt, "error": "실현손익 API 호출 실패"}
 
     def _load_stock_map(self) -> None:
         """당일 캐시가 없으면 ka10099로 코스피/코스닥 전종목 로드."""

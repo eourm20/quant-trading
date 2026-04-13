@@ -16,6 +16,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 from worker.clients.kiwoom_client import KiwoomClient
 from data.db import (
     upsert_portfolio, upsert_trades, get_portfolio_updated_at,
+    backfill_trades_from_executions, upsert_trades_from_executions,
     get_positions, get_position, create_position_from_trade,
     update_position_field, delete_position,
 )
@@ -42,13 +43,36 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
 
     # 매매 내역
     try:
-        trades = client.get_trade_history(days=30)
-        upsert_trades(trades)
-        result["trades"] = len(trades)
-        logger.info(f"매매 내역 동기화 완료: {len(trades)}건")
+        if getattr(client, "_is_mock", False):
+            # 모의투자: kt00015 미지원 → kt00007(당일 체결) 기반 동기화
+            executions = client.get_executions()
+            synced = upsert_trades_from_executions(executions)
+            result["trades"] = int(synced or 0)
+            logger.info(f"매매 내역 동기화(모의/kt00007) 완료: {synced}건")
+        else:
+            trades = client.get_trade_history(days=30)
+            upsert_trades(trades)
+            result["trades"] = len(trades)
+            logger.info(f"매매 내역 동기화 완료: {len(trades)}건")
     except Exception as e:
         result["errors"].append(f"매매 내역: {e}")
         logger.error(f"매매 내역 동기화 실패: {e}")
+
+    # 체결내역 기반 보정 (kt00007): price=0 임시행/부분체결 평균가 보정
+    try:
+        executions = client.get_executions()
+        bf = backfill_trades_from_executions(executions)
+        result["trades_backfilled"] = bf.get("updated", 0)
+        if bf.get("updated", 0) > 0:
+            logger.info(
+                "[매매 보정] 체결내역 반영 %s건 (order_no=%s, fallback=%s)",
+                bf.get("updated", 0),
+                bf.get("matched_by_order_no", 0),
+                bf.get("matched_by_fallback", 0),
+            )
+    except Exception as e:
+        result["errors"].append(f"체결 보정: {e}")
+        logger.warning(f"체결내역 기반 매매 보정 실패: {e}")
 
     # ── positions 동기화 ──
     result["positions_created"] = 0

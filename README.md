@@ -52,10 +52,23 @@ AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
 ### 4) 텔레그램 Markdown 파싱 실패 폴백
 - Markdown entity 파싱 실패 시 plain text로 자동 재전송
 - 일반 알림/인라인 버튼/임계값 제안/봇 응답 모두 동일 폴백 적용
+- `callback_data`를 짧은 포맷(`code/signal_id` 중심)으로 정리하고, 봇은 신규/레거시 포맷을 모두 파싱하도록 개선
 
 관련 코드:
 - `notifications/telegram.py`
 - `notifications/telegram_bot.py`
+
+### 5) RAG 검색 커버리지 확장
+- `search_similar_signals`가 0건일 때 단계별 폴백(엄격→완화→광범위)으로 재검색
+- RSI/거래량 유사도 허용 오차를 파라미터화해 검색 범위를 런타임에서 조정 가능
+- Research Agent 도구셋에 `search_text_context`, `search_similar_signals`를 추가해
+  스크리닝 이력뿐 아니라 신호 이력 기반 참고도 가능
+
+관련 코드:
+- `data/db.py`
+- `worker/agents/tools/db_tools.py`
+- `worker/agents/tools/registry.py`
+- `worker/agents/research_agent.py`
 
 ---
 

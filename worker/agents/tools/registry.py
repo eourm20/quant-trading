@@ -118,8 +118,8 @@ def load_research_tools() -> list[BaseTool]:
         GetSectorNewsTool,
         GetGlobalMarketTool,
     )
-    from worker.agents.tools.db_tools import AddToWatchlistTool
-    from worker.agents.tools.rag_tools import SearchScreeningContextTool
+    from worker.agents.tools.db_tools import AddToWatchlistTool, SearchSimilarSignalsTool
+    from worker.agents.tools.rag_tools import SearchScreeningContextTool, SearchTextContextTool
 
     return [
         GetCurrentPriceTool(),
@@ -135,6 +135,8 @@ def load_research_tools() -> list[BaseTool]:
         GetMacroNewsTool(),
         GetSectorNewsTool(),
         GetGlobalMarketTool(),
+        SearchTextContextTool(),
         SearchScreeningContextTool(),
+        SearchSimilarSignalsTool(),
         AddToWatchlistTool(),
     ]

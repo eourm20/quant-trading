@@ -36,6 +36,8 @@ prefilter:
   bear_rsi_max_add: 5.0         # 약세장 시 RSI 상단 +N 완화
   bear_ma_ratio_sub: 0.07       # 약세장 시 MA역배열 허용 완화 (0.95 → 0.88, 12% 역배열까지 허용)
   bear_consecutive_disable: true  # 약세장 시 연속양봉 체크 비활성화 (폭락장 역행 강세 = 강한 종목)
+  prefilter_input_cap: 25         # 장중 스캔 프리필터 입력 최대 후보 수 (429 완화, hts 우선)
+  prefilter_fallback_candidates: 5  # 프리필터 통과 0건 시 near-miss 복구 개수
   max_ai_candidates: 10           # 프리필터 통과 후 AI 분석 상한 (hts 우선순위)
 
 # KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)

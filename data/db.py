@@ -297,9 +297,20 @@ def init_db():
                 price        INTEGER NOT NULL,
                 amount       INTEGER NOT NULL,
                 fee          INTEGER NOT NULL DEFAULT 0,
-                tax          INTEGER NOT NULL DEFAULT 0
+                tax          INTEGER NOT NULL DEFAULT 0,
+                result_1d    REAL DEFAULT NULL,
+                result_3d    REAL DEFAULT NULL,
+                result_5d    REAL DEFAULT NULL
             )
         """)
+        # trades 마이그레이션: 성과 컬럼 추가
+        trade_cols = [r["name"] for r in conn.execute("PRAGMA table_info(trades)").fetchall()]
+        if "result_1d" not in trade_cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN result_1d REAL DEFAULT NULL")
+        if "result_3d" not in trade_cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN result_3d REAL DEFAULT NULL")
+        if "result_5d" not in trade_cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN result_5d REAL DEFAULT NULL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS strategy_notes (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -309,6 +320,21 @@ def init_db():
                 detail     TEXT NOT NULL DEFAULT ''
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS realized_pnl_snapshots (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at    TEXT NOT NULL,
+                scope         TEXT NOT NULL,   -- today | period
+                start_dt      TEXT DEFAULT NULL,
+                end_dt        TEXT DEFAULT NULL,
+                realized_pnl  REAL DEFAULT NULL,
+                fee           REAL DEFAULT NULL,
+                tax           REAL DEFAULT NULL,
+                source_api    TEXT NOT NULL,
+                raw_json      TEXT DEFAULT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_realized_pnl_scope_date ON realized_pnl_snapshots (scope, created_at)")
         # ── positions 테이블 (매수 후 포지션 관리용) ──
         conn.execute("""
             CREATE TABLE IF NOT EXISTS positions (
@@ -772,7 +798,9 @@ def get_portfolio_updated_at() -> str | None:
 # ── 매매 내역 ──────────────────────────────────────────────────────────────
 
 def upsert_trades(trades: list[dict]):
-    """매매 내역 추가 (중복 무시)"""
+    """매매 내역 upsert.
+    기존 임시 기록(price=0, fee/tax=0)을 실제 체결 데이터로 갱신한다.
+    """
     with get_conn() as conn:
         for t in trades:
             trade_id = str(t.get("trde_no") or t.get("ord_no") or "")
@@ -786,10 +814,20 @@ def upsert_trades(trades: list[dict]):
             side = "매수" if io_tp == "2" else "매도"
             conn.execute(
                 """
-                INSERT OR IGNORE INTO trades
+                INSERT INTO trades
                     (trade_id, executed_at, stock_code, stock_name, side,
                      quantity, price, amount, fee, tax)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_id) DO UPDATE SET
+                    executed_at = excluded.executed_at,
+                    stock_code = excluded.stock_code,
+                    stock_name = excluded.stock_name,
+                    side = excluded.side,
+                    quantity = excluded.quantity,
+                    price = excluded.price,
+                    amount = excluded.amount,
+                    fee = excluded.fee,
+                    tax = excluded.tax
                 """,
                 (
                     trade_id,
@@ -805,6 +843,177 @@ def upsert_trades(trades: list[dict]):
                 ),
             )
         conn.commit()
+
+
+def backfill_trades_from_executions(executions: list[dict]) -> dict:
+    """kt00007 체결내역으로 trades 가격/수량/금액 보정.
+
+    우선순위:
+    1) order_no == trade_id 직접 매칭
+    2) fallback: 당일 동일 종목/매매구분 + price<=0 인 최근 행 매칭
+    """
+    from collections import defaultdict
+
+    grouped: dict[tuple[str, str, str], dict] = defaultdict(lambda: {
+        "stock_name": "",
+        "qty_sum": 0,
+        "amt_sum": 0,
+    })
+
+    for e in executions or []:
+        code = str(e.get("stock_code") or "").replace("A", "", 1).strip()
+        side = str(e.get("side") or "").strip()
+        order_no = str(e.get("order_no") or "").strip()
+        qty = _p(e.get("quantity"))
+        price = _p(e.get("price"))
+        if not code or not side or qty <= 0 or price <= 0:
+            continue
+        key = (order_no, code, side)
+        grouped[key]["stock_name"] = str(e.get("stock_name") or "").strip() or grouped[key]["stock_name"]
+        grouped[key]["qty_sum"] += qty
+        grouped[key]["amt_sum"] += qty * price
+
+    if not grouped:
+        return {"updated": 0, "matched_by_order_no": 0, "matched_by_fallback": 0}
+
+    today = _now_kst().strftime("%Y-%m-%d")
+    updated = 0
+    matched_by_order = 0
+    matched_by_fallback = 0
+
+    with get_conn() as conn:
+        for (order_no, code, side), agg in grouped.items():
+            qty = int(agg["qty_sum"])
+            amt = int(agg["amt_sum"])
+            if qty <= 0 or amt <= 0:
+                continue
+            avg_price = int(round(amt / qty))
+            stock_name = agg["stock_name"]
+
+            # 1) order_no 직접 매칭
+            if order_no:
+                cur = conn.execute(
+                    """UPDATE trades
+                       SET stock_name = COALESCE(NULLIF(?, ''), stock_name),
+                           quantity = ?,
+                           price = ?,
+                           amount = ?
+                       WHERE trade_id = ?""",
+                    (stock_name, qty, avg_price, amt, order_no),
+                )
+                if cur.rowcount > 0:
+                    updated += cur.rowcount
+                    matched_by_order += cur.rowcount
+                    continue
+
+            # 2) fallback: 당일 임시행(price<=0) 보정
+            row = conn.execute(
+                """SELECT trade_id FROM trades
+                   WHERE stock_code = ?
+                     AND side = ?
+                     AND executed_at = ?
+                     AND (price IS NULL OR price <= 0)
+                   ORDER BY rowid DESC
+                   LIMIT 1""",
+                (code, side, today),
+            ).fetchone()
+            if not row:
+                continue
+            cur = conn.execute(
+                """UPDATE trades
+                   SET stock_name = COALESCE(NULLIF(?, ''), stock_name),
+                       quantity = ?,
+                       price = ?,
+                       amount = ?
+                   WHERE trade_id = ?""",
+                (stock_name, qty, avg_price, amt, row["trade_id"]),
+            )
+            if cur.rowcount > 0:
+                updated += cur.rowcount
+                matched_by_fallback += cur.rowcount
+
+        conn.commit()
+
+    return {
+        "updated": updated,
+        "matched_by_order_no": matched_by_order,
+        "matched_by_fallback": matched_by_fallback,
+    }
+
+
+def upsert_trades_from_executions(executions: list[dict], executed_at: str | None = None) -> int:
+    """kt00007 체결내역을 trades로 누적 저장/갱신.
+
+    - order_no 기준으로 부분체결을 합산하여 1건으로 저장
+    - fee/tax는 0으로 유지 (정산 API 반영 전까지 미확정)
+    """
+    from collections import defaultdict
+
+    if not executions:
+        return 0
+
+    if executed_at:
+        dt = str(executed_at).replace("-", "").strip()
+        executed_day = f"{dt[:4]}-{dt[4:6]}-{dt[6:]}" if len(dt) == 8 and dt.isdigit() else _now_kst().strftime("%Y-%m-%d")
+    else:
+        executed_day = _now_kst().strftime("%Y-%m-%d")
+
+    grouped: dict[tuple[str, str, str], dict] = defaultdict(lambda: {
+        "stock_name": "",
+        "qty_sum": 0,
+        "amt_sum": 0,
+    })
+    fallback_idx = 0
+
+    for e in executions:
+        code = str(e.get("stock_code") or "").replace("A", "", 1).strip()
+        side = str(e.get("side") or "").strip() or "매수"
+        order_no = str(e.get("order_no") or "").strip()
+        qty = _p(e.get("quantity"))
+        price = _p(e.get("price"))
+        if not code or qty <= 0 or price <= 0:
+            continue
+        if not order_no:
+            fallback_idx += 1
+            order_no = f"EXE-{executed_day}-{code}-{side}-{fallback_idx}"
+        key = (order_no, code, side)
+        grouped[key]["stock_name"] = str(e.get("stock_name") or "").strip() or grouped[key]["stock_name"]
+        grouped[key]["qty_sum"] += qty
+        grouped[key]["amt_sum"] += qty * price
+
+    if not grouped:
+        return 0
+
+    upserted = 0
+    with get_conn() as conn:
+        for (trade_id, code, side), agg in grouped.items():
+            qty = int(agg["qty_sum"])
+            amt = int(agg["amt_sum"])
+            if qty <= 0 or amt <= 0:
+                continue
+            avg_price = int(round(amt / qty))
+            stock_name = agg["stock_name"]
+            cur = conn.execute(
+                """
+                INSERT INTO trades
+                    (trade_id, executed_at, stock_code, stock_name, side,
+                     quantity, price, amount, fee, tax)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+                ON CONFLICT(trade_id) DO UPDATE SET
+                    executed_at = excluded.executed_at,
+                    stock_code = excluded.stock_code,
+                    stock_name = excluded.stock_name,
+                    side = excluded.side,
+                    quantity = excluded.quantity,
+                    price = excluded.price,
+                    amount = excluded.amount
+                """,
+                (trade_id, executed_day, code, stock_name, side, qty, avg_price, amt),
+            )
+            if cur.rowcount > 0:
+                upserted += cur.rowcount
+        conn.commit()
+    return upserted
 
 
 def insert_trade_direct(
@@ -844,6 +1053,16 @@ def get_trades(limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def update_trade_result(trade_id: str, result_pct: float, period: str = "3d"):
+    """실거래 1일/3일/5일 성과 업데이트."""
+    col = {"1d": "result_1d", "3d": "result_3d", "5d": "result_5d"}.get(period)
+    if not col:
+        raise ValueError(f"지원하지 않는 period: {period}")
+    with get_conn() as conn:
+        conn.execute(f"UPDATE trades SET {col} = ? WHERE trade_id = ?", (result_pct, trade_id))
+        conn.commit()
+
+
 def get_recent_trades_for_stock(stock_code: str, days: int = 3) -> list[dict]:
     """특정 종목의 최근 N일 매매 이력 조회 (최신순)"""
     from datetime import timedelta
@@ -857,6 +1076,60 @@ def get_recent_trades_for_stock(stock_code: str, days: int = 3) -> list[dict]:
             return [dict(r) for r in rows]
         except Exception:
             return []
+
+
+def save_realized_pnl_snapshot(
+    scope: str,
+    source_api: str,
+    realized_pnl: float | None = None,
+    fee: float | None = None,
+    tax: float | None = None,
+    start_dt: str | None = None,
+    end_dt: str | None = None,
+    raw: dict | None = None,
+) -> int:
+    """실현손익 API 스냅샷 저장. 반환: snapshot id."""
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO realized_pnl_snapshots
+               (created_at, scope, start_dt, end_dt, realized_pnl, fee, tax, source_api, raw_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                now,
+                scope,
+                start_dt,
+                end_dt,
+                realized_pnl,
+                fee,
+                tax,
+                source_api,
+                json.dumps(raw, ensure_ascii=False) if raw is not None else None,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def get_recent_realized_pnl_snapshots(limit: int = 20, scope: str = "") -> list[dict]:
+    """최근 실현손익 스냅샷 조회."""
+    with get_conn() as conn:
+        if scope:
+            rows = conn.execute(
+                """SELECT * FROM realized_pnl_snapshots
+                   WHERE scope = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (scope, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM realized_pnl_snapshots
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── 전략 노트 ──────────────────────────────────────────────────────────────
@@ -1482,6 +1755,9 @@ def search_similar_signals(
     above_ma20: bool | None = None,
     limit: int = 5,
     days: int = 90,
+    rsi_tolerance: float = 5.0,
+    volume_low_multiplier: float = 0.5,
+    volume_high_multiplier: float = 2.0,
 ) -> list[dict]:
     """현재 지표와 유사한 과거 신호 검색 (SQL 범위 필터 기반 RAG).
 
@@ -1493,8 +1769,9 @@ def search_similar_signals(
     params: list = [since]
 
     if rsi is not None:
+        tol = max(0.5, float(rsi_tolerance))
         conditions.append("json_extract(indicator_snapshot, '$.rsi') BETWEEN ? AND ?")
-        params += [rsi - 5, rsi + 5]
+        params += [rsi - tol, rsi + tol]
     if trend:
         conditions.append("json_extract(indicator_snapshot, '$.trend') = ?")
         params.append(trend)
@@ -1502,8 +1779,10 @@ def search_similar_signals(
         conditions.append("signal_type = ?")
         params.append(signal_type)
     if volume_ratio is not None:
+        low_mul = max(0.01, float(volume_low_multiplier))
+        high_mul = max(low_mul, float(volume_high_multiplier))
         conditions.append("json_extract(indicator_snapshot, '$.volume_ratio') BETWEEN ? AND ?")
-        params += [volume_ratio * 0.5, volume_ratio * 2.0]
+        params += [volume_ratio * low_mul, volume_ratio * high_mul]
     if above_ma20 is not None:
         conditions.append("json_extract(indicator_snapshot, '$.above_ma20') = ?")
         params.append(1 if above_ma20 else 0)

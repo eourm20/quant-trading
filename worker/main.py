@@ -50,7 +50,8 @@ from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
                      update_signal_result, update_signal_agent_trace, update_stock_field, save_strategy_note,
                      get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
-                     get_positions, get_position, update_position_field, create_position_from_trade)
+                     get_positions, get_position, update_position_field, create_position_from_trade,
+                     save_realized_pnl_snapshot)
 
 _log_prefix = os.getenv("LOG_PREFIX", "worker")
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
@@ -578,6 +579,89 @@ def update_paper_results():
                 time.sleep(0.5)
             except Exception as e:
                 logger.warning(f"[모의투자 결과 실패] {row['stock_name']}: {e}")
+
+
+def update_trade_results():
+    """실거래 1일/3일/5일 성과 업데이트 (매수/매도 방향 반영)."""
+    from datetime import timedelta
+    from data.db import get_conn, update_trade_result
+
+    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
+    for period_name, days_after, days_before, col_name in periods:
+        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
+        cutoff_to = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT trade_id, stock_code, stock_name, side, price FROM trades "
+                f"WHERE {col_name} IS NULL AND price > 0 AND executed_at >= ? AND executed_at < ?",
+                (cutoff_from, cutoff_to),
+            ).fetchall()
+
+        for row in rows:
+            try:
+                pd = kiwoom.get_current_price(row["stock_code"])
+                now_price = abs(int(str(pd.get("cur_prc") or pd.get("stk_prpr") or "0").replace(",", "")))
+                base = int(row["price"] or 0)
+                if now_price <= 0 or base <= 0:
+                    continue
+
+                raw_pct = (now_price - base) / base * 100
+                side = str(row["side"] or "")
+                # 매도 포지션은 하락이 유리하므로 부호 반전
+                signed_pct = -raw_pct if side in ("매도", "SELL", "sell") else raw_pct
+                update_trade_result(row["trade_id"], round(signed_pct, 2), period=period_name)
+                logger.debug(
+                    f"[실거래 결과 {period_name}] {row['stock_name']} {side}: "
+                    f"원시 {raw_pct:+.2f}% / 반영 {signed_pct:+.2f}%"
+                )
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"[실거래 결과 실패] {row['stock_name']}: {e}")
+
+
+def sync_realized_pnl():
+    """실현손익(당일/30일) 조회 후 스냅샷 저장."""
+    try:
+        today = kiwoom.get_realized_pnl_today()
+        if today.get("ok"):
+            sid = save_realized_pnl_snapshot(
+                scope="today",
+                source_api=today.get("api_id", ""),
+                realized_pnl=today.get("realized_pnl"),
+                fee=today.get("fee"),
+                tax=today.get("tax"),
+                raw=today.get("raw"),
+            )
+            logger.info(
+                f"[실현손익] today 저장 #{sid} api={today.get('api_id')} "
+                f"손익={today.get('realized_pnl')} fee={today.get('fee')} tax={today.get('tax')}"
+            )
+        else:
+            logger.warning(f"[실현손익] today 조회 실패: {today.get('error')}")
+    except Exception as e:
+        logger.warning(f"[실현손익] today 저장 실패: {e}")
+
+    try:
+        period = kiwoom.get_realized_pnl_period(days=30)
+        if period.get("ok"):
+            sid = save_realized_pnl_snapshot(
+                scope="period",
+                source_api=period.get("api_id", ""),
+                start_dt=period.get("start_dt"),
+                end_dt=period.get("end_dt"),
+                realized_pnl=period.get("realized_pnl"),
+                fee=period.get("fee"),
+                tax=period.get("tax"),
+                raw=period.get("raw"),
+            )
+            logger.info(
+                f"[실현손익] 30d 저장 #{sid} api={period.get('api_id')} "
+                f"손익={period.get('realized_pnl')} fee={period.get('fee')} tax={period.get('tax')}"
+            )
+        else:
+            logger.warning(f"[실현손익] 30d 조회 실패: {period.get('error')}")
+    except Exception as e:
+        logger.warning(f"[실현손익] 30d 저장 실패: {e}")
 
 
 def update_screening_results():
@@ -1398,9 +1482,15 @@ def main():
     scheduler.add_job(run_weekly_self_correction, "cron",
                       day_of_week="mon", hour=9, minute=5,
                       id="weekly_self_correction")
+    scheduler.add_job(sync_realized_pnl, "cron",
+                      day_of_week="mon-fri", hour="9,16,18", minute=20,
+                      id="realized_pnl_sync")
     scheduler.add_job(update_paper_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="paper_result_update")
+    scheduler.add_job(update_trade_results, "cron",
+                      day_of_week="mon-fri", hour="9-18", minute="*/30",
+                      id="trade_result_update")
     scheduler.add_job(run_news_monitor, "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="news_monitor")

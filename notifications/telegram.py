@@ -245,23 +245,22 @@ def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list 
         f"어떻게 하시겠습니까?"
     )
 
-    # 추천수량이 있으면 버튼에 수량 임베드 (rec_ 콜백) → 클릭 시 수량 입력 생략
-    # signal_id 접미사 — 행동 기록용 (없으면 생략)
-    sid = f":{signal_id}" if signal_id is not None else ""
+    # callback_data는 64바이트 제한이 있으므로 code/signal_id 중심으로 짧게 유지
+    sid_num = int(signal_id) if isinstance(signal_id, int) else 0
 
     # 추천수량이 없으면 기존 콜백 → 클릭 후 수량 직접 입력
     if rec_qty:
         qs = f" ({rec_qty:,}주)"
-        buy_market_cb  = f"rec_buy_market:{rec_qty}:{code}:{name}{sid}"
-        buy_limit_cb   = f"rec_buy_limit:{rec_qty}:{code}:{name}{sid}"
-        sell_market_cb = f"rec_sell_market:{rec_qty}:{code}:{name}{sid}"
-        sell_limit_cb  = f"rec_sell_limit:{rec_qty}:{code}:{name}{sid}"
+        buy_market_cb  = f"rec_buy_market:{rec_qty}:{code}:{sid_num}"
+        buy_limit_cb   = f"rec_buy_limit:{rec_qty}:{code}:{sid_num}"
+        sell_market_cb = f"rec_sell_market:{rec_qty}:{code}:{sid_num}"
+        sell_limit_cb  = f"rec_sell_limit:{rec_qty}:{code}:{sid_num}"
     else:
         qs = ""
-        buy_market_cb  = f"buy_market:{code}:{name}{sid}"
-        buy_limit_cb   = f"buy_limit:{code}:{name}{sid}"
-        sell_market_cb = f"sell_market:{code}:{name}{sid}"
-        sell_limit_cb  = f"sell_limit:{code}:{name}{sid}"
+        buy_market_cb  = f"buy_market:{code}:{sid_num}"
+        buy_limit_cb   = f"buy_limit:{code}:{sid_num}"
+        sell_market_cb = f"sell_market:{code}:{sid_num}"
+        sell_limit_cb  = f"sell_limit:{code}:{sid_num}"
 
     reply_markup = {
         "inline_keyboard": [
@@ -274,7 +273,7 @@ def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list 
                 {"text": f"📉 매도-지정가{qs}", "callback_data": sell_limit_cb},
             ],
             [
-                {"text": f"⏸ {name} 홀드", "callback_data": f"hold:{code}:{name}{sid}"},
+                {"text": f"⏸ {name} 홀드", "callback_data": f"hold:{code}:{sid_num}"},
             ],
         ]
     }

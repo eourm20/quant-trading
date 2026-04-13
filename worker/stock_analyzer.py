@@ -293,6 +293,7 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
         logger.warning(f"[프리필터] 시장 지수 조회 실패, 기본값 사용: {_e}")
 
     passed = []
+    near_miss: list[tuple[int, dict]] = []
     reject_counts = {"시총": 0, "등락률_상단": 0, "등락률_하단": 0, "RSI": 0, "MA역배열": 0, "거래량부족": 0, "거래량과열": 0, "연속양봉": 0}
     time.sleep(1)  # 후보 수집 후 대기
     for cand in candidates:
@@ -327,10 +328,19 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
             if change_pct > _change_upper:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% > +{_change_upper}% → 제외")
                 reject_counts["등락률_상단"] += 1
+                # 완화 후보: 상단 초과폭이 크지 않으면 near-miss로 보존 (후속 fallback 용)
+                overflow = change_pct - _change_upper
+                if not lightweight and overflow <= 3.0:
+                    near_miss.append((0, cand))  # 우선순위 높음
                 continue
             if change_pct < _change_lower:
                 logger.debug(f"[프리필터] {cand['stock_name']}: 등락률 {change_pct:+.1f}% < {_change_lower}% → 제외")
                 reject_counts["등락률_하단"] += 1
+                continue
+
+            if lightweight:
+                passed.append(cand)
+                time.sleep(0.2)
                 continue
 
             # 일봉 데이터로 RSI / MA / 거래량비율 / 연속양봉 체크 (HTS 포함 전체)
@@ -383,6 +393,8 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                 if all(closes[i] > opens[i] for i in range(_consec)):
                     logger.debug(f"[프리필터] {cand['stock_name']}: {_consec}일 연속 양봉 → 제외")
                     reject_counts["연속양봉"] += 1
+                    # 완화 후보: 강한 종목일 가능성 있어 near-miss로 보존
+                    near_miss.append((1, cand))
                     continue
 
             passed.append(cand)
@@ -394,6 +406,27 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
             time.sleep(3)  # 429 회복 대기
 
     active = {k: v for k, v in reject_counts.items() if v > 0}
+    if not passed and near_miss and not lightweight:
+        # 프리필터 전멸 시, near-miss를 소량 복구해 AI가 최종 판정하도록 위임
+        _tier_order = {"hts": 0, "general": 1}
+        near_miss.sort(key=lambda x: (x[0], _tier_order.get(x[1].get("source_tier", "general"), 1)))
+        _fallback_cap = int(_PREFILTER_CONFIG.get("prefilter_fallback_candidates", 5))
+        restored: list[dict] = []
+        seen = set()
+        for _, cand in near_miss:
+            code = cand.get("stock_code")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            restored.append(cand)
+            if len(restored) >= _fallback_cap:
+                break
+        if restored:
+            passed = restored
+            logger.info(
+                f"[프리필터] 통과 0건 → near-miss fallback {len(restored)}개 복구 "
+                f"(cap={_fallback_cap}, 사유 우선순위: 등락률_상단/연속양봉)"
+            )
     logger.info(f"[프리필터] {len(candidates)}개 → {len(passed)}개 통과 | 탈락 사유: {active}")
     return passed
 
@@ -488,6 +521,14 @@ def run_intraday_scan():
         logger.info("[장중 스캔] 후보 전부 쿨다운 중")
         return
 
+    # API 429 완화: 프리필터 입력 후보 수를 제한 (HTS 우선)
+    _tier_order = {"hts": 0, "general": 1}
+    _prefilter_cap = int(_PREFILTER_CONFIG.get("prefilter_input_cap", 25))
+    if len(filtered) > _prefilter_cap:
+        filtered.sort(key=lambda c: _tier_order.get(c.get("source_tier", "general"), 1))
+        logger.info(f"[장중 스캔] 후보 {len(filtered)}개 → 프리필터 입력 {_prefilter_cap}개로 제한 (hts 우선)")
+        filtered = filtered[:_prefilter_cap]
+
     # 프리필터: 풀 모드 (시총+등락률+RSI+MA)
     filtered = _prefilter_candidates(filtered, kiwoom)
     if not filtered:
@@ -495,7 +536,6 @@ def run_intraday_scan():
         return
 
     # source_tier 우선순위 정렬 (hts > general) 후 AI 분석 상한 적용
-    _tier_order = {"hts": 0, "general": 1}
     filtered.sort(key=lambda c: _tier_order.get(c.get("source_tier", "general"), 1))
     _max_ai = int(_PREFILTER_CONFIG.get("max_ai_candidates", 10))
     if len(filtered) > _max_ai:
