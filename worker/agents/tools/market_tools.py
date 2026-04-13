@@ -25,7 +25,11 @@ def _p(v) -> int:
 class GetCurrentPriceTool(BaseTool):
     name = "get_current_price"
     label = "현재가 조회"
-    description = "종목의 현재가, 등락률, 거래량 등 기본 시세 정보를 조회합니다."
+    description = (
+        "종목의 현재가, 등락률, 거래량 등 실시간 시세를 조회합니다. "
+        "신호 접수 시점과 현재 가격 사이에 급변이 의심될 때 호출하세요. "
+        "get_chart로 이미 충분한 경우 생략 가능합니다."
+    )
     input_schema = {
         "properties": {
             "stock_code": {

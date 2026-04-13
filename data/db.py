@@ -200,6 +200,15 @@ def init_db():
             conn.execute("ALTER TABLE signals ADD COLUMN portfolio_snapshot TEXT DEFAULT NULL")
         except Exception:
             pass
+        # Agent 학습용: 도구 사용 순서 + GPT 중간 추론
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN tool_sequence TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN reasoning_chain TEXT DEFAULT NULL")
+        except Exception:
+            pass
         # 스크리닝 AI 판단 이력 (RAG용)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS screening_log (
@@ -1191,6 +1200,25 @@ def save_signal(
         signal_id = cur.lastrowid
 
     return signal_id
+
+
+def update_signal_agent_trace(
+    signal_id: int,
+    tool_sequence: list[str],
+    reasoning_chain: list[str],
+) -> bool:
+    """Agent가 사용한 도구 순서 + GPT 중간 추론을 signals 테이블에 저장."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE signals SET tool_sequence = ?, reasoning_chain = ? WHERE id = ?",
+            (
+                json.dumps(tool_sequence, ensure_ascii=False),
+                json.dumps(reasoning_chain, ensure_ascii=False),
+                signal_id,
+            ),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def update_signal_result(signal_id: int, result_pct: float, period: str = "3d") -> bool:

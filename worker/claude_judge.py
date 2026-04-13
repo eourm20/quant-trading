@@ -11,6 +11,15 @@ logger = logging.getLogger(__name__)
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
+# Agent 모드 실행 시 마지막 trace 저장 (main.py에서 DB 기록에 활용)
+_last_agent_trace: dict = {}
+
+
+def get_last_agent_trace() -> dict:
+    """마지막 JudgmentAgent 실행의 tool_sequence + reasoning_chain 반환.
+    Agent 모드가 아니었거나 실패한 경우 빈 dict 반환."""
+    return dict(_last_agent_trace)
+
 _TRADING_KNOWLEDGE = """## 트레이딩 분석 지식 (기술적 분석 프레임워크)
 
 ### 1. 캔들 분석
@@ -641,10 +650,19 @@ def get_trade_opinion(
     if _use_agent:
         try:
             from worker.agents.judgment_agent import JudgmentAgent
-            return JudgmentAgent().run(signal)
+            _agent = JudgmentAgent()
+            _opinion = _agent.run(signal)
+            # 마지막 agent trace를 모듈 변수에 저장 (main.py에서 DB 저장에 활용)
+            global _last_agent_trace
+            _last_agent_trace = {
+                "tool_sequence": _agent.used_tools,
+                "reasoning_chain": _agent.reasoning_chain,
+            }
+            return _opinion
         except Exception as _e:
             logger.warning(f"[Agent모드] 실패, 레거시로 폴백: {_e}")
 
+    _last_agent_trace = {}
     return _legacy_get_trade_opinion(signal, holdings, kospi, kosdaq, sector, recent_trades, deposit)
 
 

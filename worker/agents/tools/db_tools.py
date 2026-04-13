@@ -39,7 +39,12 @@ class GetSignalHistoryTool(BaseTool):
 class GetEntryReasonTool(BaseTool):
     name = "get_entry_reason"
     label = "진입 근거 조회"
-    description = "해당 종목의 최근 전략 노트(진입 근거, 매매 메모)를 조회합니다. 전략 노트는 종목명(한글)으로 기록되므로 stock_name을 반드시 전달하세요."
+    description = (
+        "해당 종목의 최근 전략 노트를 조회합니다. "
+        "진입 근거·매매 메모뿐 아니라, 이전 홀드 판단 시 저장된 전환조건도 포함됩니다. "
+        "'RSI X 회복 시 매수 재검토' 같은 이전 조건을 현재 판단에 반영하세요. "
+        "전략 노트는 종목명(한글)으로 기록되므로 stock_name을 반드시 전달하세요."
+    )
     input_schema = {
         "properties": {
             "stock_name": {

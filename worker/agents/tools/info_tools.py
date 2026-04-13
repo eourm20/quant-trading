@@ -12,7 +12,12 @@ logger = logging.getLogger(__name__)
 class GetNewsTool(BaseTool):
     name = "get_news"
     label = "뉴스 검색"
-    description = "종목명 기준으로 최근 뉴스를 검색하여 반환합니다."
+    description = (
+        "종목 관련 최근 뉴스를 검색합니다. "
+        "악재(소송·리콜·실적 쇼크)나 호재(수주·계약·실적 서프라이즈) 등 "
+        "주가에 영향을 줄 이슈를 파악할 때 호출하세요. "
+        "지표가 긍정적이어도 악재 뉴스가 있으면 홀드 근거가 됩니다."
+    )
     input_schema = {
         "properties": {
             "stock_name": {
@@ -42,7 +47,11 @@ class GetNewsTool(BaseTool):
 class GetDartTool(BaseTool):
     name = "get_dart"
     label = "공시·재무 조회"
-    description = "DART에서 종목의 최근 공시 및 재무 정보를 조회합니다."
+    description = (
+        "DART에서 종목의 최근 공시(수주·지분변동·유상증자 등)와 재무지표를 조회합니다. "
+        "펀더멘털 변화 여부 확인에 필수입니다. "
+        "유상증자·대규모 지분매도 등 희석 이벤트가 있으면 매수를 보류하세요."
+    )
     input_schema = {
         "properties": {
             "stock_code": {

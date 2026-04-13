@@ -41,14 +41,14 @@ load_dotenv(dotenv_path=_env_file, override=True)
 
 from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
-from worker.claude_judge import get_trade_opinion, judge_position_values, get_dip_buy_opinion
+from worker.claude_judge import get_trade_opinion, judge_position_values, get_dip_buy_opinion, get_last_agent_trace
 from worker.cooldown import filter_new_conditions, mark_sent
 from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review, reassess_watchlist
 from worker.portfolio_sync import sync_all
 from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
-                     update_signal_result, update_stock_field, save_strategy_note,
+                     update_signal_result, update_signal_agent_trace, update_stock_field, save_strategy_note,
                      get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
                      get_positions, get_position, update_position_field, create_position_from_trade)
 
@@ -141,7 +141,11 @@ def _rag_index_signal(
 
 
 def _maybe_save_hold_conditions(signal, opinion: str):
-    """AI가 홀드 판단 시 [전환조건]/[임계값] 파싱 → 전략 노트 저장 + 텔레그램 변경 제안."""
+    """AI가 홀드 판단 시 [전환조건]/[임계값] 파싱.
+
+    전환조건: 항상 strategy_notes에 저장 → 이후 Agent 판단 시 get_entry_reason으로 참조
+    임계값: 별도로 사용자 승인 후 watchlist 반영 (전략 원칙에 따라 허용 필드 제한)
+    """
     import re
     if not opinion:
         return
@@ -158,31 +162,35 @@ def _maybe_save_hold_conditions(signal, opinion: str):
             condition_text = stripped[len("[전환조건]"):].strip()
         elif stripped.startswith("[임계값]"):
             content = stripped[len("[임계값]"):].strip()
-            # 전략 원칙상 자동 제안 허용 필드만 포함
-            # - stop_loss_price/target_price: 진입 시 확정, AI 자동 변경 금지
-            # - rsi_oversold: 빈번한 변경 금지 (신호 빈도 조절 목적 차단)
             allowed = {"rsi_overbought", "rsi_oversold_intraday", "volume_surge_ratio"}
             for match in re.finditer(r"(\w+)\s*=\s*([\d,]+(?:\.\d+)?)", content):
                 field, value_str = match.group(1), match.group(2).replace(",", "")
                 if field not in allowed:
                     logger.warning(f"[{signal.stock_name}] 임계값 허용되지 않은 필드 무시: {field}={value_str}")
                     continue
-                # volume_surge_ratio는 소수점 유지, 나머지는 정수
                 new_val = float(value_str) if field == "volume_surge_ratio" else int(float(value_str))
-                # 현재 watchlist 값 조회
                 from data.db import get_watchlist
                 stock = next((s for s in get_watchlist() if s["code"] == signal.stock_code), None)
                 old_val = 0
                 if stock:
                     old_val = int(stock.get(field) or 0)
-                if new_val != old_val:  # 실제 변경이 있는 경우만 포함
+                if new_val != old_val:
                     threshold_changes.append({"field": field, "old": old_val, "new": new_val})
 
+    # ── 전환조건: 임계값 유무와 무관하게 항상 저장 ──────────────────────────────
+    if condition_text:
+        save_strategy_note(
+            "watchlist",
+            f"{signal.stock_name} 홀드 전환조건",
+            f"신호: {', '.join(signal.triggered_conditions)}\n전환조건: {condition_text}",
+        )
+        logger.info(f"[{signal.stock_name}] 전환조건 저장: {condition_text}")
+
+    # ── 임계값: 허용 필드만, 별도 승인 흐름 ────────────────────────────────────
     if not threshold_changes:
         return
 
     if AUTO_TRADE:
-        # 자동모드: 즉시 적용 + 전략 노트 저장 + 텔레그램 결과 알림
         applied = []
         for change in threshold_changes:
             ok = update_stock_field(signal.stock_code, change["field"], change["new"])
@@ -195,7 +203,6 @@ def _maybe_save_hold_conditions(signal, opinion: str):
             send_message(f"⚙️ *{signal.stock_name} 임계값 자동 적용*\n\n{chr(10).join(applied)}\n\n_전환조건: {condition_text}_")
             logger.info(f"[{signal.stock_name}] 임계값 자동 적용: {applied}")
     else:
-        # 수동모드: 텔레그램 버튼으로 사용자 승인 후 적용
         from notifications.telegram import send_threshold_proposal
         from notifications.telegram_bot import store_threshold_proposal
         msg_id = send_threshold_proposal(signal.stock_code, signal.stock_name, condition_text, threshold_changes)
@@ -1271,6 +1278,18 @@ def run_check():
                 dart_summary=dart_summary, news_summary=news_summary,
                 market_snapshot=market_snapshot, portfolio_snapshot=portfolio_snapshot,
             )
+            # Agent 모드 실행 시 tool_sequence + reasoning_chain 저장
+            if claude_opinion:
+                try:
+                    trace = get_last_agent_trace()
+                    if trace.get("tool_sequence"):
+                        update_signal_agent_trace(
+                            signal_id,
+                            trace["tool_sequence"],
+                            trace.get("reasoning_chain", []),
+                        )
+                except Exception as _e:
+                    logger.debug(f"[AgentTrace] 저장 실패: {_e}")
             _rag_index_signal(signal, signal_id, claude_opinion,
                               dart_summary=dart_summary, news_summary=news_summary)
             send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)

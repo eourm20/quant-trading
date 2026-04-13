@@ -82,7 +82,11 @@ class GetDepositTool(BaseTool):
 class GetPositionsTool(BaseTool):
     name = "get_positions"
     label = "포지션 정보 조회"
-    description = "보유 종목의 포지션 관리 정보(목표가, 손절가, 추가매수가 등)를 조회합니다."
+    description = (
+        "보유 종목의 포지션 관리 정보(목표가, 손절가, 추가매수가, 물타기 여부 등)를 조회합니다. "
+        "exit 신호: 손절가·목표가 도달 여부 확인 필수. "
+        "add 신호: 추가매수가 수준 및 물타기 1회 원칙 위반 여부 확인 필수."
+    )
     input_schema = {
         "properties": {
             "stock_code": {

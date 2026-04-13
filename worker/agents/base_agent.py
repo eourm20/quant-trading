@@ -47,6 +47,7 @@ class BaseAgent:
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._used_tools: list[str] = []
+        self._reasoning_steps: list[str] = []
 
     def run(self, initial_message: str) -> str:
         """Agent 루프 실행 후 최종 텍스트 반환."""
@@ -55,6 +56,7 @@ class BaseAgent:
             {"role": "user",   "content": initial_message},
         ]
         self._used_tools = []
+        self._reasoning_steps = []
 
         for step in range(self._max_steps):
             response = _client.chat.completions.create(
@@ -72,6 +74,10 @@ class BaseAgent:
 
             # 도구 호출
             if choice.finish_reason == "tool_calls":
+                # 도구 호출 전 GPT 추론 텍스트 캡처 (있을 때만)
+                if choice.message.content:
+                    self._reasoning_steps.append(choice.message.content)
+
                 # assistant 메시지 전체를 그대로 추가 (tool_calls 포함)
                 messages.append(choice.message)
 
@@ -110,10 +116,9 @@ class BaseAgent:
 
         try:
             result = tool.execute(**inputs)
-            result_str = json.dumps(result, ensure_ascii=False, default=str)
-            # 결과가 길면 500자만 출력
-            preview = result_str if len(result_str) <= 500 else result_str[:500] + "…(생략)"
-            logger.debug(f"[Agent] 도구 결과: {label} | {preview}")
+            # result_str = json.dumps(result, ensure_ascii=False, default=str)
+            # preview = result_str if len(result_str) <= 120 else result_str[:120] + "…"
+            # logger.info(f"[Agent] 도구 결과: {label} | {preview}")
             return result
         except Exception as e:
             logger.exception(f"[Agent] {label} 실행 오류")
