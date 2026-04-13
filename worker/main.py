@@ -1167,7 +1167,7 @@ def run_check():
 
     logger.info(f"=== 조건 체크 시작 [{session}] ({len(stocks)}개 종목, {len(conditions)}개 조건) ===")
 
-    use_claude = _WORKER_CONFIG.get("use_claude_api", True)
+    use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))
     holdings = get_portfolio()
 
     deposit = 0
