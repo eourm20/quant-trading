@@ -183,8 +183,11 @@ def run(start: str, end: str, print_sql: bool = False, no_dedupe: bool = False) 
         days += 1
         try:
             # kt00007 전용 백필
-            # 백필 보정 모드: 체결일 미기재 응답은 조회일로 대입 허용
-            executions = client.get_executions(trade_date=ymd, fill_missing_date=True)
+            # 하위호환: 구버전 KiwoomClient에는 fill_missing_date 인자가 없을 수 있음
+            try:
+                executions = client.get_executions(trade_date=ymd, fill_missing_date=True)
+            except TypeError:
+                executions = client.get_executions(trade_date=ymd)
             # 날짜 필터 무시 대응: 과거 날짜에서 이미 본 주문번호는 스킵
             filtered_exec = []
             skipped_exec = []
