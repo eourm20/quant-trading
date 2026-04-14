@@ -88,6 +88,7 @@ AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
 _post_buy_lock: dict[str, datetime] = {}
 _ai_judgment_cache: dict[str, tuple[datetime, str]] = {}
 _rag_pending_signal_ids: set[int] = set()
+_pending_weak_exit_confirm: dict[str, datetime] = {}
 
 # KRX 거래 세션 (규정값)
 _SESSIONS: dict[str, tuple[dtime, dtime]] = {
@@ -142,6 +143,43 @@ def _set_cached_ai_opinion(signal, opinion: str) -> None:
         return
     key = _build_ai_cache_key(signal)
     _ai_judgment_cache[key] = (_now_kst(), opinion)
+
+
+def _get_strong_exit_condition_ids() -> set[str]:
+    raw = _WORKER_CONFIG.get(
+        "strong_exit_condition_ids",
+        "stop_loss_price,target_price,ma20_support_break,death_cross,macd_death_cross,"
+        "ichimoku_death_cross,ichimoku_cloud_breakdown,stochastic_death_cross",
+    )
+    if isinstance(raw, list):
+        return {str(x).strip() for x in raw if str(x).strip()}
+    return {x.strip() for x in str(raw or "").split(",") if x.strip()}
+
+
+def _is_strong_exit_signal(signal) -> bool:
+    ids = {str(x).strip() for x in (getattr(signal, "triggered_ids", []) or [])}
+    if ids & _get_strong_exit_condition_ids():
+        return True
+
+    # Fallback: condition text hints for hard exits.
+    text = " ".join(str(x) for x in (getattr(signal, "triggered_conditions", []) or []))
+    hard_keywords = ("손절", "목표가", "데드크로스", "하향 이탈", "구름대 이탈")
+    return any(k in text for k in hard_keywords)
+
+
+def _confirm_weak_exit_ready(stock_code: str) -> bool:
+    minutes = max(0, int(_WORKER_CONFIG.get("weak_exit_confirm_minutes", 20)))
+    if minutes <= 0:
+        return True
+
+    now = _now_kst()
+    first_seen = _pending_weak_exit_confirm.get(stock_code)
+    if first_seen and (now - first_seen).total_seconds() <= minutes * 60:
+        _pending_weak_exit_confirm.pop(stock_code, None)
+        return True
+
+    _pending_weak_exit_confirm[stock_code] = now
+    return False
 
 
 def _parse_ymd(value: str) -> str:
@@ -1199,6 +1237,17 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         logger.info(f"[{signal.stock_name}] 자동 모드: AI 홀드 — 스킵")
         return
 
+    strong_exit = _is_strong_exit_signal(signal) if order_type == "2" else False
+    if order_type == "2" and strong_exit:
+        _pending_weak_exit_confirm.pop(signal.stock_code, None)
+    if order_type == "2" and not strong_exit:
+        if not _confirm_weak_exit_ready(signal.stock_code):
+            logger.info(
+                f"[{signal.stock_name}] 약한 매도 신호 1차 감지 — "
+                f"{int(_WORKER_CONFIG.get('weak_exit_confirm_minutes', 20))}분 내 재확인 시 실행"
+            )
+            return
+
     qty = None
     order_market = None
     order_price = 0  # 기본 시장가
@@ -1268,6 +1317,18 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
                 f"[{signal.stock_name}] 매도 추천수량 {qty}주 → 보유수량 {held_qty}주로 조정"
             )
             qty = held_qty
+
+        # Weak exit guard: avoid full liquidation on soft sell signals.
+        if not strong_exit and held_qty > 0:
+            partial_ratio = float(_WORKER_CONFIG.get("weak_exit_partial_ratio", 0.5))
+            partial_ratio = min(1.0, max(0.1, partial_ratio))
+            weak_cap = max(1, int(held_qty * partial_ratio))
+            if qty > weak_cap:
+                logger.info(
+                    f"[{signal.stock_name}] 약한 매도 신호 — 부분매도로 제한 "
+                    f"({qty}주 → {weak_cap}주, 보유 {held_qty}주)"
+                )
+                qty = weak_cap
 
     try:
         result = kiwoom.place_order(signal.stock_code, order_type, qty, price=order_price, order_market=order_market)

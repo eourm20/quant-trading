@@ -122,6 +122,11 @@ def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
             picks.append(re.sub(r"\s+", " ", norm)[:140])
             continue
 
+        # Example (non-numbered): "남해화학(025860): 편입 적합"
+        if re.search(r"\([0-9]{6}\)\s*:", norm):
+            picks.append(re.sub(r"\s+", " ", norm)[:140])
+            continue
+
         # Capture registration/watchlist status lines.
         lower = norm.lower()
         if ("watchlist" in lower) or ("등록" in norm) or ("미등록" in norm):
@@ -1477,7 +1482,9 @@ def run_daily_screening():
                 max_tokens=int(_worker_cfg.get("research_agent_max_tokens", 1200)),
                 target_unique_tools=int(_worker_cfg.get("research_agent_target_unique_tools", 4)),
             )
-            result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq)
+            _max_candidates = max(1, int(_worker_cfg.get("research_max_candidates", 5)))
+            logger.info(f"[ResearchAgent Screening] max_candidates={_max_candidates}")
+            result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq, max_candidates=_max_candidates)
             logger.info(f"[ResearchAgent Screening] completed\n{result[:300]}")
             from notifications.telegram import send_message as _send
             tools_summary = " -> ".join(_agent.used_tools) if _agent.used_tools else "none"

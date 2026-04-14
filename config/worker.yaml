@@ -14,6 +14,7 @@ worker:
   research_agent_max_steps: 10
   research_agent_max_tokens: 1200
   research_agent_target_unique_tools: 4
+  research_max_candidates: 5
   news_monitor_times: "8:55,12:00"
   rag_realtime_index: false
   rag_batch_times: "8:55,13:05,16:05"
@@ -25,6 +26,9 @@ worker:
   dip_buy_threshold: -1.5
   dip_buy_max_stocks: 2
   dip_buy_cooldown_hours: 6
+  weak_exit_confirm_minutes: 20
+  weak_exit_partial_ratio: 0.5
+  strong_exit_condition_ids: "stop_loss_price,target_price,ma20_support_break,death_cross,macd_death_cross,ichimoku_death_cross,ichimoku_cloud_breakdown,stochastic_death_cross"
 
 watchlist_management:
   inactive_days_alert: 30

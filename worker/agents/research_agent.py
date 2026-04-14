@@ -140,6 +140,11 @@ class ResearchAgent:
             if not norm:
                 continue
 
+            # Keep stock decision lines like "종목명(123456): ...", even when not numbered.
+            if re.search(r"\([0-9]{6}\)\s*:", norm):
+                keep.append(norm)
+                continue
+
             if re.match(r"^\d+\.\s+", norm):
                 keep.append(norm)
                 continue
