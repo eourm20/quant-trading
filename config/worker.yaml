@@ -3,6 +3,14 @@ worker:
   interval_seconds: 60         # 시세 조회 주기 (초)
   use_ai_judgment: true        # 조건 충족 시 AI 판단 여부 (false면 신호 알림만 발송)
   use_agent_mode: true         # true: Tool Use Agent / false: 레거시 프롬프트 스터핑
+  ai_cache_minutes: 20         # 동일 신호 AI 판단 캐시 TTL(분)
+  rag_realtime_index: false    # false면 장중 즉시 임베딩 대신 배치 큐 사용
+  rag_batch_times: "8:55,13:05,16:05"  # 고정 배치 시각 목록(HH:MM, 콤마 구분)
+  rag_batch_hours: ""            # 고정 배치 시간(비우면 rag_batch_times만 사용)
+  rag_batch_minute: 5            # rag_batch_hours 모드의 고정 분
+  rag_batch_size: 100          # 배치 1회 처리 건수
+  rag_batch_max_signals: 300   # 배치 1회 최대 처리 건수(비용 상한)
+  rag_batch_run_close: false   # 18:20 장마감 보정 배치 실행 여부
   dip_buy_threshold: -1.5      # 시장 급락 감지 기준 (KOSPI 또는 KOSDAQ 등락률 %)
   dip_buy_max_stocks: 2        # 급락 스캔 시 최대 매수 종목 수
   dip_buy_cooldown_hours: 2    # 급락 스캔 재실행 최소 간격 (시간)

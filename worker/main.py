@@ -86,6 +86,8 @@ AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
 
 # 매수 직후 entry 재발동 방지 (stock_code → 해제 시각)
 _post_buy_lock: dict[str, datetime] = {}
+_ai_judgment_cache: dict[str, tuple[datetime, str]] = {}
+_rag_pending_signal_ids: set[int] = set()
 
 # KRX 거래 세션 (규정값)
 _SESSIONS: dict[str, tuple[dtime, dtime]] = {
@@ -113,6 +115,33 @@ def _safe_int_price(value) -> int:
         return abs(int(str(value or "0").replace(",", "").strip()))
     except Exception:
         return 0
+
+
+def _build_ai_cache_key(signal) -> str:
+    """Stable cache key for AI judgment reuse."""
+    ids = sorted(str(x) for x in (getattr(signal, "triggered_ids", []) or []))
+    return f"{signal.stock_code}|{signal.signal_type}|{','.join(ids)}|{int(bool(signal.in_portfolio))}"
+
+
+def _get_cached_ai_opinion(signal, ttl_minutes: int) -> str | None:
+    if ttl_minutes <= 0:
+        return None
+    key = _build_ai_cache_key(signal)
+    row = _ai_judgment_cache.get(key)
+    if not row:
+        return None
+    cached_at, opinion = row
+    if (_now_kst() - cached_at).total_seconds() > (ttl_minutes * 60):
+        _ai_judgment_cache.pop(key, None)
+        return None
+    return opinion
+
+
+def _set_cached_ai_opinion(signal, opinion: str) -> None:
+    if not opinion:
+        return
+    key = _build_ai_cache_key(signal)
+    _ai_judgment_cache[key] = (_now_kst(), opinion)
 
 
 def _parse_ymd(value: str) -> str:
@@ -165,6 +194,11 @@ def _rag_index_signal(
 ) -> None:
     """신호 저장 후 FAISS RAG 인덱싱 (백그라운드). db.py 의존성 분리용."""
     try:
+        realtime_index = bool(_WORKER_CONFIG.get("rag_realtime_index", False))
+        if not realtime_index:
+            _rag_pending_signal_ids.add(int(signal_id))
+            return
+
         from worker.agents.tools.rag_tools import index_signal as _idx
         from data.db import build_indicator_snapshot, extract_verdict
         import threading
@@ -187,6 +221,27 @@ def _rag_index_signal(
         ).start()
     except Exception:
         pass
+
+
+def run_rag_batch_index():
+    """큐에 쌓인 signal_id를 배치로 RAG 인덱싱."""
+    global _rag_pending_signal_ids
+    if not _rag_pending_signal_ids:
+        return
+
+    batch_size = max(1, int(_WORKER_CONFIG.get("rag_batch_size", 100)))
+    max_signals = max(1, int(_WORKER_CONFIG.get("rag_batch_max_signals", 300)))
+    pending = sorted(_rag_pending_signal_ids)[:max_signals]
+    _rag_pending_signal_ids = _rag_pending_signal_ids - set(pending)
+
+    try:
+        from worker.agents.tools.rag_tools import bulk_index_signals_by_ids
+        count = bulk_index_signals_by_ids(pending, batch_size=batch_size)
+        logger.info(f"[RAG] 배치 인덱싱 완료: {count}/{len(pending)}건 (batch_size={batch_size})")
+    except Exception as e:
+        # 실패 시 큐 복원
+        _rag_pending_signal_ids.update(pending)
+        logger.warning(f"[RAG] 배치 인덱싱 실패(큐 복원): {e}")
 
 
 def _maybe_save_hold_conditions(signal, opinion: str):
@@ -1497,6 +1552,7 @@ def run_check():
     logger.info(f"=== 조건 체크 시작 [{session}] ({len(stocks)}개 종목, {len(conditions)}개 조건) ===")
 
     use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))
+    ai_cache_minutes = int(_WORKER_CONFIG.get("ai_cache_minutes", 20))
     holdings = get_portfolio()
 
     deposit = 0
@@ -1557,9 +1613,15 @@ def run_check():
             claude_opinion = None
             if use_claude:
                 try:
-                    sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
-                    claude_opinion = get_trade_opinion(signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit)
-                    logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
+                    cached_opinion = _get_cached_ai_opinion(signal, ai_cache_minutes)
+                    if cached_opinion:
+                        claude_opinion = cached_opinion
+                        logger.info(f"[{signal.stock_name}] AI 판단 캐시 재사용 ({ai_cache_minutes}분 TTL)")
+                    else:
+                        sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
+                        claude_opinion = get_trade_opinion(signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit)
+                        _set_cached_ai_opinion(signal, claude_opinion)
+                        logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
@@ -1716,6 +1778,57 @@ def main():
     scheduler.add_job(run_news_monitor, "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="news_monitor")
+    if not bool(_WORKER_CONFIG.get("rag_realtime_index", False)):
+        rag_batch_times = str(_WORKER_CONFIG.get("rag_batch_times", "") or "").strip()
+        rag_batch_hours = str(_WORKER_CONFIG.get("rag_batch_hours", "") or "").strip()
+        rag_batch_minute = max(0, min(59, int(_WORKER_CONFIG.get("rag_batch_minute", 5))))
+        if rag_batch_times:
+            # Example: "5:50,13:05,16:05"
+            for idx, token in enumerate(rag_batch_times.split(","), start=1):
+                t = token.strip()
+                if not t or ":" not in t:
+                    continue
+                hh, mm = t.split(":", 1)
+                try:
+                    hour_i = max(0, min(23, int(hh)))
+                    min_i = max(0, min(59, int(mm)))
+                except ValueError:
+                    continue
+                scheduler.add_job(
+                    run_rag_batch_index,
+                    "cron",
+                    day_of_week="mon-fri",
+                    hour=hour_i,
+                    minute=min_i,
+                    id=f"rag_batch_index_fixed_{idx}",
+                    max_instances=1,
+                    coalesce=True,
+                )
+        elif rag_batch_hours:
+            scheduler.add_job(
+                run_rag_batch_index,
+                "cron",
+                day_of_week="mon-fri",
+                hour=rag_batch_hours,
+                minute=rag_batch_minute,
+                id="rag_batch_index_fixed",
+                max_instances=1,
+                coalesce=True,
+            )
+        else:
+            logger.info("[RAG] 배치 시간(rag_batch_times/rag_batch_hours)이 없어 스케줄 등록을 생략합니다.")
+        if bool(_WORKER_CONFIG.get("rag_batch_run_close", False)):
+            # Optional close-time catch-up run
+            scheduler.add_job(
+                run_rag_batch_index,
+                "cron",
+                day_of_week="mon-fri",
+                hour=18,
+                minute=20,
+                id="rag_batch_index_close",
+                max_instances=1,
+                coalesce=True,
+            )
     run_check()
 
     scheduler.start()

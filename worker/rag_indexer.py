@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="signals 테이블 RAG 일괄 인덱싱")
     parser.add_argument("--days", type=int, default=180, help="최근 N일 데이터 인덱싱 (기본: 180)")
+    parser.add_argument("--batch-size", type=int, default=100, help="한 번에 처리할 배치 크기 (기본: 100)")
+    parser.add_argument("--max-rows", type=int, default=0, help="최대 처리 건수 (0이면 제한 없음)")
     args = parser.parse_args()
 
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -38,11 +40,15 @@ def main():
 
     logger.info(f"RAG 인덱싱 시작 (최근 {args.days}일)")
     from worker.agents.tools.rag_tools import (
-        bulk_index_existing_signals,
+        bulk_index_existing_signals_in_batches,
         bulk_index_agent_memory,
     )
 
-    signal_count = bulk_index_existing_signals(days=args.days)
+    signal_count = bulk_index_existing_signals_in_batches(
+        days=args.days,
+        batch_size=args.batch_size,
+        max_rows=args.max_rows,
+    )
     memory_counts = bulk_index_agent_memory(days=args.days)
 
     logger.info(f"신호 인덱싱 완료: {signal_count}건")

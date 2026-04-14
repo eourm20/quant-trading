@@ -419,39 +419,106 @@ def search_similar_context(query: str, n_results: int = 5) -> list[dict]:
 
 def bulk_index_existing_signals(days: int = 180) -> int:
     """기존 signals 데이터 일괄 인덱싱. 반환: 인덱싱된 건수."""
+    return bulk_index_existing_signals_in_batches(days=days, batch_size=100)
+
+
+def bulk_index_signals_by_ids(signal_ids: list[int], batch_size: int = 100) -> int:
+    """지정한 signal_id 목록만 배치 인덱싱."""
+    from data.db import get_conn
+    ids = sorted({int(sid) for sid in (signal_ids or []) if sid})
+    if not ids:
+        return 0
+
+    batch_size = max(1, int(batch_size or 100))
+    count = 0
+
+    with get_conn() as conn:
+        for i in range(0, len(ids), batch_size):
+            chunk = ids[i:i + batch_size]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"""SELECT id, stock_name, signal_type, verdict, result_pct,
+                           triggered_conditions, dart_summary, news_summary,
+                           indicator_snapshot
+                    FROM signals
+                    WHERE id IN ({placeholders}) AND verdict IS NOT NULL""",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                ok = index_signal(
+                    signal_id=r["id"],
+                    stock_name=r["stock_name"] or "",
+                    signal_type=r["signal_type"] or "",
+                    verdict=r["verdict"],
+                    result_3d=r["result_pct"],
+                    triggered_conditions=r["triggered_conditions"] or "",
+                    dart_summary=r["dart_summary"],
+                    news_summary=r["news_summary"],
+                    indicator_snapshot=r["indicator_snapshot"],
+                )
+                if ok:
+                    count += 1
+    logger.info(f"[RAG] 지정 ID 배치 인덱싱 완료: {count}/{len(ids)}건 (batch_size={batch_size})")
+    return count
+
+
+def bulk_index_existing_signals_in_batches(
+    days: int = 180,
+    batch_size: int = 100,
+    max_rows: int = 0,
+) -> int:
+    """기존 signals 데이터 배치 인덱싱. max_rows=0이면 제한 없음."""
     from data.db import get_conn
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
     KST = ZoneInfo("Asia/Seoul")
     since = (datetime.now(tz=KST) - timedelta(days=days)).strftime("%Y-%m-%d")
+    batch_size = max(1, int(batch_size or 100))
+    max_rows = max(0, int(max_rows or 0))
 
+    total = 0
     with get_conn() as conn:
-        rows = conn.execute(
-            """SELECT id, stock_name, signal_type, verdict, result_pct,
-                      triggered_conditions, dart_summary, news_summary,
-                      indicator_snapshot
-               FROM signals
-               WHERE created_at >= ? AND verdict IS NOT NULL""",
-            (since,),
-        ).fetchall()
+        offset = 0
+        while True:
+            if max_rows:
+                remaining = max_rows - offset
+                if remaining <= 0:
+                    break
+                fetch_limit = min(batch_size, remaining)
+            else:
+                fetch_limit = batch_size
 
-    count = 0
-    for r in rows:
-        ok = index_signal(
-            signal_id=r["id"],
-            stock_name=r["stock_name"] or "",
-            signal_type=r["signal_type"] or "",
-            verdict=r["verdict"],
-            result_3d=r["result_pct"],
-            triggered_conditions=r["triggered_conditions"] or "",
-            dart_summary=r["dart_summary"],
-            news_summary=r["news_summary"],
-            indicator_snapshot=r["indicator_snapshot"],
-        )
-        if ok:
-            count += 1
-    logger.info(f"[RAG] 일괄 인덱싱 완료: {count}/{len(rows)}건")
-    return count
+            rows = conn.execute(
+                """SELECT id, stock_name, signal_type, verdict, result_pct,
+                          triggered_conditions, dart_summary, news_summary,
+                          indicator_snapshot
+                   FROM signals
+                   WHERE created_at >= ? AND verdict IS NOT NULL
+                   ORDER BY id ASC
+                   LIMIT ? OFFSET ?""",
+                (since, fetch_limit, offset),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            for r in rows:
+                ok = index_signal(
+                    signal_id=r["id"],
+                    stock_name=r["stock_name"] or "",
+                    signal_type=r["signal_type"] or "",
+                    verdict=r["verdict"],
+                    result_3d=r["result_pct"],
+                    triggered_conditions=r["triggered_conditions"] or "",
+                    dart_summary=r["dart_summary"],
+                    news_summary=r["news_summary"],
+                    indicator_snapshot=r["indicator_snapshot"],
+                )
+                if ok:
+                    total += 1
+            offset += len(rows)
+    logger.info(f"[RAG] 배치 일괄 인덱싱 완료: {total}건 (batch_size={batch_size}, max_rows={max_rows or 'all'})")
+    return total
 
 
 def get_index_stats() -> dict:

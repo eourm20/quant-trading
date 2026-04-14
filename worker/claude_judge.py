@@ -227,6 +227,21 @@ R/R 1:1 미만: 홀드 권고
 - 보유 종목 중 물타기 조건 근접 종목이 있으면 신규 진입보다 해당 종목 현금 배정 우선
 - 신규 entry와 물타기가 동시에 발생하면 보유 종목 물타기 우선"""
 
+_TRADING_KNOWLEDGE_COMPACT = """## 트레이딩 핵심 규칙 (압축)
+- 신호는 가격/거래량/추세 일치 여부를 우선 확인한다.
+- RSI: 30 이하는 과매도, 70 이상은 과매수 경계로 본다.
+- MA: 현재가가 MA5, MA20 위에 있으면 상승 우위, 아래면 하락 우위로 본다.
+- 거래량 급증이 동반된 돌파만 신뢰하고, 거래량 없는 돌파는 보수적으로 본다.
+- 손익비(R/R) 2:1 미만이면 신규 진입을 보수적으로 판단한다.
+- 포트폴리오 현금 비중이 낮으면 추천 수량을 축소한다.
+- 동일 섹터/종목 쏠림이 크면 분산 관점에서 진입 강도를 낮춘다.
+- 악재 공시/부정 뉴스가 있으면 기술 신호보다 리스크를 우선한다.
+- 불확실하면 홀드하고 전환 조건을 명시한다.
+"""
+
+_USE_COMPACT_PROMPT = os.getenv("AI_PROMPT_COMPACT", "true").lower() == "true"
+_TRADING_KNOWLEDGE_ACTIVE = _TRADING_KNOWLEDGE_COMPACT if _USE_COMPACT_PROMPT else _TRADING_KNOWLEDGE
+
 _ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
@@ -897,7 +912,7 @@ def _legacy_get_trade_opinion(
     _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템에서 최종 매매 판단을 내리는 AI입니다.
 신호가 발생한 이유와 전략 맥락을 이해하고, 데이터 기반으로 판단하세요.
 
-{_TRADING_KNOWLEDGE}
+{_TRADING_KNOWLEDGE_ACTIVE}
 
 ## 운용 원칙 (변경 불가 규칙)
 - 물타기 최대 1회 원칙은 averaging_down add 신호에만 적용
@@ -1145,7 +1160,7 @@ def get_dip_buy_opinion(
 기술적 신호(RSI 과매도, MA 크로스 등)가 발동하지 않은 상태에서도, 시장 전체 급락과 종목의 펀더멘털·차트·뉴스를 종합하여
 "지금 담을 만한가"를 판단합니다.
 
-{_TRADING_KNOWLEDGE}
+{_TRADING_KNOWLEDGE_ACTIVE}
 
 ## 급락 매수 판단 원칙
 - 시장 급락은 우량 종목을 싸게 살 기회일 수 있음 — 공포에 동조하지 말 것
