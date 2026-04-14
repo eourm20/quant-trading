@@ -6,8 +6,14 @@ worker:
   use_ai_judgment: true
   use_agent_mode: true
   ai_cache_minutes: 180
-  ai_max_calls_per_run: 4
+  ai_max_calls_per_run: 2
   news_ai_max_calls_per_run: 2
+  agent_max_steps: 7
+  agent_max_tokens: 700
+  agent_target_unique_tools: 0
+  research_agent_max_steps: 10
+  research_agent_max_tokens: 1200
+  research_agent_target_unique_tools: 4
   news_monitor_times: "8:55,12:00"
   rag_realtime_index: false
   rag_batch_times: "8:55,13:05,16:05"

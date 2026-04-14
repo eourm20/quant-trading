@@ -56,14 +56,15 @@ _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템
 class JudgmentAgent:
     """신호 1건에 대한 매매 판단 Agent."""
 
-    def __init__(self, max_steps: int = 15):
+    def __init__(self, max_steps: int = 7, max_tokens: int = 700, target_unique_tools: int = 0):
         tools = load_judgment_tools()
         self._agent = BaseAgent(
             tools=tools,
             system_prompt=_SYSTEM_PROMPT,
             max_steps=max_steps,
-            max_tokens=1024,
+            max_tokens=max_tokens,
         )
+        self._target_unique_tools = max(0, int(target_unique_tools or 0))
 
     def run(self, signal) -> str:
         """
@@ -89,7 +90,7 @@ class JudgmentAgent:
         is_holding = signal.in_portfolio
         signal_type = signal.signal_type
 
-        self._agent.configure_run(target_unique_tools=5)
+        self._agent.configure_run(target_unique_tools=self._target_unique_tools)
 
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})

@@ -47,14 +47,15 @@ _SYSTEM_PROMPT = """당신은 개인 투자자의 퀀트 트레이딩 시스템�
 class ResearchAgent:
     """장 마감 후 유망 종목 발굴 Agent."""
 
-    def __init__(self, max_steps: int = 15):
+    def __init__(self, max_steps: int = 10, max_tokens: int = 1200, target_unique_tools: int = 4):
         tools = load_research_tools()
         self._agent = BaseAgent(
             tools=tools,
             system_prompt=_SYSTEM_PROMPT,
             max_steps=max_steps,
-            max_tokens=2048,
+            max_tokens=max_tokens,
         )
+        self._target_unique_tools = max(0, int(target_unique_tools or 0))
 
     def _build_performance_summary(self) -> str:
         """성과 요약을 고정 입력으로 주입하기 위한 텍스트."""
@@ -174,7 +175,7 @@ class ResearchAgent:
         """
         limit = max(1, int(max_candidates or 1))
         self._agent.configure_tool("add_to_watchlist", max_additions=limit, addition_count=0)
-        self._agent.configure_run(target_unique_tools=7)
+        self._agent.configure_run(target_unique_tools=self._target_unique_tools)
         perf_summary = self._build_performance_summary()
 
         initial_message = f"""## 오늘 시장 환경
@@ -196,7 +197,7 @@ Output format constraints (keep concise):
 - For each selected stock, output only: "<stock>(<code>): decision" / "reason" / "watchlist: done|not added(reason)".
 - No long background explanation, no duplicated wording.
 Tool coverage constraints:
-- Use at least 7 distinct tools before final answer, unless hard failures occur.
+- Use at least {self._target_unique_tools} distinct tools before final answer, unless hard failures occur.
 - Include at least one memory/history tool among: search_agent_memory_context, search_screening_context, search_text_context, search_similar_signals, get_screening_history.
 - If scan APIs fail, compensate with history/memory/performance tools instead of stopping early.
 - Fallback chain when scan fails: search_agent_memory_context -> get_screening_history -> get_trade_performance -> search_text_context.

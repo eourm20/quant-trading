@@ -1569,6 +1569,8 @@ def run_check():
 
     use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))
     ai_cache_minutes = int(_WORKER_CONFIG.get("ai_cache_minutes", 20))
+    ai_max_calls_per_run = max(0, int(_WORKER_CONFIG.get("ai_max_calls_per_run", 4)))
+    ai_calls = 0
     holdings = get_portfolio()
 
     deposit = 0
@@ -1634,10 +1636,19 @@ def run_check():
                         claude_opinion = cached_opinion
                         logger.info(f"[{signal.stock_name}] AI 판단 캐시 재사용 ({ai_cache_minutes}분 TTL)")
                     else:
-                        sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
-                        claude_opinion = get_trade_opinion(signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit)
-                        _set_cached_ai_opinion(signal, claude_opinion)
-                        logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
+                        if ai_calls >= ai_max_calls_per_run:
+                            logger.info(
+                                f"[{signal.stock_name}] AI 호출 예산 소진으로 스킵 "
+                                f"({ai_calls}/{ai_max_calls_per_run})"
+                            )
+                        else:
+                            sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
+                            claude_opinion = get_trade_opinion(
+                                signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
+                            )
+                            ai_calls += 1
+                            _set_cached_ai_opinion(signal, claude_opinion)
+                            logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
@@ -1714,7 +1725,7 @@ def run_check():
                 else:
                     _paper_execute(signal, claude_opinion, signal_id)
 
-    logger.info("=== 조건 체크 완료 ===")
+    logger.info(f"=== 조건 체크 완료 === (AI calls: {ai_calls}/{ai_max_calls_per_run})")
 
 
 def main():

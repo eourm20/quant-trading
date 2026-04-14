@@ -1453,6 +1453,15 @@ def run_daily_screening():
 
     if _use_agent:
         try:
+            _worker_cfg = {}
+            try:
+                import yaml as _yaml2
+                _cfg_path2 = os.path.join(os.path.dirname(__file__), '..', 'config', 'worker.yaml')
+                with open(_cfg_path2, encoding='utf-8') as _f2:
+                    _worker_cfg = ((_yaml2.safe_load(_f2) or {}).get('worker') or {})
+            except Exception:
+                _worker_cfg = {}
+
             from worker.agents.research_agent import ResearchAgent
             from worker.clients.kiwoom_client import KiwoomClient as _KW
             import time as _t
@@ -1463,7 +1472,11 @@ def run_daily_screening():
             _kospi = _rate(_kw.get_market_index("kospi"))
             _t.sleep(0.5)
             _kosdaq = _rate(_kw.get_market_index("kosdaq"))
-            _agent = ResearchAgent()
+            _agent = ResearchAgent(
+                max_steps=int(_worker_cfg.get("research_agent_max_steps", 10)),
+                max_tokens=int(_worker_cfg.get("research_agent_max_tokens", 1200)),
+                target_unique_tools=int(_worker_cfg.get("research_agent_target_unique_tools", 4)),
+            )
             result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq)
             logger.info(f"[ResearchAgent Screening] completed\n{result[:300]}")
             from notifications.telegram import send_message as _send

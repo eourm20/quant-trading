@@ -687,7 +687,12 @@ def get_trade_opinion(
     if _use_agent:
         try:
             from worker.agents.judgment_agent import JudgmentAgent
-            _agent = JudgmentAgent()
+            _wcfg = (_cfg.get("worker") or {})
+            _agent = JudgmentAgent(
+                max_steps=int(_wcfg.get("agent_max_steps", 7)),
+                max_tokens=int(_wcfg.get("agent_max_tokens", 700)),
+                target_unique_tools=int(_wcfg.get("agent_target_unique_tools", 0)),
+            )
             _opinion = _agent.run(signal)
             # 마지막 agent trace를 모듈 변수에 저장 (main.py에서 DB 저장에 활용)
             global _last_agent_trace
