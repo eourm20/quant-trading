@@ -496,9 +496,11 @@ _NEWS_COOLDOWN_HOURS = 4
 
 
 def run_news_monitor():
-    """보유 종목 뉴스 30분 주기 스캔 — 위험 키워드 감지 시 알림/exit 트리거."""
+    """Monitor held-stock news and let AI judge risk severity."""
     from worker.clients.news_client import search_news, NAVER_CLIENT_ID
     from notifications.telegram import send_message
+    from worker.monitor import Signal
+    from worker.claude_judge import get_trade_opinion
 
     if not NAVER_CLIENT_ID:
         return
@@ -506,20 +508,30 @@ def run_news_monitor():
     try:
         holdings = get_portfolio()
     except Exception as e:
-        logger.warning(f"[뉴스모니터] 잔고 조회 실패: {e}")
+        logger.warning(f"[news_monitor] failed to load holdings: {e}")
         return
 
     if not holdings:
         return
 
     now = _now_kst()
+    news_ai_max_calls_per_run = max(0, int(_WORKER_CONFIG.get("news_ai_max_calls_per_run", 2)))
+    news_ai_calls = 0
+
+    def _label_from_opinion(opinion_text: str) -> str:
+        first = (opinion_text or "").strip().splitlines()[0].lower()
+        if any(tok in first for tok in ("[??]", "[sell]", "??", "????", "exit")):
+            return "critical"
+        if any(tok in first for tok in ("[??]", "[??]", "[hold]", "watch")):
+            return "warning"
+        return "ignore"
+
     for h in holdings:
         code = str(h.get("stock_code", "")).strip()
         name = str(h.get("stock_name", "") or h.get("stk_nm", "")).strip()
         if not name or not code:
             continue
 
-        # 쿨다운 체크 (같은 종목 4시간 이내 재알림 방지)
         last_alert = _news_alert_cooldown.get(code)
         if last_alert and (now - last_alert).total_seconds() < _NEWS_COOLDOWN_HOURS * 3600:
             continue
@@ -528,68 +540,80 @@ def run_news_monitor():
             news_items = search_news(name, display=5, sort="date")
             time.sleep(0.3)
         except Exception as e:
-            logger.debug(f"[뉴스모니터] {name} 조회 실패: {e}")
+            logger.debug(f"[news_monitor] news fetch failed for {name}: {e}")
             continue
 
-        for item in news_items:
-            full_text = f"{item.get('title', '')} {item.get('description', '')}".lower()
-            title = item.get("title", "")[:80]
-            pub = item.get("pub_date", "")
+        if not news_items:
+            continue
 
-            critical_matched = [kw for kw in _NEWS_CRITICAL if kw in full_text]
-            warning_matched  = [kw for kw in _NEWS_WARNING  if kw in full_text]
+        if news_ai_calls >= news_ai_max_calls_per_run:
+            logger.info(
+                f"[news_monitor] skip remaining symbols: ai budget reached "
+                f"({news_ai_calls}/{news_ai_max_calls_per_run})"
+            )
+            break
 
-            if critical_matched:
-                # CRITICAL: exit 신호 트리거 + AI 판단
-                logger.warning(f"[뉴스모니터] CRITICAL 감지: {name} — {critical_matched}")
+        try:
+            top_items = news_items[:3]
+            digest_lines = []
+            for idx, item in enumerate(top_items, start=1):
+                title = str(item.get("title", "")).replace("\n", " ").strip()
+                desc = str(item.get("description", "")).replace("\n", " ").strip()
+                pub = str(item.get("pub_date", "")).strip()
+                digest_lines.append(f"{idx}. {title} | {desc} | {pub}")
+            digest = "\n".join(digest_lines)
+
+            cur_data = kiwoom.get_current_price(code)
+            cur_price = abs(int(str(cur_data.get("cur_prc") or cur_data.get("stk_prpr") or "0").replace(",", "")))
+
+            fake_signal = Signal(
+                stock_code=code,
+                stock_name=name,
+                current_price=cur_price,
+                triggered_conditions=[f"news_event\n{digest}"],
+                triggered_ids=["news_ai"],
+                rsi=None,
+                volume_ratio=None,
+                chart=None,
+                in_portfolio=True,
+                signal_type="exit",
+            )
+
+            holdings_full = kiwoom.get_holdings()
+            opinion = get_trade_opinion(fake_signal, holdings_full, {}, {}, {})
+            news_ai_calls += 1
+            label = _label_from_opinion(opinion)
+
+            head_title = str(top_items[0].get("title", ""))[:100]
+            head_pub = str(top_items[0].get("pub_date", ""))
+
+            if label == "critical":
                 _news_alert_cooldown[code] = now
-                try:
-                    from worker.monitor import Signal
-                    from worker.claude_judge import get_trade_opinion
-                    cur_data = kiwoom.get_current_price(code)
-                    cur_price = abs(int(str(cur_data.get("cur_prc") or cur_data.get("stk_prpr") or "0").replace(",", "")))
-                    fake_signal = Signal(
-                        stock_code=code, stock_name=name,
-                        current_price=cur_price,
-                        triggered_conditions=[f"뉴스위험-{','.join(critical_matched)}"],
-                        triggered_ids=["news_critical"],
-                        rsi=None, volume_ratio=None, chart=None,
-                        in_portfolio=True, signal_type="exit",
-                    )
-                    holdings_full = kiwoom.get_holdings()
-                    opinion = get_trade_opinion(fake_signal, holdings_full, {}, {}, {})
-                    signal_id = save_signal(fake_signal, opinion, in_portfolio=True)
-                    _rag_index_signal(fake_signal, signal_id, opinion)
-                    send_message(
-                        f"🚨 *뉴스 위험 감지 — {name}*\n"
-                        f"키워드: `{'`, `'.join(critical_matched)}`\n"
-                        f"{title}\n_{pub}_\n\n"
-                        f"🤖 *AI 판단*: {opinion.splitlines()[0] if opinion else '조회 실패'}"
-                    )
-                except Exception as _e:
-                    logger.error(f"[뉴스모니터] {name} exit 트리거 실패: {_e}")
-                    send_message(
-                        f"🚨 *뉴스 위험 감지 — {name}*\n"
-                        f"키워드: `{'`, `'.join(critical_matched)}`\n"
-                        f"{title}\n_{pub}_"
-                    )
-                break  # 종목당 1건만 처리
-
-            elif warning_matched:
-                # WARNING: 알림만
-                logger.info(f"[뉴스모니터] WARNING 감지: {name} — {warning_matched}")
+                signal_id = save_signal(fake_signal, opinion, in_portfolio=True)
+                _rag_index_signal(fake_signal, signal_id, opinion)
+                send_message(
+                    f"?? *AI ?? ??? ??* ({name})\n"
+                    f"{head_title}\n_{head_pub}_\n\n"
+                    f"??: *??/?? ??*\n"
+                    f"AI: {(opinion.splitlines()[0] if opinion else '?? ??')}"
+                )
+                logger.warning(f"[news_monitor] CRITICAL {name}: {head_title}")
+            elif label == "warning":
                 _news_alert_cooldown[code] = now
                 send_message(
-                    f"⚠️ *뉴스 주의 — {name}*\n"
-                    f"키워드: `{'`, `'.join(warning_matched)}`\n"
-                    f"{title}\n_{pub}_\n\n"
-                    f"매도 여부는 직접 판단하세요."
+                    f"?? *AI ?? ??* ({name})\n"
+                    f"{head_title}\n_{head_pub}_\n\n"
+                    f"??: *??/??*\n"
+                    f"AI: {(opinion.splitlines()[0] if opinion else '?? ??')}"
                 )
-                break
+                logger.info(f"[news_monitor] WARNING {name}: {head_title}")
+            else:
+                logger.debug(f"[news_monitor] IGNORE {name}: {head_title}")
 
-    logger.debug(f"[뉴스모니터] {len(holdings)}개 종목 스캔 완료")
+        except Exception as e:
+            logger.error(f"[news_monitor] ai classification failed for {name}: {e}")
 
-
+    logger.debug(f"[news_monitor] done: holdings={len(holdings)}, ai_calls={news_ai_calls}")
 def update_signal_results():
     """신호 발생 후 1일/3일/5일/10일 결과 수익률을 현재가 기준으로 업데이트."""
     from datetime import timedelta
