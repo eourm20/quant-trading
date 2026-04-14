@@ -8,6 +8,8 @@ import logging
 import os
 import re
 from datetime import datetime
+from email.utils import parsedate_to_datetime
+import xml.etree.ElementTree as ET
 
 import requests
 from dotenv import load_dotenv
@@ -103,36 +105,69 @@ def format_news_for_ai(stock_name: str, max_items: int = 5) -> str:
     return "\n".join(lines)
 
 
-# 거시경제·지정학 키워드 (가장 시장 영향이 큰 이슈 중심)
-_MACRO_KEYWORDS = [
-    "미국 관세 무역",
-    "연준 FOMC 금리",
-    "지정학 리스크 전쟁",
+# 키워드 검색이 아닌 RSS 기반 이슈 수집 (거시 + 사회)
+_ISSUE_RSS_FEEDS = [
+    ("경제", "https://news.daum.net/rss/economic"),
+    ("사회", "https://news.daum.net/rss/society"),
+    ("국제", "https://news.daum.net/rss/foreign"),
+    ("정치", "https://news.daum.net/rss/politics"),
 ]
 
 
+def _parse_rss_pub_date(pub_date: str) -> str:
+    try:
+        dt = parsedate_to_datetime(pub_date)
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return _parse_pub_date(pub_date)
+
+
+def _fetch_rss_items(url: str, limit: int = 5) -> list[dict]:
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        items = []
+        for item in root.findall(".//item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_raw = (item.findtext("pubDate") or "").strip()
+            pub_date = _parse_rss_pub_date(pub_raw)
+            if not title:
+                continue
+            items.append(
+                {
+                    "title": _strip_html(title),
+                    "description": "",
+                    "link": link,
+                    "pub_date": pub_date,
+                }
+            )
+            if len(items) >= limit:
+                break
+        return items
+    except Exception as e:
+        logger.debug(f"RSS 수집 실패 ({url}): {e}")
+        return []
+
+
 def get_macro_news_for_ai(max_per_keyword: int = 2, max_total: int = 6) -> str:
-    """거시경제·지정학 이슈 뉴스 요약.
-
-    미국 관세, 금리, 전쟁 등 시장 전반에 영향을 주는 매크로 이슈를
-    최신 뉴스로 조회하여 AI 판단 프롬프트에 제공한다.
-
-    Returns:
-        뉴스 헤드라인 목록 문자열. 뉴스가 없거나 API 미설정 시 빈 문자열.
-    """
-    if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
-        return ""
+    """거시경제 + 사회 이슈 헤드라인 요약 (키워드 미사용 RSS 수집)."""
 
     seen: set[str] = set()
     items: list[dict] = []
 
-    for kw in _MACRO_KEYWORDS:
+    per_feed = max(1, int(max_per_keyword))
+    max_total = max(1, int(max_total))
+
+    for feed_name, feed_url in _ISSUE_RSS_FEEDS:
         if len(items) >= max_total:
             break
-        for n in search_news(kw, display=max_per_keyword, sort="date"):
-            key = n["title"][:30]
+        for n in _fetch_rss_items(feed_url, limit=per_feed):
+            key = n["title"][:40]
             if key not in seen:
                 seen.add(key)
+                n["title"] = f"[{feed_name}] {n['title']}"
                 items.append(n)
             if len(items) >= max_total:
                 break

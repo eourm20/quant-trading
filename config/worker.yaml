@@ -1,55 +1,60 @@
-# 워커 전역 설정 (종목/조건은 DB에서 관리 — quant_watchlist_* / quant_condition_* 도구 사용)
+﻿# Worker runtime config
 worker:
-  interval_seconds: 60         # 시세 조회 주기 (초)
-  use_ai_judgment: true        # 조건 충족 시 AI 판단 여부 (false면 신호 알림만 발송)
-  use_agent_mode: true         # true: Tool Use Agent / false: 레거시 프롬프트 스터핑
-  ai_cache_minutes: 20         # 동일 신호 AI 판단 캐시 TTL(분)
-  rag_realtime_index: false    # false면 장중 즉시 임베딩 대신 배치 큐 사용
-  rag_batch_times: "8:55,13:05,16:05"  # 고정 배치 시각 목록(HH:MM, 콤마 구분)
-  rag_batch_hours: ""            # 고정 배치 시간(비우면 rag_batch_times만 사용)
-  rag_batch_minute: 5            # rag_batch_hours 모드의 고정 분
-  rag_batch_size: 100          # 배치 1회 처리 건수
-  rag_batch_max_signals: 300   # 배치 1회 최대 처리 건수(비용 상한)
-  rag_batch_run_close: false   # 18:20 장마감 보정 배치 실행 여부
-  dip_buy_threshold: -1.5      # 시장 급락 감지 기준 (KOSPI 또는 KOSDAQ 등락률 %)
-  dip_buy_max_stocks: 2        # 급락 스캔 시 최대 매수 종목 수
-  dip_buy_cooldown_hours: 2    # 급락 스캔 재실행 최소 간격 (시간)
+  interval_seconds: 300
+  sync_realtime_minutes: 10
+  news_cooldown_hours: 8
+  use_ai_judgment: true
+  use_agent_mode: true
+  ai_cache_minutes: 180
+  ai_max_calls_per_run: 4
+  news_ai_max_calls_per_run: 2
+  news_monitor_times: "8:55,12:00"
+  rag_realtime_index: false
+  rag_batch_times: "8:55,13:05,16:05"
+  rag_batch_hours: ""
+  rag_batch_minute: 5
+  rag_batch_size: 100
+  rag_batch_max_signals: 100
+  rag_batch_run_close: false
+  dip_buy_threshold: -1.5
+  dip_buy_max_stocks: 2
+  dip_buy_cooldown_hours: 6
 
 watchlist_management:
-  inactive_days_alert: 30       # 신호 미발동 시 알림 기준 (일)
-  inactive_days_removal: 90     # 미보유 종목 자동 삭제 기준 (일)
-  alert_interval_days: 7        # 미발동 알림 재발송 간격 (일)
+  inactive_days_alert: 30
+  inactive_days_removal: 90
+  alert_interval_days: 7
 
 sector:
-  max_holdings: 3            # 동일 섹터 최대 보유 종목 수 (초과 시 AI 경고)
+  max_holdings: 3
 
 prefilter:
-  market_cap_min: 500           # 시가총액 최소 (억 원)
-  change_upper: 7               # 등락률 상단 제외 기준 (%)
-  change_lower: -10             # 등락률 하단 제외 기준 (%)
-  rsi_max: 70                   # RSI 상단 제외 기준
-  ma_ratio: 0.95                # MA5/MA20 역배열 허용 비율 (1.0 = 역배열 미허용, 0.95 = 5% 이상 역배열만 제외)
-  volume_ratio_min: 2.0         # 거래량 비율 하단 제외 기준 (20일 평균 대비, 배) — 급증 아닌 종목 제외
-  volume_ratio_max: 15          # 거래량 비율 상단 제외 기준 (배)
-  consecutive_candles: 5        # 연속 양봉 제외 기준 (일)
+  market_cap_min: 500
+  change_upper: 7
+  change_lower: -10
+  rsi_max: 70
+  ma_ratio: 0.95
+  volume_ratio_min: 2.0
+  volume_ratio_max: 15
+  consecutive_candles: 5
 
-  # 시장 상황별 자동 조정 (KOSPI·KOSDAQ 평균 등락률 기준)
-  skip_bull_threshold: 5.0      # 시장 급등일 스크리닝 생략 기준 (평균 등락률 %)
-  market_bull_threshold: 2.0    # 강세장 기준 (평균 등락률 %)
-  market_bear_threshold: -2.0   # 약세장 기준 (평균 등락률 %)
-  bull_change_upper_add: 4.0    # 강세장 시 등락률 상단 +N% 완화
-  bull_consecutive_sub: 2       # 강세장 시 연속양봉 기준 -N일 완화
-  bear_change_lower_sub: 3.0    # 약세장 시 등락률 하단 -N% 완화 (더 하락한 종목 포함)
-  bear_change_upper_add: 6.0    # 약세장 시 등락률 상단 +N% 완화 (7% → 13%, 폭락장 역행 강세 종목 포함)
-  bear_rsi_max_add: 5.0         # 약세장 시 RSI 상단 +N 완화
-  bear_ma_ratio_sub: 0.07       # 약세장 시 MA역배열 허용 완화 (0.95 → 0.88, 12% 역배열까지 허용)
-  bear_consecutive_disable: true  # 약세장 시 연속양봉 체크 비활성화 (폭락장 역행 강세 = 강한 종목)
-  prefilter_input_cap: 25         # 장중 스캔 프리필터 입력 최대 후보 수 (429 완화, hts 우선)
-  prefilter_fallback_candidates: 5  # 프리필터 통과 0건 시 near-miss 복구 개수
-  max_ai_candidates: 10           # 프리필터 통과 후 AI 분석 상한 (hts 우선순위)
+  # Market regime adaptive thresholds
+  skip_bull_threshold: 5.0
+  market_bull_threshold: 2.0
+  market_bear_threshold: -2.0
+  bull_change_upper_add: 4.0
+  bull_consecutive_sub: 2
+  bear_change_lower_sub: 3.0
+  bear_change_upper_add: 6.0
+  bear_rsi_max_add: 5.0
+  bear_ma_ratio_sub: 0.07
+  bear_consecutive_disable: true
+  prefilter_input_cap: 25
+  prefilter_fallback_candidates: 5
+  max_ai_candidates: 10
 
-# KRX 거래 세션 (참고용 — 실제 로직은 worker/main.py _SESSIONS 에서 관리)
-# 프리장(장전 시간외): 08:30~09:00  trde_tp=61  (exit/add/both 조건만)
-# 정규장:             09:00~15:30  trde_tp=0/3 (전체 조건)
-# 애프터장(장후 시간외): 15:40~16:00  trde_tp=81  (exit/add/both 조건만)
-# 시간외 단일가:       16:00~18:00  trde_tp=62  (exit/add/both 조건만)
+# KRX session notes (see worker/main.py _SESSIONS)
+# Pre-open: 08:30~09:00 trde_tp=61
+# Regular: 09:00~15:30 trde_tp=0/3
+# Closing auction: 15:40~16:00 trde_tp=81
+# After-hours single-price: 16:00~18:00 trde_tp=62

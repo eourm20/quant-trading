@@ -480,19 +480,10 @@ def run_weekly_self_correction():
         logger.debug(f"[자기보정] 텔레그램 발송 실패: {e}")
 
 
-# 뉴스 위험 키워드 분류
-_NEWS_CRITICAL = [
-    "거래정지", "상장폐지", "감사의견거절", "횡령", "배임", "분식회계",
-    "검찰 수사", "구속영장", "대표이사 구속",
-]
-_NEWS_WARNING = [
-    "유상증자", "주주배정", "실적쇼크", "영업손실 전환", "영업정지",
-    "대표이사 사임", "대표 교체", "주요주주 매도", "블록딜",
-]
 
 # 뉴스 알림 쿨다운: {stock_code: 마지막_알림_시각}
 _news_alert_cooldown: dict = {}
-_NEWS_COOLDOWN_HOURS = 4
+_NEWS_COOLDOWN_HOURS = int(_WORKER_CONFIG.get("news_cooldown_hours", 8))
 
 
 def run_news_monitor():
@@ -1360,7 +1351,8 @@ def check_market_dip():
     # 쿨다운 (설정된 시간마다 최대 1회)
     cooldown_hours = int(_WORKER_CONFIG.get("dip_buy_cooldown_hours", 2))
     now_kst = _now_kst()
-    dip_key = f"dip_buy:{now_kst.strftime('%Y-%m-%d-%H')}"
+    # Use a stable key so configured cooldown_hours is honored across hour boundaries.
+    dip_key = "dip_buy:global"
     next_allowed_at = get_cooldown(dip_key)
     if next_allowed_at and now_kst < next_allowed_at:
         return
@@ -1736,6 +1728,7 @@ def main():
     start_bot_thread(kiwoom_client=kiwoom)
 
     interval_min = max(1, interval // 60)
+    sync_realtime_minutes = max(1, int(_WORKER_CONFIG.get("sync_realtime_minutes", 2)))
     _trade_env = "모의투자" if kiwoom._is_mock else "실전투자"
     _trade_mode = "자동매매" if AUTO_TRADE else "수동(알림)"
     logger.info(f"워커 시작 - {interval}초 간격으로 실행 (평일 08:00~18:00)")
@@ -1755,7 +1748,7 @@ def main():
     scheduler.add_job(auto_sync, "cron", hour=9, minute=1, id="sync_open")
     scheduler.add_job(auto_sync, "cron", hour=18, minute=5, id="sync_close")
     scheduler.add_job(auto_sync, "cron",
-                      day_of_week="mon-fri", hour="8-18", minute="*/2",
+                      day_of_week="mon-fri", hour="8-18", minute=f"*/{sync_realtime_minutes}",
                       id="sync_realtime")
     scheduler.add_job(update_signal_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
@@ -1799,9 +1792,25 @@ def main():
     scheduler.add_job(update_trade_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="trade_result_update")
-    scheduler.add_job(run_news_monitor, "cron",
-                      day_of_week="mon-fri", hour="9-15", minute="*/30",
-                      id="news_monitor")
+    news_monitor_times = str(_WORKER_CONFIG.get("news_monitor_times", "8:55,12:00") or "").strip()
+    for idx, token in enumerate(news_monitor_times.split(","), start=1):
+        t = token.strip()
+        if not t or ":" not in t:
+            continue
+        hh, mm = t.split(":", 1)
+        try:
+            hour_i = max(0, min(23, int(hh)))
+            min_i = max(0, min(59, int(mm)))
+        except ValueError:
+            continue
+        scheduler.add_job(
+            run_news_monitor,
+            "cron",
+            day_of_week="mon-fri",
+            hour=hour_i,
+            minute=min_i,
+            id=f"news_monitor_fixed_{idx}",
+        )
     if not bool(_WORKER_CONFIG.get("rag_realtime_index", False)):
         rag_batch_times = str(_WORKER_CONFIG.get("rag_batch_times", "") or "").strip()
         rag_batch_hours = str(_WORKER_CONFIG.get("rag_batch_hours", "") or "").strip()

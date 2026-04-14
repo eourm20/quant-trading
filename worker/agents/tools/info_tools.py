@@ -95,9 +95,7 @@ class GetMacroNewsTool(BaseTool):
 
     def execute(self, max_total: int = 6) -> dict:
         try:
-            from worker.clients.news_client import get_macro_news_for_ai, NAVER_CLIENT_ID
-            if not NAVER_CLIENT_ID:
-                return {"error": "뉴스 API 미설정"}
+            from worker.clients.news_client import get_macro_news_for_ai
             text = get_macro_news_for_ai(max_total=max_total)
             if not text:
                 return {"news": "관련 뉴스 없음"}
