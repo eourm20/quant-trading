@@ -1216,7 +1216,15 @@ def _apply_post_sell_watchlist_decision(signal, claude_opinion: str) -> None:
         logger.warning(f"[{signal.stock_name}] post-sell watchlist 처리 실패: {e}")
 
 
-def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: int = 0, buy_budget: int = 0) -> None:
+def _auto_execute(
+    signal,
+    claude_opinion: str,
+    signal_id: int | None,
+    deposit: int = 0,
+    buy_budget: int = 0,
+    kospi_rate: float = 0.0,
+    kosdaq_rate: float = 0.0,
+) -> None:
     """AI 판단이 매수/매도이고 추천수량이 있으면 자동 주문 실행. 추천수량 없으면 홀드."""
     import re
     first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
@@ -1277,6 +1285,34 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
     if not qty:
         logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
         return
+
+    # Adaptive policy gate from historical similar outcomes.
+    adaptive = None
+    if order_type == "1":
+        try:
+            from worker.adaptive_policy import get_judgment_adaptive_policy
+
+            adaptive = get_judgment_adaptive_policy(
+                signal_type=str(getattr(signal, "signal_type", "") or ""),
+                kospi_rate=float(kospi_rate or 0.0),
+                kosdaq_rate=float(kosdaq_rate or 0.0),
+                trigger_count=len(getattr(signal, "triggered_conditions", []) or []),
+            )
+            if (getattr(signal, "signal_type", "") or "") == "entry" and not adaptive.allow_new_entry:
+                logger.info(
+                    f"[{signal.stock_name}] adaptive gate: 신규진입 차단 "
+                    f"(stance={adaptive.stance}, reason={adaptive.reason})"
+                )
+                return
+            old_qty = qty
+            qty = max(1, int(round(qty * float(adaptive.qty_multiplier or 1.0))))
+            if qty != old_qty:
+                logger.info(
+                    f"[{signal.stock_name}] adaptive qty 조정: {old_qty}주 -> {qty}주 "
+                    f"(stance={adaptive.stance}, multiplier={adaptive.qty_multiplier})"
+                )
+        except Exception as _adaptive_e:
+            logger.debug(f"[{signal.stock_name}] adaptive policy 적용 실패: {_adaptive_e}")
 
     # 하드캡: 매수 — 실질 매수 여력 초과 방지
     if order_type == "1" and signal.current_price > 0:
@@ -1532,7 +1568,15 @@ def check_market_dip():
                 )
                 signal_id = save_signal(fake_signal, opinion, in_portfolio=False)
                 _rag_index_signal(fake_signal, signal_id, opinion)
-                _auto_execute(fake_signal, opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
+                _auto_execute(
+                    fake_signal,
+                    opinion,
+                    signal_id,
+                    deposit=deposit,
+                    buy_budget=buy_budget,
+                    kospi_rate=kospi_rate,
+                    kosdaq_rate=kosdaq_rate,
+                )
                 bought += 1
                 results.append(f"✅ {name} 매수")
             else:
@@ -1793,7 +1837,24 @@ def run_check():
 
             if claude_opinion:
                 if AUTO_TRADE:
-                    _auto_execute(signal, claude_opinion, signal_id, deposit=deposit, buy_budget=buy_budget)
+                    def _idx_rate(d):
+                        try:
+                            for k in ("flu_rt", "prdy_ctrt", "change_rate"):
+                                v = (d or {}).get(k)
+                                if v is not None and str(v).strip() != "":
+                                    return float(str(v).replace(",", "").strip())
+                        except Exception:
+                            pass
+                        return 0.0
+                    _auto_execute(
+                        signal,
+                        claude_opinion,
+                        signal_id,
+                        deposit=deposit,
+                        buy_budget=buy_budget,
+                        kospi_rate=_idx_rate(kospi),
+                        kosdaq_rate=_idx_rate(kosdaq),
+                    )
                 else:
                     _paper_execute(signal, claude_opinion, signal_id)
 

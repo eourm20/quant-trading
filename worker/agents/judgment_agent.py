@@ -11,6 +11,7 @@ import json
 from worker.agents.base_agent import BaseAgent
 from worker.agents.tools.registry import load_judgment_tools
 from worker.strategy_reflection import get_policy_snapshot, reflect_judgment, enqueue_policy_update
+from worker.adaptive_policy import get_judgment_adaptive_policy
 
 logger = logging.getLogger(__name__)
 
@@ -71,18 +72,21 @@ class JudgmentAgent:
         self._preflight_used_tools: list[str] = []
         self._preflight_missing_fields: list[str] = []
         self._policy_version: str = "judgment-v0"
+        self._adaptive_policy: dict = {}
 
-    def _run_preflight(self, signal) -> tuple[bool, dict, list[str]]:
+    def _run_preflight(self, signal, kospi_rate: float = 0.0, kosdaq_rate: float = 0.0) -> tuple[bool, dict, list[str]]:
         """필수 컨텍스트를 코드 파이프라인으로 강제 수집/검증."""
         self._preflight_used_tools = []
         required = [
             "position_context",
             "previous_judgment",
             "performance_review",
+            "recent_review_note",
             "market_brief",
             "stock_news",
             "macro_brief",
             "policy_snapshot",
+            "adaptive_policy",
         ]
         ctx: dict = {}
 
@@ -114,12 +118,34 @@ class JudgmentAgent:
             days=60,
             limit=20,
         )
+        try:
+            from data.db import get_recent_daily_reviews
+            reviews = get_recent_daily_reviews(limit=1) or []
+            if reviews:
+                r0 = reviews[0]
+                ctx["recent_review_note"] = {
+                    "created_at": r0.get("created_at", ""),
+                    "summary": r0.get("summary", ""),
+                    "detail": r0.get("detail", ""),
+                }
+            else:
+                ctx["recent_review_note"] = {"error": "missing_recent_daily_review"}
+        except Exception as e:
+            ctx["recent_review_note"] = {"error": str(e)}
         ctx["market_brief"] = _call("market_news_brief", max_items=5)
         ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=5)
         ctx["macro_brief"] = _call("rss_macro_brief", max_total=6)
         policy_snapshot = get_policy_snapshot("judgment")
         self._policy_version = str(policy_snapshot.get("policy_version") or "judgment-v0")
         ctx["policy_snapshot"] = policy_snapshot
+        adaptive = get_judgment_adaptive_policy(
+            signal_type=str(getattr(signal, "signal_type", "") or ""),
+            kospi_rate=float(kospi_rate or 0.0),
+            kosdaq_rate=float(kosdaq_rate or 0.0),
+            trigger_count=len(getattr(signal, "triggered_conditions", []) or []),
+        ).as_dict()
+        self._adaptive_policy = adaptive
+        ctx["adaptive_policy"] = adaptive
 
         validator = self._agent._tool_map.get("preflight_validator")
         if not validator:
@@ -134,7 +160,7 @@ class JudgmentAgent:
         self._preflight_missing_fields = list(missing or [])
         return ok, ctx, self._preflight_missing_fields
 
-    def run(self, signal) -> str:
+    def run(self, signal, kospi_rate: float = 0.0, kosdaq_rate: float = 0.0) -> str:
         """
         signal: worker.monitor.Signal 인스턴스
         반환: claude_judge.get_trade_opinion()과 동일한 형식의 문자열
@@ -158,12 +184,12 @@ class JudgmentAgent:
         is_holding = signal.in_portfolio
         signal_type = signal.signal_type
 
-        pre_ok, pre_ctx, missing = self._run_preflight(signal)
+        pre_ok, pre_ctx, missing = self._run_preflight(signal, kospi_rate=kospi_rate, kosdaq_rate=kosdaq_rate)
         logger.info(
             f"[JudgmentAgent] preflight_{'pass' if pre_ok else 'fail'} "
             f"stock={signal.stock_name}({signal.stock_code}) "
             f"missing_fields={missing} used_tools={self._preflight_used_tools} "
-            f"policy_version={self._policy_version}"
+            f"policy_version={self._policy_version} adaptive={self._adaptive_policy}"
         )
         if not pre_ok:
             reflection_written = reflect_judgment(
@@ -223,7 +249,9 @@ class JudgmentAgent:
 - stock_news: {_brief(pre_ctx.get('stock_news', {}))}
 - macro_brief: {_brief(pre_ctx.get('macro_brief', {}))}
 - performance_review: {_brief(pre_ctx.get('performance_review', {}))}
+- recent_review_note: {_brief(pre_ctx.get('recent_review_note', {}))}
 - policy_snapshot: {_brief(pre_ctx.get('policy_snapshot', {}))}
+- adaptive_policy: {_brief(pre_ctx.get('adaptive_policy', {}))}
 
 상황을 파악하고 필요한 도구를 직접 선택하여 매매 판단을 내려주세요.
 Fallback chain if primary tool fails: search_agent_memory_context -> search_similar_signals -> get_trade_performance -> search_text_context."""

@@ -674,6 +674,18 @@ def get_trade_opinion(
     recent_trades: list[dict] | None = None,
     deposit: int = 0,
 ) -> str:
+    def _idx_rate(d: dict | None) -> float:
+        if not d:
+            return 0.0
+        for k in ("flu_rt", "prdy_ctrt", "change_rate"):
+            v = d.get(k)
+            if v is not None and str(v).strip() != "":
+                try:
+                    return float(str(v).replace(",", "").strip())
+                except Exception:
+                    pass
+        return 0.0
+
     # Agent 모드 분기 — worker.yaml의 use_agent_mode: true 시 활성화
     try:
         import yaml
@@ -693,7 +705,11 @@ def get_trade_opinion(
                 max_tokens=int(_wcfg.get("agent_max_tokens", 700)),
                 target_unique_tools=int(_wcfg.get("agent_target_unique_tools", 0)),
             )
-            _opinion = _agent.run(signal)
+            _opinion = _agent.run(
+                signal,
+                kospi_rate=_idx_rate(kospi),
+                kosdaq_rate=_idx_rate(kosdaq),
+            )
             # 마지막 agent trace를 모듈 변수에 저장 (main.py에서 DB 저장에 활용)
             global _last_agent_trace
             _last_agent_trace = {

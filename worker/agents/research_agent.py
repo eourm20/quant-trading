@@ -12,6 +12,7 @@ from datetime import timedelta
 from worker.agents.base_agent import BaseAgent
 from worker.agents.tools.registry import load_research_tools
 from worker.strategy_reflection import get_policy_snapshot, reflect_research, enqueue_policy_update
+from worker.adaptive_policy import get_research_adaptive_policy
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,9 @@ class ResearchAgent:
         self._preflight_used_tools: list[str] = []
         self._preflight_missing_fields: list[str] = []
         self._policy_version: str = "research-v0"
+        self._adaptive_policy: dict = {}
 
-    def _run_preflight(self) -> tuple[bool, dict, list[str]]:
+    def _run_preflight(self, kospi_rate: float = 0.0, kosdaq_rate: float = 0.0, base_max_additions: int = 5) -> tuple[bool, dict, list[str]]:
         """리서치 실행 전 필수 컨텍스트 강제 수집/검증."""
         self._preflight_used_tools = []
         required = [
@@ -71,7 +73,9 @@ class ResearchAgent:
             "existing_exposure_check",
             "basic_disclosure_context",
             "screening_performance",
+            "recent_review_note",
             "policy_snapshot",
+            "adaptive_policy",
         ]
         ctx: dict = {}
 
@@ -117,6 +121,20 @@ class ResearchAgent:
             limit=30,
             only_with_results=True,
         )
+        try:
+            from data.db import get_recent_daily_reviews
+            reviews = get_recent_daily_reviews(limit=1) or []
+            if reviews:
+                r0 = reviews[0]
+                ctx["recent_review_note"] = {
+                    "created_at": r0.get("created_at", ""),
+                    "summary": r0.get("summary", ""),
+                    "detail": r0.get("detail", ""),
+                }
+            else:
+                ctx["recent_review_note"] = {"error": "missing_recent_daily_review"}
+        except Exception as e:
+            ctx["recent_review_note"] = {"error": str(e)}
 
         proxy_code = ""
         if holdings_codes:
@@ -129,6 +147,13 @@ class ResearchAgent:
         policy_snapshot = get_policy_snapshot("research")
         self._policy_version = str(policy_snapshot.get("policy_version") or "research-v0")
         ctx["policy_snapshot"] = policy_snapshot
+        adaptive = get_research_adaptive_policy(
+            kospi_rate=float(kospi_rate or 0.0),
+            kosdaq_rate=float(kosdaq_rate or 0.0),
+            base_max_additions=int(base_max_additions or 5),
+        )
+        self._adaptive_policy = dict(adaptive or {})
+        ctx["adaptive_policy"] = self._adaptive_policy
 
         validator = self._agent._tool_map.get("preflight_validator")
         if not validator:
@@ -264,11 +289,15 @@ class ResearchAgent:
         kospi_rate, kosdaq_rate: 당일 지수 등락률
         max_candidates: 최대 분석 후보 수
         """
-        pre_ok, pre_ctx, missing = self._run_preflight()
+        pre_ok, pre_ctx, missing = self._run_preflight(
+            kospi_rate=kospi_rate,
+            kosdaq_rate=kosdaq_rate,
+            base_max_additions=max_candidates,
+        )
         logger.info(
             f"[ResearchAgent] preflight_{'pass' if pre_ok else 'fail'} "
             f"missing_fields={missing} used_tools={self._preflight_used_tools} "
-            f"policy_version={self._policy_version}"
+            f"policy_version={self._policy_version} adaptive={self._adaptive_policy}"
         )
         if not pre_ok:
             reflection_written = reflect_research(
@@ -300,7 +329,8 @@ class ResearchAgent:
             )
             return f"INCOMPLETE_CONTEXT: missing_fields={','.join(missing)}"
 
-        limit = max(1, int(max_candidates or 1))
+        limit = int((self._adaptive_policy or {}).get("max_additions") or max_candidates or 1)
+        limit = max(1, limit)
         self._agent.configure_tool(
             "add_to_watchlist",
             max_additions=limit,
@@ -325,7 +355,9 @@ class ResearchAgent:
 - existing_exposure_check: {_brief(pre_ctx.get('existing_exposure_check', {}))}
 - basic_disclosure_context: {_brief(pre_ctx.get('basic_disclosure_context', {}))}
 - screening_performance: {_brief(pre_ctx.get('screening_performance', {}))}
+- recent_review_note: {_brief(pre_ctx.get('recent_review_note', {}))}
 - policy_snapshot: {_brief(pre_ctx.get('policy_snapshot', {}))}
+- adaptive_policy: {_brief(pre_ctx.get('adaptive_policy', {}))}
 
 ## 최근 성과 요약 (고정 반영 규칙)
 아래 요약은 참고가 아니라 필수 반영 대상입니다. 추천 판단 시 반드시 우선 반영하세요.

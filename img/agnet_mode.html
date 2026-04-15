@@ -3,445 +3,158 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Agent Mode - Code Flow Graph</title>
+<title>Agent Mode 쉬운 설명</title>
 <style>
-  :root {
-    --bg: #f3f6fb;
-    --card: #ffffff;
-    --line: #d9e2ef;
-    --text: #172033;
-    --muted: #5b6b86;
-    --blue: #2563eb;
-    --green: #16a34a;
-    --orange: #ea580c;
-    --violet: #7c3aed;
-    --red: #dc2626;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: "Segoe UI", "Apple SD Gothic Neo", sans-serif;
-    line-height: 1.5;
-  }
-  .hero {
-    background: linear-gradient(135deg, #0f2f54, #1f5aa6 65%, #2f7ef7);
-    color: #fff;
-    padding: 34px 18px;
-  }
-  .hero h1 { margin: 0 0 8px; font-size: 27px; }
-  .hero p { margin: 0; color: #dbeafe; font-size: 14px; }
-  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 14px 40px; }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 16px;
-    margin-bottom: 12px;
-  }
-  h2 { margin: 0 0 9px; font-size: 20px; }
-  h3 { margin: 10px 0 7px; font-size: 15px; }
-  .muted { color: var(--muted); font-size: 13px; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .badge {
-    display: inline-block;
-    border-radius: 999px;
-    padding: 2px 9px;
-    font-size: 11px;
-    font-weight: 700;
-    margin-right: 6px;
-  }
-  .b-j { background: #dbeafe; color: #1d4ed8; }
-  .b-r { background: #dcfce7; color: #15803d; }
-  .b-s { background: #fef3c7; color: #92400e; }
-
-  .code {
-    font-family: Consolas, "Courier New", monospace;
-    background: #f1f5f9;
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    padding: 1px 6px;
-    font-size: 12px;
-    white-space: normal;
-    overflow-wrap: anywhere;
-    word-break: break-word;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    table-layout: fixed;
-  }
-  th, td {
-    border-bottom: 1px solid #e5e7eb;
-    padding: 8px;
-    vertical-align: top;
-    overflow-wrap: anywhere;
-    word-break: break-word;
-  }
-  th {
-    background: #f8fafc;
-    text-align: left;
-    color: #334155;
-    font-size: 11px;
-  }
-
-  ul { margin: 6px 0 0 18px; }
-  li { margin: 2px 0; }
-
-  .diagram-wrap {
-    overflow-x: auto;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    background: #fbfdff;
-    padding: 8px;
-  }
-
-  .summary { background:#eef4ff; border:1px solid #cfe0ff; color:#1e3a8a; border-radius:10px; padding:8px 10px; font-size:13px; margin:8px 0 10px; }
-  .legend {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: 12px;
-    margin-bottom: 8px;
-    color: #334155;
-  }
-  .dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    margin-right: 4px;
-    transform: translateY(1px);
-  }
-
-  @media (max-width: 1040px) {
-    .grid2 { grid-template-columns: 1fr; }
-  }
+  :root{--bg:#f6f8fc;--card:#fff;--line:#dbe3f1;--text:#182235;--muted:#5d6c87;--blue:#2563eb;--orange:#ea580c;--green:#16a34a;--red:#dc2626}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Apple SD Gothic Neo",sans-serif;line-height:1.55}
+  .hero{background:linear-gradient(135deg,#12345b,#2563eb);color:#fff;padding:28px 16px}
+  .hero h1{margin:0 0 6px;font-size:26px}
+  .hero p{margin:0;color:#dbeafe;font-size:14px}
+  .wrap{max-width:980px;margin:0 auto;padding:14px}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .tab{border:1px solid #c6d7f2;background:#fff;color:#2451a7;border-radius:999px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer}
+  .tab.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+  .panel{display:none}.panel.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:10px}
+  h2{margin:0 0 8px;font-size:20px}
+  h3{margin:10px 0 6px;font-size:15px}
+  .summary{background:#edf3ff;border:1px solid #cfe0ff;border-radius:10px;padding:8px 10px;font-size:13px;color:#20407f}
+  .step{border:1px solid #e6ecf7;border-radius:10px;padding:10px;margin-top:8px;background:#fbfdff}
+  .num{display:inline-block;width:22px;height:22px;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:#fff;background:var(--blue);margin-right:6px}
+  .flow{display:flex;gap:8px;align-items:stretch;overflow:auto;padding-bottom:4px;margin-top:8px}
+  .node{min-width:180px;border-radius:10px;padding:9px;border:1px solid}
+  .n-blue{background:#eaf2ff;border-color:#bcd3ff}
+  .n-org{background:#fff2e8;border-color:#ffd2b0}
+  .n-grn{background:#e9f9ef;border-color:#bce9cb}
+  .arr{min-width:24px;display:flex;align-items:center;justify-content:center;color:#64748b;font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{border-bottom:1px solid #e7ecf6;padding:8px;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-break:break-word}
+  th{background:#f8fbff;color:#334155;font-size:12px}
+  .code{font-family:Consolas,monospace;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:1px 5px;font-size:12px}
+  .no{color:var(--red);font-weight:700}
 </style>
 </head>
 <body>
-  <header class="hero">
-    <div class="wrap" style="padding:0 14px;">
-      <h1>Agent Mode 코드 흐름도</h1>
-      <p>코드 함수 단위 호출 경로 + Agent별 Preflight/도구/실행 게이트를 그래프 형태로 정리</p>
-    </div>
-  </header>
+<header class="hero">
+  <div class="wrap" style="padding:0 2px;">
+    <h1>Agent Mode 쉬운 설명</h1>
+    <p>핵심 흐름을 쉽게 보고, 필요하면 전체 도구 목록 탭에서 상세 확인</p>
+  </div>
+</header>
 
-  <main class="wrap">
+<main class="wrap">
+  <div class="tabs">
+    <button class="tab active" data-tab="easy">쉬운 설명</button>
+    <button class="tab" data-tab="alltools">전체 도구 목록</button>
+  </div>
+
+  <section id="easy" class="panel active">
     <section class="card">
-      <h2>1) 전체 오케스트레이션 그래프</h2>
-      <p class="summary">요약: 스케줄러가 판단/리서치/정책 루프를 돌리고, 중간 게이트를 통과한 경우에만 실제 실행됩니다.</p>
-      <p class="muted">핵심 파일: <span class="code">worker/main.py</span>, <span class="code">worker/claude_judge.py</span>, <span class="code">worker/agents/*.py</span>, <span class="code">worker/strategy_reflection.py</span></p>
-      <div class="legend">
-        <span><span class="dot" style="background:#2563eb"></span>실행 함수</span>
-        <span><span class="dot" style="background:#ea580c"></span>게이트/검증</span>
-        <span><span class="dot" style="background:#16a34a"></span>DB/기록</span>
-        <span><span class="dot" style="background:#7c3aed"></span>Agent Tool Loop</span>
-      </div>
-      <div class="diagram-wrap">
-        <svg viewBox="0 0 1540 380" width="1540" height="380" role="img" aria-label="overall-flow">
-          <defs>
-            <marker id="arr" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
-              <path d="M0,0 L10,5 L0,10 z" fill="#64748b" />
-            </marker>
-            <style>
-              .n{rx:12;ry:12;stroke-width:1.5}
-              .t{font:600 13px 'Segoe UI';fill:#0f172a}
-              .s{font:12px 'Segoe UI';fill:#334155}
-              .e{stroke:#64748b;stroke-width:2;fill:none;marker-end:url(#arr)}
-            </style>
-          </defs>
-
-          <rect class="n" x="20" y="45" width="180" height="78" fill="#dbeafe" stroke="#60a5fa"/>
-          <text class="t" x="40" y="72">APScheduler</text>
-          <text class="s" x="40" y="93">monitor/screening/</text>
-          <text class="s" x="40" y="111">policy loop jobs</text>
-
-          <rect class="n" x="255" y="45" width="180" height="78" fill="#dbeafe" stroke="#60a5fa"/>
-          <text class="t" x="280" y="72">run_check()</text>
-          <text class="s" x="280" y="93">실시간 신호 감지</text>
-
-          <rect class="n" x="255" y="180" width="220" height="86" fill="#dbeafe" stroke="#60a5fa"/>
-          <text class="t" x="280" y="209">run_daily_screening()</text>
-          <text class="s" x="280" y="230">ResearchAgent 발굴/등록</text>
-          <text class="s" x="280" y="248">(15:40)</text>
-
-          <rect class="n" x="255" y="300" width="220" height="62" fill="#dcfce7" stroke="#4ade80"/>
-          <text class="t" x="280" y="328">run_reflection_policy_cycle()</text>
-          <text class="s" x="280" y="346">일일 정책 루프</text>
-
-          <rect class="n" x="530" y="45" width="230" height="78" fill="#eef2ff" stroke="#a78bfa"/>
-          <text class="t" x="554" y="72">get_trade_opinion()</text>
-          <text class="s" x="554" y="93">use_agent_mode=true →</text>
-          <text class="s" x="554" y="111">JudgmentAgent.run()</text>
-
-          <rect class="n" x="530" y="180" width="230" height="86" fill="#eef2ff" stroke="#a78bfa"/>
-          <text class="t" x="554" y="209">ResearchAgent.run()</text>
-          <text class="s" x="554" y="230">후보 스캔 + 검증 +</text>
-          <text class="s" x="554" y="248">add_to_watchlist</text>
-
-          <rect class="n" x="820" y="32" width="215" height="102" fill="#ffedd5" stroke="#fb923c"/>
-          <text class="t" x="846" y="62">Preflight + Validator</text>
-          <text class="s" x="846" y="84">필수 컨텍스트 누락 시</text>
-          <text class="s" x="846" y="102">INCOMPLETE_CONTEXT</text>
-          <text class="s" x="846" y="120">(본 판단 미진입)</text>
-
-          <rect class="n" x="820" y="180" width="215" height="86" fill="#ffedd5" stroke="#fb923c"/>
-          <text class="t" x="846" y="210">등록 게이트</text>
-          <text class="s" x="846" y="232">policy_gate_passed</text>
-          <text class="s" x="846" y="250">없으면 등록 거부</text>
-
-          <rect class="n" x="1095" y="45" width="205" height="78" fill="#e9d5ff" stroke="#c084fc"/>
-          <text class="t" x="1120" y="72">BaseAgent Tool Loop</text>
-          <text class="s" x="1120" y="93">tool_calls 반복 실행</text>
-          <text class="s" x="1120" y="111">coverage/trace 생성</text>
-
-          <rect class="n" x="1095" y="180" width="205" height="86" fill="#dcfce7" stroke="#4ade80"/>
-          <text class="t" x="1120" y="210">DB 기록</text>
-          <text class="s" x="1120" y="232">signals + agent_action_logs</text>
-          <text class="s" x="1120" y="250">reflection + policy_queue</text>
-
-          <rect class="n" x="1360" y="45" width="160" height="78" fill="#ede9fe" stroke="#a78bfa"/>
-          <text class="t" x="1388" y="72">실행</text>
-          <text class="s" x="1388" y="93">_auto_execute</text>
-          <text class="s" x="1388" y="111">/_paper_execute</text>
-
-          <path class="e" d="M200 84 L255 84"/>
-          <path class="e" d="M200 95 C220 95,220 210,255 210"/>
-          <path class="e" d="M200 105 C220 105,220 332,255 332"/>
-
-          <path class="e" d="M435 84 L530 84"/>
-          <path class="e" d="M475 223 L530 223"/>
-
-          <path class="e" d="M760 84 L820 84"/>
-          <path class="e" d="M760 223 L820 223"/>
-
-          <path class="e" d="M1035 84 L1095 84"/>
-          <path class="e" d="M1035 223 L1095 223"/>
-
-          <path class="e" d="M1300 84 L1360 84"/>
-          <path class="e" d="M1300 223 C1335 223,1330 115,1360 115"/>
-
-          <path class="e" d="M1170 266 C1170 314,370 314,370 300"/>
-        </svg>
+      <h2>먼저 이것만 이해하면 됩니다</h2>
+      <div class="summary">핵심: "정보가 충분하면 실행, 부족하면 중단" 입니다.</div>
+      <div class="flow">
+        <div class="node n-blue"><b>신호/후보 발생</b><br>스케줄러가 시작</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>사전 점검</b><br>필수 정보 수집</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>누락 검사</b><br>비어있으면 중단</div>
+        <div class="arr">→</div>
+        <div class="node n-blue"><b>AI 판단</b><br>도구 사용해 결론</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>실행/저장</b><br>주문·등록·로그</div>
       </div>
     </section>
 
-    <section class="grid2">
-      <article class="card">
-        <h2>2) JudgmentAgent 그래프</h2>
-        <p class="summary">요약: 실시간 신호를 즉시 판단하되, 필수 컨텍스트가 비면 INCOMPLETE_CONTEXT로 중단합니다.</p>
-        <p><span class="badge b-j">JUDGMENT</span> <span class="muted">실시간 신호 판단 (매수/매도/홀드)</span></p>
-        <div class="diagram-wrap">
-          <svg viewBox="0 0 720 500" width="100%" height="500" role="img" aria-label="judgment-flow">
-            <defs>
-              <marker id="arrJ" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
-            </defs>
-            <style>
-              .jnode{rx:10;ry:10;stroke-width:1.4}
-              .jt{font:600 12px 'Segoe UI';fill:#0f172a}
-              .js{font:11px 'Segoe UI';fill:#334155}
-              .je{stroke:#64748b;stroke-width:1.8;fill:none;marker-end:url(#arrJ)}
-            </style>
-
-            <rect class="jnode" x="20" y="20" width="300" height="56" fill="#dbeafe" stroke="#60a5fa"/>
-            <text class="jt" x="35" y="43">main.run_check() -> get_trade_opinion()</text>
-            <text class="js" x="35" y="62">use_agent_mode=true면 JudgmentAgent.run 진입</text>
-
-            <rect class="jnode" x="20" y="100" width="300" height="150" fill="#ffedd5" stroke="#fb923c"/>
-            <text class="jt" x="35" y="123">_run_preflight() 필수 항목</text>
-            <text class="js" x="35" y="144">- position_context_brief</text>
-            <text class="js" x="35" y="160">- get_signal_history / get_trade_performance</text>
-            <text class="js" x="35" y="176">- market_news_brief / get_news / rss_macro_brief</text>
-            <text class="js" x="35" y="192">- get_policy_snapshot('judgment')</text>
-            <text class="js" x="35" y="208">- preflight_validator (missing_fields 검사)</text>
-            <text class="js" x="35" y="227">fail -> INCOMPLETE_CONTEXT</text>
-
-            <rect class="jnode" x="20" y="272" width="300" height="66" fill="#e9d5ff" stroke="#c084fc"/>
-            <text class="jt" x="35" y="296">BaseAgent.run()</text>
-            <text class="js" x="35" y="315">tool_calls 반복 + final opinion 생성</text>
-
-            <rect class="jnode" x="20" y="358" width="300" height="118" fill="#dcfce7" stroke="#4ade80"/>
-            <text class="jt" x="35" y="381">후처리/기록</text>
-            <text class="js" x="35" y="401">- reflect_judgment(...)</text>
-            <text class="js" x="35" y="417">- enqueue_policy_update(trigger=post_run_reflection)</text>
-            <text class="js" x="35" y="433">- main: update_signal_agent_trace / save_agent_action_log</text>
-            <text class="js" x="35" y="449">- INCOMPLETE_CONTEXT면 _auto_execute 차단</text>
-
-            <path class="je" d="M170 76 L170 100"/>
-            <path class="je" d="M170 250 L170 272"/>
-            <path class="je" d="M170 338 L170 358"/>
-
-            <rect class="jnode" x="390" y="128" width="300" height="140" fill="#fef2f2" stroke="#fca5a5"/>
-            <text class="jt" x="405" y="152">실패 경로 (하드 차단)</text>
-            <text class="js" x="405" y="172">INCOMPLETE_CONTEXT 반환</text>
-            <text class="js" x="405" y="188">reflection(status=incomplete_context)</text>
-            <text class="js" x="405" y="204">policy queue(trigger=incomplete_context)</text>
-            <text class="js" x="405" y="220">main.run_check: execute 진입 금지</text>
-            <text class="js" x="405" y="236">(매수/매도 미실행)</text>
-
-            <path class="je" d="M320 220 C350 220,355 200,390 200"/>
-          </svg>
-        </div>
-      </article>
-
-      <article class="card">
-        <h2>3) ResearchAgent 그래프</h2>
-        <p class="summary">요약: 후보를 찾고 검증한 뒤 정책 게이트를 통과한 종목만 watchlist에 등록합니다.</p>
-        <p><span class="badge b-r">RESEARCH</span> <span class="muted">장마감 후보 발굴 + watchlist 등록</span></p>
-        <div class="diagram-wrap">
-          <svg viewBox="0 0 720 500" width="100%" height="500" role="img" aria-label="research-flow">
-            <defs>
-              <marker id="arrR" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
-            </defs>
-            <style>
-              .rnode{rx:10;ry:10;stroke-width:1.4}
-              .rt{font:600 12px 'Segoe UI';fill:#0f172a}
-              .rs{font:11px 'Segoe UI';fill:#334155}
-              .re{stroke:#64748b;stroke-width:1.8;fill:none;marker-end:url(#arrR)}
-            </style>
-
-            <rect class="rnode" x="20" y="20" width="320" height="56" fill="#dbeafe" stroke="#60a5fa"/>
-            <text class="rt" x="35" y="43">stock_analyzer.run_daily_screening()</text>
-            <text class="rs" x="35" y="62">use_agent_mode=true면 ResearchAgent.run</text>
-
-            <rect class="rnode" x="20" y="96" width="320" height="156" fill="#ffedd5" stroke="#fb923c"/>
-            <text class="rt" x="35" y="120">_run_preflight() 필수 항목</text>
-            <text class="rs" x="35" y="141">- market_news_brief / rss_macro_brief</text>
-            <text class="rs" x="35" y="157">- existing_exposure_check(보유/중복)</text>
-            <text class="rs" x="35" y="173">- basic_disclosure_context(get_dart)</text>
-            <text class="rs" x="35" y="189">- screening_performance(get_screening_history)</text>
-            <text class="rs" x="35" y="205">- get_policy_snapshot('research')</text>
-            <text class="rs" x="35" y="221">- preflight_validator</text>
-            <text class="rs" x="35" y="238">fail -> INCOMPLETE_CONTEXT</text>
-
-            <rect class="rnode" x="20" y="272" width="320" height="70" fill="#e9d5ff" stroke="#c084fc"/>
-            <text class="rt" x="35" y="296">BaseAgent Tool Loop (스캔/검증)</text>
-            <text class="rs" x="35" y="315">scan_* + news/dart/history/memory 조합</text>
-
-            <rect class="rnode" x="20" y="362" width="320" height="116" fill="#dcfce7" stroke="#4ade80"/>
-            <text class="rt" x="35" y="386">등록/후처리</text>
-            <text class="rs" x="35" y="406">- add_to_watchlist(policy_gate_passed 필요)</text>
-            <text class="rs" x="35" y="422">- max_additions 제한</text>
-            <text class="rs" x="35" y="438">- reflect_research + enqueue_policy_update</text>
-            <text class="rs" x="35" y="454">- strategy_note / agent trace 기록</text>
-
-            <path class="re" d="M180 76 L180 96"/>
-            <path class="re" d="M180 252 L180 272"/>
-            <path class="re" d="M180 342 L180 362"/>
-
-            <rect class="rnode" x="390" y="150" width="300" height="122" fill="#fef2f2" stroke="#fca5a5"/>
-            <text class="rt" x="405" y="174">등록 게이트 실패</text>
-            <text class="rs" x="405" y="194">add_to_watchlist -></text>
-            <text class="rs" x="405" y="210">POLICY_VALIDATION_REQUIRED</text>
-            <text class="rs" x="405" y="226">(preflight/policy 파이프라인 미충족)</text>
-            <text class="rs" x="405" y="244">watchlist 등록 거부</text>
-
-            <path class="re" d="M340 307 C365 307,365 206,390 206"/>
-          </svg>
-        </div>
-      </article>
+    <section class="card">
+      <h2>1) 실시간 판단 흐름 (JudgmentAgent)</h2>
+      <div class="step"><span class="num">1</span><b>신호 감지</b>: <span class="code">run_check()</span></div>
+      <div class="step"><span class="num">2</span><b>판단 호출</b>: <span class="code">get_trade_opinion() -> JudgmentAgent.run()</span></div>
+      <div class="step"><span class="num">3</span><b>사전 점검</b>: 보유이유/이전판단/뉴스/시장/거시/성과 확인</div>
+      <div class="step"><span class="num">4</span><b>누락 검사</b>: 부족하면 <span class="code">INCOMPLETE_CONTEXT</span>로 종료</div>
+      <div class="step"><span class="num">5</span><b>실행 게이트</b>: 중단 상태면 주문 차단</div>
+      <p class="no">중요: INCOMPLETE_CONTEXT면 주문 실행 안 함</p>
     </section>
 
     <section class="card">
-      <h2>4) 도구 역할 맵 (보기 쉽게 압축)</h2>
-      <p class="summary">요약: 같은 도구라도 Judgment는 "지금 행동" 중심, Research는 "후보 검증" 중심으로 사용합니다.</p>
+      <h2>2) 장마감 발굴 흐름 (ResearchAgent)</h2>
+      <div class="step"><span class="num">1</span><b>시작</b>: <span class="code">run_daily_screening()</span></div>
+      <div class="step"><span class="num">2</span><b>리서치 호출</b>: <span class="code">ResearchAgent.run()</span></div>
+      <div class="step"><span class="num">3</span><b>사전 점검</b>: 시장/거시/중복보유/공시/과거추천성과 확인</div>
+      <div class="step"><span class="num">4</span><b>스캔 + 검증</b>: 거래량/수급/뉴스/공시</div>
+      <div class="step"><span class="num">5</span><b>등록 게이트</b>: 통과 종목만 <span class="code">add_to_watchlist</span></div>
+    </section>
+
+    <section class="card">
+      <h2>추가 반영: 상황별 공격/보수 자동 조절</h2>
+      <div class="summary">이제 두 에이전트는 과거 유사 상황 성과를 보고 공격/중립/보수 성향을 자동으로 정합니다.</div>
+      <div class="flow">
+        <div class="node n-blue"><b>과거 유사 성과 조회</b><br>signals/trades/screening_log</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>성향 계산</b><br>aggressive / balanced / conservative</div>
+        <div class="arr">→</div>
+        <div class="node n-blue"><b>에이전트 입력 반영</b><br>adaptive_policy 컨텍스트 주입</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>실행 게이트 반영</b><br>신규진입 허용/수량 자동조절</div>
+      </div>
       <table>
-        <thead>
-          <tr>
-            <th style="width:12%">영역</th>
-            <th style="width:28%">핵심 도구</th>
-            <th style="width:30%">Judgment에서 쓰는 이유</th>
-            <th style="width:30%">Research에서 쓰는 이유</th>
-          </tr>
-        </thead>
+        <thead><tr><th>적용 대상</th><th>어떻게 바뀜</th></tr></thead>
         <tbody>
-          <tr>
-            <td>시세/차트</td>
-            <td><span class="code">get_current_price</span>, <span class="code">get_chart</span>, <span class="code">get_market_index</span></td>
-            <td>지금 신호가 진짜 유효한지 확인</td>
-            <td>후보가 이미 과열/붕괴인지 1차 필터링</td>
-          </tr>
-          <tr>
-            <td>컨텍스트</td>
-            <td><span class="code">position_context_brief</span>, <span class="code">get_signal_history</span>, <span class="code">get_trade_performance</span></td>
-            <td>왜 들어갔고 이전 판단이 맞았는지 반영</td>
-            <td>과거 추천 품질/유형 성과 반영</td>
-          </tr>
-          <tr>
-            <td>뉴스/거시</td>
-            <td><span class="code">market_news_brief</span>, <span class="code">get_news</span>, <span class="code">rss_macro_brief</span>, <span class="code">get_dart</span></td>
-            <td>종목/시장/정책 이벤트 반영</td>
-            <td>테마/실적/리스크 검증</td>
-          </tr>
-          <tr>
-            <td>스캔</td>
-            <td><span class="code">scan_volume_surge</span>, <span class="code">scan_foreign_buy</span>, <span class="code">scan_decline_rank</span></td>
-            <td>보조(필요시만)</td>
-            <td>후보 발굴의 시작점</td>
-          </tr>
-          <tr>
-            <td>RAG/메모리</td>
-            <td><span class="code">search_agent_memory_context</span>, <span class="code">search_text_context</span>, <span class="code">search_screening_context</span></td>
-            <td>유사 상황 재확인</td>
-            <td>유사 케이스/과거 실패 패턴 회피</td>
-          </tr>
-          <tr>
-            <td>실행</td>
-            <td><span class="code">execute_order</span>, <span class="code">add_to_watchlist</span></td>
-            <td>AUTO 모드에서만 주문 실행</td>
-            <td>policy_gate 통과 시만 등록</td>
-          </tr>
+          <tr><td>JudgmentAgent</td><td>신규 진입 허용 여부와 주문 수량 배수(예: 0.5x, 1.0x, 1.2x)를 상황별로 조정</td></tr>
+          <tr><td>ResearchAgent</td><td>한 번 실행에서 watchlist 등록 가능한 최대 종목 수를 상황별로 조정</td></tr>
+          <tr><td>공통</td><td>결과는 로그/복기에 저장되어 다음 정책 루프에서 다시 반영</td></tr>
         </tbody>
       </table>
     </section>
+  </section>
 
+  <section id="alltools" class="panel">
     <section class="card">
-      <h2>5) Reflection -> Policy 루프 그래프</h2>
-      <p class="summary">요약: 실행 결과를 복기 로그로 쌓고, 안전장치를 통과한 low-risk 정책만 자동 반영합니다.</p>
-      <p><span class="badge b-s">SYSTEM LOOP</span> <span class="muted">low-risk만 자동 반영, 위험/충돌은 큐 보류</span></p>
-      <div class="diagram-wrap">
-        <svg viewBox="0 0 1280 220" width="1280" height="220" role="img" aria-label="policy-loop">
-          <defs><marker id="arrP" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker></defs>
-          <style>
-            .pn{rx:12;ry:12;stroke-width:1.5}
-            .pt{font:600 13px 'Segoe UI';fill:#0f172a}
-            .ps{font:12px 'Segoe UI';fill:#334155}
-            .pe{stroke:#64748b;stroke-width:2;fill:none;marker-end:url(#arrP)}
-          </style>
-          <rect class="pn" x="20" y="50" width="230" height="96" fill="#dcfce7" stroke="#4ade80"/>
-          <text class="pt" x="42" y="78">reflect_judgment/research</text>
-          <text class="ps" x="42" y="98">strategy_reflection_logs</text>
-          <text class="ps" x="42" y="116">quality_score, tags, detail_json</text>
+      <h2>전체 도구 목록 (코드 등록 기준)</h2>
+      <div class="summary">아래 목록은 <span class="code">worker/agents/tools/registry.py</span>에서 로드되는 도구 전체입니다.</div>
+      <div class="summary">참고: 상황별 성향 계산 엔진은 <span class="code">worker/adaptive_policy.py</span>에서 동작하며, 도구가 아닌 코드 로직으로 실행 게이트에 연결됩니다.</div>
 
-          <rect class="pn" x="300" y="50" width="230" height="96" fill="#fef3c7" stroke="#f59e0b"/>
-          <text class="pt" x="322" y="78">run_policy_update_cycle</text>
-          <text class="ps" x="322" y="98">7일 집계 + risk_mode 제안</text>
-          <text class="ps" x="322" y="116">queue 적재</text>
+      <h3>JudgmentAgent 전체</h3>
+      <table>
+        <thead><tr><th>카테고리</th><th>도구</th></tr></thead>
+        <tbody>
+          <tr><td>시세/차트</td><td>get_current_price, get_chart, get_market_index</td></tr>
+          <tr><td>포트/자금</td><td>get_portfolio, get_deposit, get_positions, get_order_status, get_realized_pnl</td></tr>
+          <tr><td>뉴스/거시</td><td>get_news, get_dart, get_macro_news, get_sector_news, get_global_market, market_news_brief, rss_macro_brief</td></tr>
+          <tr><td>이력/통계</td><td>get_signal_history, get_entry_reason, preflight_validator, search_similar_signals, get_screening_history, get_trade_performance, get_condition_accuracy, get_pattern_accuracy, self_correction</td></tr>
+          <tr><td>RAG</td><td>search_text_context, search_screening_context, search_agent_memory_context</td></tr>
+          <tr><td>수정/실행</td><td>update_watchlist (+AUTO_TRADE 시 execute_order)</td></tr>
+        </tbody>
+      </table>
 
-          <rect class="pn" x="580" y="35" width="310" height="126" fill="#ffedd5" stroke="#fb923c"/>
-          <text class="pt" x="602" y="64">안전장치</text>
-          <text class="ps" x="602" y="84">- min_samples 미달: skip</text>
-          <text class="ps" x="602" y="102">- high-risk pending 충돌: reject</text>
-          <text class="ps" x="602" y="120">- 최근 24h 내 변경: reject</text>
-          <text class="ps" x="602" y="138">- risk_mode 비인접 점프: reject</text>
-
-          <rect class="pn" x="940" y="50" width="320" height="96" fill="#e9d5ff" stroke="#c084fc"/>
-          <text class="pt" x="962" y="78">auto_apply_low_risk=true</text>
-          <text class="ps" x="962" y="98">strategy_policy_state 업데이트</text>
-          <text class="ps" x="962" y="116">queue: applied/rejected + note</text>
-
-          <path class="pe" d="M250 98 L300 98"/>
-          <path class="pe" d="M530 98 L580 98"/>
-          <path class="pe" d="M890 98 L940 98"/>
-        </svg>
-      </div>
+      <h3>ResearchAgent 전체</h3>
+      <table>
+        <thead><tr><th>카테고리</th><th>도구</th></tr></thead>
+        <tbody>
+          <tr><td>시세/차트</td><td>get_current_price, get_chart, get_market_index</td></tr>
+          <tr><td>스캔</td><td>scan_volume_surge, scan_foreign_buy, scan_decline_rank</td></tr>
+          <tr><td>포트/자금</td><td>get_portfolio, get_deposit, get_realized_pnl</td></tr>
+          <tr><td>뉴스/거시</td><td>get_news, get_dart, get_macro_news, get_sector_news, get_global_market, market_news_brief, rss_macro_brief</td></tr>
+          <tr><td>검증/RAG</td><td>preflight_validator, search_text_context, search_screening_context, search_agent_memory_context, search_similar_signals, get_screening_history, get_trade_performance</td></tr>
+          <tr><td>등록</td><td>add_to_watchlist</td></tr>
+        </tbody>
+      </table>
     </section>
-  </main>
+  </section>
+</main>
+
+<script>
+  const tabs=[...document.querySelectorAll('.tab')];
+  const panels=[...document.querySelectorAll('.panel')];
+  tabs.forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      tabs.forEach(t=>t.classList.remove('active'));
+      panels.forEach(p=>p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.tab)?.classList.add('active');
+      window.scrollTo({top:0,behavior:'smooth'});
+    });
+  });
+</script>
 </body>
 </html>
-
-
