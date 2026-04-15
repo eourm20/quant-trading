@@ -2015,11 +2015,7 @@ def main():
     run_check()
 
     scheduler.start()
-    try:
-        logger.info("[초기화] scheduler start 직후 reassess_watchlist 1회 실행")
-        reassess_watchlist(kiwoom)
-    except Exception as e:
-        logger.warning(f"[초기화] 즉시 reassess_watchlist 실행 실패: {e}")
+    logger.info("[초기화] reassess_watchlist는 스케줄 시간에만 실행")
     try:
         while True:
             time.sleep(1)
