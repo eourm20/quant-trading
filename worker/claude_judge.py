@@ -5,6 +5,7 @@ ANTHROPIC_API_KEY가 있으면 Claude, 없으면 OpenAI로 자동 전환
 
 import logging
 import os
+import time
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,16 @@ def get_last_agent_trace() -> dict:
     """마지막 JudgmentAgent 실행의 tool_sequence + reasoning_chain 반환.
     Agent 모드가 아니었거나 실패한 경우 빈 dict 반환."""
     return dict(_last_agent_trace)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return (
+        "rate limit" in msg
+        or "rate_limit_exceeded" in msg
+        or "429" in msg
+        or "tpm" in msg
+    )
 
 _TRADING_KNOWLEDGE = """## 트레이딩 분석 지식 (기술적 분석 프레임워크)
 
@@ -705,11 +716,27 @@ def get_trade_opinion(
                 max_tokens=int(_wcfg.get("agent_max_tokens", 700)),
                 target_unique_tools=int(_wcfg.get("agent_target_unique_tools", 0)),
             )
-            _opinion = _agent.run(
-                signal,
-                kospi_rate=_idx_rate(kospi),
-                kosdaq_rate=_idx_rate(kosdaq),
-            )
+            _retry_count = max(0, int(_wcfg.get("agent_rate_limit_retries", 2)))
+            _retry_wait = max(1, int(_wcfg.get("agent_rate_limit_wait_seconds", 12)))
+            _opinion = ""
+            for _attempt in range(_retry_count + 1):
+                try:
+                    _opinion = _agent.run(
+                        signal,
+                        kospi_rate=_idx_rate(kospi),
+                        kosdaq_rate=_idx_rate(kosdaq),
+                    )
+                    break
+                except Exception as _run_e:
+                    _is_rl = _is_rate_limit_error(_run_e)
+                    if _is_rl and _attempt < _retry_count:
+                        logger.warning(
+                            f"[Agent모드] 429/TPM 감지 — {_retry_wait}s 대기 후 재시도 "
+                            f"({_attempt + 1}/{_retry_count})"
+                        )
+                        time.sleep(_retry_wait)
+                        continue
+                    raise
             # 마지막 agent trace를 모듈 변수에 저장 (main.py에서 DB 저장에 활용)
             global _last_agent_trace
             _last_agent_trace = {

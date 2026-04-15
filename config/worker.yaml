@@ -10,9 +10,13 @@ worker:
   agent_max_steps: 7
   agent_max_tokens: 700
   agent_target_unique_tools: 6
+  agent_rate_limit_retries: 2
+  agent_rate_limit_wait_seconds: 12
   research_agent_max_steps: 10
   research_agent_max_tokens: 1200
   research_agent_target_unique_tools: 4
+  research_agent_rate_limit_retries: 2
+  research_agent_rate_limit_wait_seconds: 12
   research_max_candidates: 5
   news_monitor_times: "8:55,12:00"
   rag_realtime_index: false

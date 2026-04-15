@@ -53,6 +53,16 @@ else:
     _AI_BACKEND = ""
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return (
+        "rate limit" in msg
+        or "rate_limit_exceeded" in msg
+        or "429" in msg
+        or "tpm" in msg
+    )
+
+
 def _fmt_int(value, default: int = 0) -> int:
     """None/문자열/숫자를 안전하게 정수로 변환."""
     try:
@@ -1425,7 +1435,23 @@ def run_daily_screening():
             )
             _max_candidates = max(1, int(_worker_cfg.get("research_max_candidates", 5)))
             logger.info(f"[ResearchAgent Screening] max_candidates={_max_candidates}")
-            result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq, max_candidates=_max_candidates)
+            _retry_count = max(0, int(_worker_cfg.get("research_agent_rate_limit_retries", _worker_cfg.get("agent_rate_limit_retries", 2))))
+            _retry_wait = max(1, int(_worker_cfg.get("research_agent_rate_limit_wait_seconds", _worker_cfg.get("agent_rate_limit_wait_seconds", 12))))
+            result = ""
+            for _attempt in range(_retry_count + 1):
+                try:
+                    result = _agent.run(kospi_rate=_kospi, kosdaq_rate=_kosdaq, max_candidates=_max_candidates)
+                    break
+                except Exception as _run_e:
+                    _is_rl = _is_rate_limit_error(_run_e)
+                    if _is_rl and _attempt < _retry_count:
+                        logger.warning(
+                            f"[ResearchAgent Screening] 429/TPM 감지 — {_retry_wait}s 대기 후 재시도 "
+                            f"({_attempt + 1}/{_retry_count})"
+                        )
+                        time.sleep(_retry_wait)
+                        continue
+                    raise
             logger.info(f"[ResearchAgent Screening] completed\n{result[:300]}")
             from notifications.telegram import send_message as _send
             tools_summary = " -> ".join(_agent.used_tools) if _agent.used_tools else "none"

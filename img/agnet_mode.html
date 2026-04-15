@@ -46,6 +46,7 @@
 <main class="wrap">
   <div class="tabs">
     <button class="tab active" data-tab="easy">쉬운 설명</button>
+    <button class="tab" data-tab="schedule">스케줄 동작표</button>
     <button class="tab" data-tab="alltools">전체 도구 목록</button>
   </div>
 
@@ -67,7 +68,7 @@
     </section>
 
     <section class="card">
-      <h2>1) 실시간 판단 흐름 (JudgmentAgent)</h2>
+      <h2>기능 A) 실시간 판단 흐름 (JudgmentAgent)</h2>
       <div class="step"><span class="num">1</span><b>신호 감지</b>: <span class="code">run_check()</span></div>
       <div class="step"><span class="num">2</span><b>판단 호출</b>: <span class="code">get_trade_opinion() -> JudgmentAgent.run()</span></div>
       <div class="step"><span class="num">3</span><b>사전 점검</b>: 보유이유/이전판단/뉴스/시장/거시/성과 확인</div>
@@ -77,7 +78,7 @@
     </section>
 
     <section class="card">
-      <h2>2) 장마감 발굴 흐름 (ResearchAgent)</h2>
+      <h2>기능 B) 장마감 발굴 흐름 (ResearchAgent)</h2>
       <div class="step"><span class="num">1</span><b>시작</b>: <span class="code">run_daily_screening()</span></div>
       <div class="step"><span class="num">2</span><b>리서치 호출</b>: <span class="code">ResearchAgent.run()</span></div>
       <div class="step"><span class="num">3</span><b>사전 점검</b>: 시장/거시/중복보유/공시/과거추천성과 확인</div>
@@ -86,23 +87,79 @@
     </section>
 
     <section class="card">
-      <h2>추가 반영: 상황별 공격/보수 자동 조절</h2>
-      <div class="summary">이제 두 에이전트는 과거 유사 상황 성과를 보고 공격/중립/보수 성향을 자동으로 정합니다.</div>
+      <h2>기능 C) 모니터링 자동 실행 흐름 (Scheduler)</h2>
+      <div class="summary">장중에는 스케줄러가 반복적으로 조건을 확인하고, 쿨다운/중복방지 규칙을 거친 뒤 필요한 경우만 AI 판단과 실행으로 연결합니다.</div>
       <div class="flow">
-        <div class="node n-blue"><b>과거 유사 성과 조회</b><br>signals/trades/screening_log</div>
+        <div class="node n-blue"><b>스케줄러 트리거</b><br>run_check / sync / 결과업데이트</div>
         <div class="arr">→</div>
-        <div class="node n-org"><b>성향 계산</b><br>aggressive / balanced / conservative</div>
+        <div class="node n-org"><b>조건 체크</b><br>watchlist/positions 기준 신호 탐지</div>
         <div class="arr">→</div>
-        <div class="node n-blue"><b>에이전트 입력 반영</b><br>adaptive_policy 컨텍스트 주입</div>
+        <div class="node n-org"><b>실행 필터</b><br>쿨다운, 중복, 예외 규칙 검사</div>
         <div class="arr">→</div>
-        <div class="node n-grn"><b>실행 게이트 반영</b><br>신규진입 허용/수량 자동조절</div>
+        <div class="node n-blue"><b>AI 판단 호출</b><br>필요한 종목만 JudgmentAgent</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>실행/저장</b><br>알림, 주문(옵션), DB 기록</div>
       </div>
+      <div class="step"><span class="num">1</span><b>정기 실행</b>: 스케줄러가 장중 작업을 주기적으로 실행</div>
+      <div class="step"><span class="num">2</span><b>신호 선별</b>: 의미 있는 신호만 다음 단계로 전달</div>
+      <div class="step"><span class="num">3</span><b>리스크 필터</b>: 쿨다운/중복주문/금지조건 차단</div>
+      <div class="step"><span class="num">4</span><b>실행 완료</b>: 판단/주문/로그가 한 사이클로 저장</div>
+    </section>
+
+    <section class="card">
+      <h2>기능 D) 복기 기록과 정책 반영 흐름</h2>
+      <div class="summary">D는 '기록/반영' 단계입니다. 실행 직후 복기 로그는 즉시 저장되고, 정책 변경은 평일 16:20 루프에서만 반영됩니다.</div>
+      <div class="flow">
+        <div class="node n-blue"><b>결과 누적</b><br>signals / trades / screening_log</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>복기 기록</b><br>reflection 로그 생성</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>정책 제안 큐</b><br>변경안 적재 + 위험도 표시</div>
+        <div class="arr">→</div>
+        <div class="node n-blue"><b>안전장치 검사</b><br>low-risk만 자동 반영</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>다음 사이클 반영</b><br>최신 policy_version 로드</div>
+      </div>
+      <div class="step"><span class="num">1</span><b>즉시 기록</b>: 에이전트 실행 직후 복기 로그 저장</div>
+      <div class="step"><span class="num">2</span><b>제안 적재</b>: 정책 개선안을 큐에 저장(변경 이력 남김)</div>
+      <div class="step"><span class="num">3</span><b>16:20 반영</b>: low-risk만 자동 반영</div>
+      <div class="step"><span class="num">4</span><b>정책 갱신 완료</b>: policy_version이 최신값으로 교체</div>
       <table>
-        <thead><tr><th>적용 대상</th><th>어떻게 바뀜</th></tr></thead>
+        <thead><tr><th>복기 로그 종류</th><th>기록 시점</th><th>핵심 내용</th></tr></thead>
         <tbody>
-          <tr><td>JudgmentAgent</td><td>신규 진입 허용 여부와 주문 수량 배수(예: 0.5x, 1.0x, 1.2x)를 상황별로 조정</td></tr>
-          <tr><td>ResearchAgent</td><td>한 번 실행에서 watchlist 등록 가능한 최대 종목 수를 상황별로 조정</td></tr>
-          <tr><td>공통</td><td>결과는 로그/복기에 저장되어 다음 정책 루프에서 다시 반영</td></tr>
+          <tr><td>일일 복기 (daily_review)</td><td>평일 16:10</td><td>당일 신호/매매/포트폴리오, 적중률, 스크리닝 성과, 다음날 액션 아이템</td></tr>
+          <tr><td>Judgment 실행 복기</td><td>JudgmentAgent 실행 직후</td><td>상태, 칭찬/반성 태그, 품질 점수, 누락 필드, policy_version</td></tr>
+          <tr><td>Research 실행 복기</td><td>ResearchAgent 실행 직후</td><td>등록/미등록 건수, 선택성 태그, 품질 점수, policy_version</td></tr>
+          <tr><td>주간 자기보정 노트</td><td>매주 월요일 09:05</td><td>저성과 조건/판단 패턴 요약, 개선 포인트</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>기능 E) 에이전트 행동 변화 흐름 (다음 실행 반영)</h2>
+      <div class="summary">E는 '적용/체감' 단계입니다. 모델 재훈련이 아니라, 갱신된 정책과 컨텍스트가 다음 판단 행동을 바꿉니다.</div>
+      <div class="flow">
+        <div class="node n-blue"><b>판단/추천 실행</b><br>매수·매도·보류·관심종목 등록</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>성과 라벨링</b><br>결과 수익률, 품질 태그, 반성 포인트 기록</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>행동 교정 신호 생성</b><br>어떤 상황에서 보수/공격이 맞았는지 요약</div>
+        <div class="arr">→</div>
+        <div class="node n-blue"><b>정책/게이트 반영</b><br>preflight 필수항목, 실행강도 조정</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>다음 판단 개선</b><br>같은 실수 반복 감소, 일관성 향상</div>
+      </div>
+      <div class="step"><span class="num">1</span><b>다음 실행 시작</b>: Judgment/Research가 최신 policy_version을 로드</div>
+      <div class="step"><span class="num">2</span><b>사전검증 적용</b>: preflight 필수항목/누락 차단 규칙 적용</div>
+      <div class="step"><span class="num">3</span><b>실행강도 조절</b>: 진입 허용, 수량 배수, 추천 개수 등 행동 강도 조절</div>
+      <div class="step"><span class="num">4</span><b>결과 재측정</b>: 다음 주기 성과로 다시 복기되어 D 단계로 환류</div>
+      <div class="step"><span class="num">5</span><b>핵심 타이밍</b>: 즉시 저장(실행 직후) / 정책 반영(평일 16:20) / 행동 변화(다음 실행)</div>
+      <table>
+        <thead><tr><th>구분</th><th>D(복기·정책 반영)</th><th>E(행동 변화 적용)</th></tr></thead>
+        <tbody>
+          <tr><td>주요 역할</td><td>복기 데이터 기록/집계, 정책 갱신</td><td>갱신된 정책을 다음 실행 판단에 적용</td></tr>
+          <tr><td>주로 쓰는 데이터</td><td>daily_review, judgment/reflection, research/reflection, weekly self-correction</td><td>strategy_policy_state(policy_version), recent_review_note, adaptive_policy</td></tr>
+          <tr><td>결과</td><td>정책 버전(policy_version) 업데이트</td><td>진입 허용/수량 배수/추천 개수 등 실행 강도 변화</td></tr>
         </tbody>
       </table>
     </section>
@@ -114,29 +171,134 @@
       <div class="summary">아래 목록은 <span class="code">worker/agents/tools/registry.py</span>에서 로드되는 도구 전체입니다.</div>
       <div class="summary">참고: 상황별 성향 계산 엔진은 <span class="code">worker/adaptive_policy.py</span>에서 동작하며, 도구가 아닌 코드 로직으로 실행 게이트에 연결됩니다.</div>
 
-      <h3>JudgmentAgent 전체</h3>
+      <h3>JudgmentAgent 도구 (하나씩 설명)</h3>
       <table>
-        <thead><tr><th>카테고리</th><th>도구</th></tr></thead>
+        <thead><tr><th>도구명</th><th>역할(한글 설명)</th></tr></thead>
         <tbody>
-          <tr><td>시세/차트</td><td>get_current_price, get_chart, get_market_index</td></tr>
-          <tr><td>포트/자금</td><td>get_portfolio, get_deposit, get_positions, get_order_status, get_realized_pnl</td></tr>
-          <tr><td>뉴스/거시</td><td>get_news, get_dart, get_macro_news, get_sector_news, get_global_market, market_news_brief, rss_macro_brief</td></tr>
-          <tr><td>이력/통계</td><td>get_signal_history, get_entry_reason, preflight_validator, search_similar_signals, get_screening_history, get_trade_performance, get_condition_accuracy, get_pattern_accuracy, self_correction</td></tr>
-          <tr><td>RAG</td><td>search_text_context, search_screening_context, search_agent_memory_context</td></tr>
-          <tr><td>수정/실행</td><td>update_watchlist (+AUTO_TRADE 시 execute_order)</td></tr>
+          <tr><td>get_current_price</td><td>현재가/등락 정보를 조회해 신호의 즉시성(지금 유효한지)을 확인합니다.</td></tr>
+          <tr><td>get_chart</td><td>최근 캔들/지표 데이터를 조회해 추세, 눌림, 이탈 여부를 봅니다.</td></tr>
+          <tr><td>get_market_index</td><td>KOSPI/KOSDAQ 등 시장 지수 흐름을 조회해 종목 판단의 시장 배경을 확인합니다.</td></tr>
+          <tr><td>get_portfolio</td><td>현재 보유 종목/수량/평단을 조회해 보유 상태 기준으로 판단합니다.</td></tr>
+          <tr><td>get_deposit</td><td>가용 현금을 확인해 신규 진입/추가매수 가능 여부를 체크합니다.</td></tr>
+          <tr><td>get_positions</td><td>포지션 DB 상태를 조회해 내부 기록과 실보유 맥락을 맞춥니다.</td></tr>
+          <tr><td>get_order_status</td><td>미체결/체결 상태를 조회해 중복 주문이나 충돌 실행을 방지합니다.</td></tr>
+          <tr><td>get_realized_pnl</td><td>실현손익을 조회해 최근 운용 성과와 리스크 상태를 반영합니다.</td></tr>
+          <tr><td>get_news</td><td>종목 관련 최신 뉴스를 조회해 재료/악재/수급 이슈를 확인합니다.</td></tr>
+          <tr><td>get_dart</td><td>공시/재무 관련 정보를 조회해 펀더멘털 리스크를 점검합니다.</td></tr>
+          <tr><td>get_macro_news</td><td>거시경제 뉴스(금리, 환율, 정책 등)를 조회해 시장 민감도를 반영합니다.</td></tr>
+          <tr><td>get_sector_news</td><td>섹터 단위 뉴스를 조회해 테마 강도와 업종 순환을 확인합니다.</td></tr>
+          <tr><td>get_global_market</td><td>해외 지수/환율 등 글로벌 리스크 온·오프 분위기를 참고합니다.</td></tr>
+          <tr><td>market_news_brief</td><td>당일 국내 시장 흐름(지수/섹터/수급)을 요약해 판단 전 배경으로 씁니다.</td></tr>
+          <tr><td>rss_macro_brief</td><td>RSS 기반 거시/정책/사회 이슈를 요약해 장중 변수 가능성을 확인합니다.</td></tr>
+          <tr><td>get_signal_history</td><td>해당 종목의 과거 신호/판단 이력을 조회해 반복 패턴을 봅니다.</td></tr>
+          <tr><td>get_entry_reason</td><td>왜 들어갔는지(진입 근거)를 조회해 현재 판단의 일관성을 맞춥니다.</td></tr>
+          <tr><td>position_context_brief</td><td>보유 사유, 이전 신호, 전략노트, 최근 판단을 한 번에 요약합니다.</td></tr>
+          <tr><td>preflight_validator</td><td>필수 컨텍스트 누락 여부를 검사하고, 누락 시 판단 진입을 차단합니다.</td></tr>
+          <tr><td>search_similar_signals</td><td>유사 신호 사례를 검색해 과거 유사 상황의 성과를 비교합니다.</td></tr>
+          <tr><td>get_screening_history</td><td>과거 스크리닝/추천 이력을 조회해 종목 발굴 품질을 참고합니다.</td></tr>
+          <tr><td>get_trade_performance</td><td>매매 성과 통계를 조회해 현재 판단 강도를 조정하는 근거로 씁니다.</td></tr>
+          <tr><td>get_condition_accuracy</td><td>조건별 적중률을 조회해 어떤 조건을 더 신뢰할지 판단합니다.</td></tr>
+          <tr><td>get_pattern_accuracy</td><td>패턴별 성과를 조회해 전략 패턴의 유효성을 확인합니다.</td></tr>
+          <tr><td>self_correction</td><td>이전 판단 오류를 교정하기 위한 보정 힌트를 받아 리스크를 줄입니다.</td></tr>
+          <tr><td>search_text_context</td><td>RAG 텍스트 컨텍스트에서 관련 메모/근거를 검색합니다.</td></tr>
+          <tr><td>search_screening_context</td><td>RAG 스크리닝 컨텍스트에서 과거 후보/결과 맥락을 찾습니다.</td></tr>
+          <tr><td>search_agent_memory_context</td><td>에이전트 메모리에서 과거 판단 노트와 교훈을 검색합니다.</td></tr>
+          <tr><td>update_watchlist</td><td>watchlist 조건/메모/활성 상태를 수정해 모니터링 정책을 반영합니다.</td></tr>
+          <tr><td>execute_order</td><td>(AUTO_TRADE 활성 시) 실제 주문을 실행합니다.</td></tr>
         </tbody>
       </table>
 
-      <h3>ResearchAgent 전체</h3>
+      <h3>ResearchAgent 도구 (하나씩 설명)</h3>
       <table>
-        <thead><tr><th>카테고리</th><th>도구</th></tr></thead>
+        <thead><tr><th>도구명</th><th>역할(한글 설명)</th></tr></thead>
         <tbody>
-          <tr><td>시세/차트</td><td>get_current_price, get_chart, get_market_index</td></tr>
-          <tr><td>스캔</td><td>scan_volume_surge, scan_foreign_buy, scan_decline_rank</td></tr>
-          <tr><td>포트/자금</td><td>get_portfolio, get_deposit, get_realized_pnl</td></tr>
-          <tr><td>뉴스/거시</td><td>get_news, get_dart, get_macro_news, get_sector_news, get_global_market, market_news_brief, rss_macro_brief</td></tr>
-          <tr><td>검증/RAG</td><td>preflight_validator, search_text_context, search_screening_context, search_agent_memory_context, search_similar_signals, get_screening_history, get_trade_performance</td></tr>
-          <tr><td>등록</td><td>add_to_watchlist</td></tr>
+          <tr><td>get_current_price</td><td>후보 종목의 현재 가격/변동 상태를 확인합니다.</td></tr>
+          <tr><td>get_chart</td><td>후보 종목의 추세/지지/저항/거래량 패턴을 점검합니다.</td></tr>
+          <tr><td>get_market_index</td><td>시장 지수 흐름을 확인해 발굴 공격도(보수/공격)를 조절합니다.</td></tr>
+          <tr><td>scan_volume_surge</td><td>거래량 급증 종목을 스캔해 초기 관심 후보를 발굴합니다.</td></tr>
+          <tr><td>scan_foreign_buy</td><td>외인 순매수 흐름 종목을 스캔해 수급 강한 후보를 찾습니다.</td></tr>
+          <tr><td>scan_decline_rank</td><td>하락률 상위 종목을 스캔해 반등/과매도 후보를 찾습니다.</td></tr>
+          <tr><td>get_portfolio</td><td>기존 보유와 중복 여부를 확인해 후보 충돌을 막습니다.</td></tr>
+          <tr><td>get_deposit</td><td>가용 자금 기준으로 추천 현실성(실행 가능성)을 확인합니다.</td></tr>
+          <tr><td>get_realized_pnl</td><td>최근 실현 성과를 참고해 추천 강도와 개수를 조절합니다.</td></tr>
+          <tr><td>get_news</td><td>후보 종목 뉴스로 재료의 신선도/지속성을 확인합니다.</td></tr>
+          <tr><td>get_dart</td><td>공시/재무를 확인해 리스크 높은 후보를 걸러냅니다.</td></tr>
+          <tr><td>get_macro_news</td><td>거시 이슈를 확인해 시장 친화/역풍 섹터를 구분합니다.</td></tr>
+          <tr><td>get_sector_news</td><td>섹터 뉴스를 확인해 테마의 확산성/단기성 여부를 판단합니다.</td></tr>
+          <tr><td>get_global_market</td><td>해외 시장 분위기를 참고해 리스크 온·오프를 반영합니다.</td></tr>
+          <tr><td>market_news_brief</td><td>당일 시장 흐름 요약으로 발굴 방향(추세추종/보수선별)을 정합니다.</td></tr>
+          <tr><td>rss_macro_brief</td><td>거시/정책/사회 이슈 요약으로 추천 리스크를 사전 점검합니다.</td></tr>
+          <tr><td>preflight_validator</td><td>필수 컨텍스트 누락 검사 후 통과 시에만 watchlist 등록을 허용합니다.</td></tr>
+          <tr><td>search_text_context</td><td>RAG 텍스트 메모를 검색해 후보 관련 추가 맥락을 보강합니다.</td></tr>
+          <tr><td>search_screening_context</td><td>RAG 스크리닝 히스토리에서 과거 유사 추천 결과를 찾습니다.</td></tr>
+          <tr><td>search_agent_memory_context</td><td>RAG 에이전트 메모리에서 복기 포인트/경고 패턴을 불러옵니다.</td></tr>
+          <tr><td>search_similar_signals</td><td>유사 신호/패턴 사례를 검색해 후보 신뢰도를 비교합니다.</td></tr>
+          <tr><td>get_screening_history</td><td>추천 이력을 조회해 같은 종목/유형의 과거 성과를 봅니다.</td></tr>
+          <tr><td>get_trade_performance</td><td>전체 매매 성과를 참고해 추천 수/강도를 동적으로 조정합니다.</td></tr>
+          <tr><td>add_to_watchlist</td><td>검증 통과한 종목만 watchlist에 등록하고 모니터링 단계로 넘깁니다.</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </section>
+
+  <section id="schedule" class="panel">
+    <section class="card">
+      <h2>스케줄별 동작 기능</h2>
+      <div class="summary">기준 시간대는 KST(Asia/Seoul)입니다. 아래는 코드의 scheduler 등록값 기준입니다.</div>
+      <div class="flow">
+        <div class="node n-blue"><b>장중 반복</b><br>신호 체크/동기화/성과 업데이트</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>장마감 작업</b><br>스크리닝/일일복기/정책루프</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>주간 작업</b><br>성과리포트/자기보정/로그정리</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3>핵심 스케줄 표</h3>
+      <table>
+        <thead><tr><th>주기/시각</th><th>실행 기능</th><th>설명</th></tr></thead>
+        <tbody>
+          <tr><td>평일 08:00~18:59, 10분마다</td><td>run_check</td><td>모니터링 핵심 루프. 조건 체크 후 필요 시 JudgmentAgent 판단으로 연결</td></tr>
+          <tr><td>평일 08:30</td><td>auto_sync (premarket), check_inactive_stocks</td><td>장전 포트 동기화 + 장기 미반응 종목 확인</td></tr>
+          <tr><td>평일 09:00</td><td>reset_all_cooldowns</td><td>장 시작 시 쿨다운 초기화</td></tr>
+          <tr><td>평일 09:01</td><td>auto_sync (open)</td><td>장 시작 직후 포트/체결 상태 동기화</td></tr>
+          <tr><td>평일 09:15</td><td>reassess_watchlist</td><td>watchlist 조건 재평가 (시작 직후 즉시 실행 없음)</td></tr>
+          <tr><td>평일 09:00~15:59, 30분마다</td><td>check_trailing_stops, check_removal_candidates</td><td>트레일링 스탑/제거 후보 점검</td></tr>
+          <tr><td>평일 09:00~14:59, 30분마다</td><td>check_market_dip</td><td>시장 급락 시 분할 매수 시그널 체크</td></tr>
+          <tr><td>평일 09:00~18:59, 30분마다</td><td>update_signal_results, update_screening_results, update_paper_results, update_trade_results</td><td>성과 결과(1d/3d/5d/7d/30d) 후처리 업데이트</td></tr>
+          <tr><td>평일 11:00</td><td>run_intraday_scan</td><td>장중 추가 스캔</td></tr>
+          <tr><td>평일 15:40</td><td>run_daily_screening</td><td>장마감 후보 발굴(ResearchAgent)</td></tr>
+          <tr><td>평일 16:10</td><td>run_daily_review</td><td>일일 복기 작성 및 저장</td></tr>
+          <tr><td>평일 16:20</td><td>run_reflection_policy_cycle</td><td>Reflection → Policy 자동 루프 (low-risk 자동반영)</td></tr>
+          <tr><td>평일 18:05</td><td>auto_sync (close)</td><td>장 종료 후 포트 동기화</td></tr>
+          <tr><td>평일 08:00~18:59, 10분마다</td><td>auto_sync (realtime)</td><td>실시간 동기화 보강 루프</td></tr>
+          <tr><td>매주 월요일 09:00</td><td>run_weekly_performance_report</td><td>주간 성과 리포트</td></tr>
+          <tr><td>매주 월요일 09:05</td><td>run_weekly_self_correction</td><td>저성과 조건/판단 패턴 자기보정 노트</td></tr>
+          <tr><td>매주 월요일 09:10</td><td>run_agent_action_log_refresh</td><td>에이전트 액션 로그 롤링 정리</td></tr>
+        </tbody>
+      </table>
+      <div class="step"><span class="num">1</span><b>일일 업데이트</b>: 16:10(복기) + 16:20(정책 루프) 조합으로 다음날 판단 품질 개선</div>
+      <div class="step"><span class="num">2</span><b>주간 업데이트</b>: 월요일 09:00~09:10 구간에 리포트/자기보정/로그정리 일괄 실행</div>
+      <div class="step"><span class="num">3</span><b>운영 포인트</b>: `interval_seconds`, `sync_realtime_minutes` 값으로 반복 주기 조정 가능</div>
+    </section>
+
+    <section class="card">
+      <h3>복기 기반 학습이 반영되는 순간</h3>
+      <div class="summary">복기는 즉시 기록되고, 정책은 16:20에 반영되며, 실제 행동 변화는 그 다음 에이전트 실행부터 나타납니다.</div>
+      <div class="flow">
+        <div class="node n-blue"><b>1) 실행 직후</b><br>Judgment/Research 종료 즉시<br>reflection 로그 저장</div>
+        <div class="arr">→</div>
+        <div class="node n-org"><b>2) 평일 16:20</b><br>run_reflection_policy_cycle<br>low-risk 정책 자동 반영</div>
+        <div class="arr">→</div>
+        <div class="node n-grn"><b>3) 다음 실행 시점</b><br>최신 policy_version 로드<br>판단/실행 게이트에 적용</div>
+      </div>
+      <table>
+        <thead><tr><th>단계</th><th>시점</th><th>의미</th></tr></thead>
+        <tbody>
+          <tr><td>복기 데이터 적재</td><td>에이전트 실행 직후</td><td>칭찬/반성 태그, 품질 점수, 누락 필드가 로그로 쌓임</td></tr>
+          <tr><td>정책 업데이트</td><td>평일 16:20</td><td>복기 집계 기반으로 low-risk 변경만 정책 상태에 반영</td></tr>
+          <tr><td>행동 변화 반영</td><td>16:20 이후 다음 실행</td><td>에이전트가 최신 정책 버전을 읽어 판단 강도/기준이 달라짐</td></tr>
         </tbody>
       </table>
     </section>
