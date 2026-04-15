@@ -222,6 +222,10 @@ Tool coverage constraints:
         return list(self._agent._used_tools)
 
     @property
+    def reasoning_chain(self) -> list[str]:
+        return list(self._agent._reasoning_steps)
+
+    @property
     def addition_count(self) -> int:
         tool = self._agent._tool_map.get("add_to_watchlist")
         if not tool:
