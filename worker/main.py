@@ -39,6 +39,16 @@ if _pre_args.env:
 _env_file = os.getenv("ENV_FILE", os.path.join(_project_root, '.env'))
 load_dotenv(dotenv_path=_env_file, override=True)
 
+# Force process timezone for localtime-based log rotation.
+# TimedRotatingFileHandler(when="midnight") uses local time.
+_log_tz = os.getenv("LOG_TZ", "Asia/Seoul").strip() or "Asia/Seoul"
+os.environ["TZ"] = _log_tz
+if hasattr(time, "tzset"):
+    try:
+        time.tzset()
+    except Exception:
+        pass
+
 from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
 from worker.claude_judge import get_trade_opinion, judge_position_values, get_dip_buy_opinion, get_last_agent_trace
