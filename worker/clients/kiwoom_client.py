@@ -7,6 +7,7 @@ import os
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -18,12 +19,22 @@ BASE_URL = os.getenv("KIWOOM_BASE_URL", "https://api.kiwoom.com").rstrip("/")
 APP_KEY = os.getenv("KIWOOM_APP_KEY")
 APP_SECRET = os.getenv("KIWOOM_APP_SECRET")
 ACCOUNT_NO = os.getenv("KIWOOM_ACCOUNT_NO")
+KIWOOM_IS_MOCK = os.getenv("KIWOOM_IS_MOCK", "").strip().lower()
+KIWOOM_BLOCK_AFTER_HOURS_IN_MOCK = os.getenv("KIWOOM_BLOCK_AFTER_HOURS_IN_MOCK", "true").strip().lower()
 
 KST = ZoneInfo("Asia/Seoul")
 logger = logging.getLogger(__name__)
 
 
 class KiwoomClient:
+    @staticmethod
+    def _env_bool(value: str) -> bool | None:
+        if value in {"1", "true", "yes", "y", "on"}:
+            return True
+        if value in {"0", "false", "no", "n", "off"}:
+            return False
+        return None
+
     def __init__(self):
         self._client = httpx.Client(timeout=10.0)
         self._token: str | None = None
@@ -32,7 +43,10 @@ class KiwoomClient:
         self._stock_map: dict[str, str] = {}   # name → code
         self._stock_map_date: str = ""
         # 모의/실거래 여부에 따라 거래소 구분 자동 설정
-        self._is_mock = "mockapi" in BASE_URL
+        _mock_override = self._env_bool(KIWOOM_IS_MOCK)
+        self._is_mock = _mock_override if _mock_override is not None else ("mockapi" in BASE_URL)
+        _block_override = self._env_bool(KIWOOM_BLOCK_AFTER_HOURS_IN_MOCK)
+        self._block_mock_after_hours = True if _block_override is None else _block_override
         self._holdings_markets = ["KRX"] if self._is_mock else ["KRX", "NXT"]
         self._trade_history_markets = ["KRX"] if self._is_mock else ["%"]
         self._order_market = "KRX" if self._is_mock else "SOR"
@@ -63,6 +77,12 @@ class KiwoomClient:
         if last_resp is not None:
             return last_resp
         raise RuntimeError(f"{api_name} 요청 실패 (응답 없음)")
+
+    @staticmethod
+    def _is_regular_session_now() -> bool:
+        """KRX 정규장(09:00~15:30) 여부."""
+        now_t = datetime.now(tz=KST).time()
+        return dtime(9, 0) <= now_t <= dtime(15, 30)
 
     def _get_token(self) -> str:
         now = datetime.now(tz=timezone.utc)
@@ -639,7 +659,6 @@ class KiwoomClient:
         프리장(08:30~09:00) → 61, 정규장(09:00~15:30) → 0/3,
         애프터장(15:40~16:00) → 81, 시간외단일가(16:00~18:00) → 62
         """
-        from datetime import time as dtime
         t = datetime.now(tz=KST).time()
         if dtime(8, 30) <= t < dtime(9, 0):
             return "61"
@@ -680,6 +699,18 @@ class KiwoomClient:
             except Exception as e:
                 logger.warning(f"[주문] 현재가 조회 실패, 요청 가격 {price:,}원 유지: {e}")
         trde_tp = self._get_trde_tp(price)
+        # 모의투자: 정규장 시간(09:00~15:30) 외 주문 전면 차단
+        if self._is_mock and self._block_mock_after_hours and not self._is_regular_session_now():
+            raise RuntimeError(
+                "모의투자에서는 정규장(09:00~15:30) 외 주문을 지원하지 않습니다."
+            )
+        # 모의투자는 정규장 주문(0/3)만 허용. 시간외(61/81/62)는 명시적으로 차단.
+        if self._is_mock and self._block_mock_after_hours and trde_tp in {"61", "81", "62"}:
+            session_map = {"61": "장전 시간외", "81": "장후 시간외", "62": "시간외 단일가"}
+            session_name = session_map.get(trde_tp, "시간외")
+            raise RuntimeError(
+                f"모의투자에서는 {session_name} 주문을 지원하지 않습니다. 정규장(09:00~15:30)에서만 주문 가능합니다."
+            )
         # 시간외단일가(62): 지정가 필수 — 시장가 요청 시 현재가로 자동 변환
         if trde_tp == "62" and price == 0:
             try:
