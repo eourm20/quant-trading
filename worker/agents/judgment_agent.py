@@ -10,6 +10,7 @@ import json
 
 from worker.agents.base_agent import BaseAgent
 from worker.agents.tools.registry import load_judgment_tools
+from worker.strategy_reflection import get_policy_snapshot, reflect_judgment, enqueue_policy_update
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class JudgmentAgent:
         self._target_unique_tools = max(0, int(target_unique_tools or 0))
         self._preflight_used_tools: list[str] = []
         self._preflight_missing_fields: list[str] = []
+        self._policy_version: str = "judgment-v0"
 
     def _run_preflight(self, signal) -> tuple[bool, dict, list[str]]:
         """필수 컨텍스트를 코드 파이프라인으로 강제 수집/검증."""
@@ -76,9 +78,11 @@ class JudgmentAgent:
         required = [
             "position_context",
             "previous_judgment",
+            "performance_review",
             "market_brief",
             "stock_news",
             "macro_brief",
+            "policy_snapshot",
         ]
         ctx: dict = {}
 
@@ -104,9 +108,18 @@ class JudgmentAgent:
             signal_type=signal.signal_type or "",
             limit=5,
         )
+        ctx["performance_review"] = _call(
+            "get_trade_performance",
+            stock_code=signal.stock_code,
+            days=60,
+            limit=20,
+        )
         ctx["market_brief"] = _call("market_news_brief", max_items=5)
         ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=5)
         ctx["macro_brief"] = _call("rss_macro_brief", max_total=6)
+        policy_snapshot = get_policy_snapshot("judgment")
+        self._policy_version = str(policy_snapshot.get("policy_version") or "judgment-v0")
+        ctx["policy_snapshot"] = policy_snapshot
 
         validator = self._agent._tool_map.get("preflight_validator")
         if not validator:
@@ -149,9 +162,23 @@ class JudgmentAgent:
         logger.info(
             f"[JudgmentAgent] preflight_{'pass' if pre_ok else 'fail'} "
             f"stock={signal.stock_name}({signal.stock_code}) "
-            f"missing_fields={missing} used_tools={self._preflight_used_tools}"
+            f"missing_fields={missing} used_tools={self._preflight_used_tools} "
+            f"policy_version={self._policy_version}"
         )
         if not pre_ok:
+            reflection_written = reflect_judgment(
+                stock_code=signal.stock_code,
+                stock_name=signal.stock_name,
+                opinion="INCOMPLETE_CONTEXT",
+                preflight_ok=False,
+                missing_fields=missing,
+                policy_version=self._policy_version,
+            )
+            enqueue_policy_update(
+                "judgment",
+                suggestion={"trigger": "incomplete_context", "missing_fields": missing},
+                low_risk=True,
+            )
             try:
                 from data.db import save_strategy_note
                 save_strategy_note(
@@ -166,6 +193,10 @@ class JudgmentAgent:
                 )
             except Exception:
                 pass
+            logger.info(
+                f"[JudgmentAgent] reflection_written={reflection_written} "
+                f"preflight_fail missing_fields={missing}"
+            )
             return f"INCOMPLETE_CONTEXT: missing_fields={','.join(missing)}"
 
         self._agent.configure_run(target_unique_tools=self._target_unique_tools)
@@ -191,14 +222,38 @@ class JudgmentAgent:
 - market_brief: {_brief(pre_ctx.get('market_brief', {}))}
 - stock_news: {_brief(pre_ctx.get('stock_news', {}))}
 - macro_brief: {_brief(pre_ctx.get('macro_brief', {}))}
+- performance_review: {_brief(pre_ctx.get('performance_review', {}))}
+- policy_snapshot: {_brief(pre_ctx.get('policy_snapshot', {}))}
 
 상황을 파악하고 필요한 도구를 직접 선택하여 매매 판단을 내려주세요.
 Fallback chain if primary tool fails: search_agent_memory_context -> search_similar_signals -> get_trade_performance -> search_text_context."""
 
         opinion = self._agent.run(initial_message)
+        reflection_written = reflect_judgment(
+            stock_code=signal.stock_code,
+            stock_name=signal.stock_name,
+            opinion=opinion,
+            preflight_ok=True,
+            missing_fields=[],
+            policy_version=self._policy_version,
+        )
+        enqueue_policy_update(
+            "judgment",
+            suggestion={
+                "trigger": "post_run_reflection",
+                "stock_code": signal.stock_code,
+                "signal_type": signal.signal_type or "",
+                "policy_version": self._policy_version,
+            },
+            low_risk=True,
+        )
         tools_summary = " -> ".join(self._agent._used_tools) if self._agent._used_tools else "none"
         logger.info(f"[JudgmentAgent] {signal.stock_name} analysis flow: {tools_summary}")
         logger.info(f"[JudgmentAgent] tool_coverage_score: {self._agent.coverage_score}")
+        logger.info(
+            f"[JudgmentAgent] reflection_written={reflection_written} "
+            f"policy_version={self._policy_version}"
+        )
         return opinion
 
     @property

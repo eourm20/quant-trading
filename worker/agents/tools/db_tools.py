@@ -359,6 +359,8 @@ class AddToWatchlistTool(BaseTool):
         # Runtime guard (configured by ResearchAgent.run)
         self.max_additions: int = 5
         self.addition_count: int = 0
+        self.policy_gate_passed: bool = False
+        self.policy_version: str = ""
 
     def execute(
         self,
@@ -379,6 +381,8 @@ class AddToWatchlistTool(BaseTool):
                 update_screening_action,
             )
             from worker.watchlist_policy import normalize_watchlist_payload
+            if not bool(getattr(self, "policy_gate_passed", False)):
+                return {"error": "POLICY_VALIDATION_REQUIRED: run preflight policy validation before add_to_watchlist"}
             if self.addition_count >= int(self.max_additions or 0):
                 logger.warning(
                     f"[Agent] add_to_watchlist 한도 도달: {self.addition_count}/{self.max_additions} "
@@ -438,6 +442,7 @@ class AddToWatchlistTool(BaseTool):
                     (
                         f"stock_code={stock_code}\n"
                         f"horizon={horizon}\n"
+                        f"policy_version={getattr(self, 'policy_version', '')}\n"
                         f"reason={reason or '-'}\n"
                         f"watchlist_payload={json.dumps(watchlist_payload, ensure_ascii=False)}\n"
                         f"position_payload={json.dumps(position_payload, ensure_ascii=False)}"

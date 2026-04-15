@@ -11,6 +11,7 @@ from datetime import timedelta
 
 from worker.agents.base_agent import BaseAgent
 from worker.agents.tools.registry import load_research_tools
+from worker.strategy_reflection import get_policy_snapshot, reflect_research, enqueue_policy_update
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class ResearchAgent:
         self._target_unique_tools = max(0, int(target_unique_tools or 0))
         self._preflight_used_tools: list[str] = []
         self._preflight_missing_fields: list[str] = []
+        self._policy_version: str = "research-v0"
 
     def _run_preflight(self) -> tuple[bool, dict, list[str]]:
         """리서치 실행 전 필수 컨텍스트 강제 수집/검증."""
@@ -68,6 +70,8 @@ class ResearchAgent:
             "rss_macro_brief",
             "existing_exposure_check",
             "basic_disclosure_context",
+            "screening_performance",
+            "policy_snapshot",
         ]
         ctx: dict = {}
 
@@ -107,6 +111,12 @@ class ResearchAgent:
             "watchlist_count": len(watchlist_codes),
             "duplicate_codes": overlaps,
         }
+        ctx["screening_performance"] = _call(
+            "get_screening_history",
+            days=60,
+            limit=30,
+            only_with_results=True,
+        )
 
         proxy_code = ""
         if holdings_codes:
@@ -116,6 +126,9 @@ class ResearchAgent:
         else:
             proxy_code = "005930"
         ctx["basic_disclosure_context"] = _call("get_dart", stock_code=proxy_code)
+        policy_snapshot = get_policy_snapshot("research")
+        self._policy_version = str(policy_snapshot.get("policy_version") or "research-v0")
+        ctx["policy_snapshot"] = policy_snapshot
 
         validator = self._agent._tool_map.get("preflight_validator")
         if not validator:
@@ -254,9 +267,20 @@ class ResearchAgent:
         pre_ok, pre_ctx, missing = self._run_preflight()
         logger.info(
             f"[ResearchAgent] preflight_{'pass' if pre_ok else 'fail'} "
-            f"missing_fields={missing} used_tools={self._preflight_used_tools}"
+            f"missing_fields={missing} used_tools={self._preflight_used_tools} "
+            f"policy_version={self._policy_version}"
         )
         if not pre_ok:
+            reflection_written = reflect_research(
+                status="incomplete_context",
+                result_text=f"INCOMPLETE_CONTEXT: missing_fields={','.join(missing)}",
+                policy_version=self._policy_version,
+            )
+            enqueue_policy_update(
+                "research",
+                suggestion={"trigger": "incomplete_context", "missing_fields": missing},
+                low_risk=True,
+            )
             try:
                 from data.db import save_strategy_note
                 save_strategy_note(
@@ -270,10 +294,20 @@ class ResearchAgent:
                 )
             except Exception:
                 pass
+            logger.info(
+                f"[ResearchAgent] reflection_written={reflection_written} "
+                f"preflight_fail missing_fields={missing}"
+            )
             return f"INCOMPLETE_CONTEXT: missing_fields={','.join(missing)}"
 
         limit = max(1, int(max_candidates or 1))
-        self._agent.configure_tool("add_to_watchlist", max_additions=limit, addition_count=0)
+        self._agent.configure_tool(
+            "add_to_watchlist",
+            max_additions=limit,
+            addition_count=0,
+            policy_gate_passed=True,
+            policy_version=self._policy_version,
+        )
         self._agent.configure_run(target_unique_tools=self._target_unique_tools)
         perf_summary = self._build_performance_summary()
 
@@ -290,6 +324,8 @@ class ResearchAgent:
 - rss_macro_brief: {_brief(pre_ctx.get('rss_macro_brief', {}))}
 - existing_exposure_check: {_brief(pre_ctx.get('existing_exposure_check', {}))}
 - basic_disclosure_context: {_brief(pre_ctx.get('basic_disclosure_context', {}))}
+- screening_performance: {_brief(pre_ctx.get('screening_performance', {}))}
+- policy_snapshot: {_brief(pre_ctx.get('policy_snapshot', {}))}
 
 ## 최근 성과 요약 (고정 반영 규칙)
 아래 요약은 참고가 아니라 필수 반영 대상입니다. 추천 판단 시 반드시 우선 반영하세요.
@@ -314,10 +350,28 @@ Tool coverage constraints:
 
         result = self._agent.run(initial_message)
         result = self._compact_result(result)
+        reflection_written = reflect_research(
+            status="completed",
+            result_text=result,
+            policy_version=self._policy_version,
+        )
+        enqueue_policy_update(
+            "research",
+            suggestion={
+                "trigger": "post_run_reflection",
+                "policy_version": self._policy_version,
+                "result_preview": result[:180],
+            },
+            low_risk=True,
+        )
 
         tools_summary = " -> ".join(self._agent._used_tools) if self._agent._used_tools else "none"
         logger.info(f"[ResearchAgent] 분석 과정: {tools_summary}")
         logger.info(f"[ResearchAgent] tool_coverage_score: {self._agent.coverage_score}")
+        logger.info(
+            f"[ResearchAgent] reflection_written={reflection_written} "
+            f"policy_version={self._policy_version}"
+        )
 
         return result
 

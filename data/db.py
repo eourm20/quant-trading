@@ -383,6 +383,44 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_reflection_logs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at      TEXT NOT NULL,
+                agent_type      TEXT NOT NULL,          -- judgment | research
+                stock_code      TEXT DEFAULT '',
+                stock_name      TEXT DEFAULT '',
+                status          TEXT NOT NULL,          -- completed | incomplete_context ...
+                praise_tags     TEXT DEFAULT '[]',      -- JSON array
+                reflection_tags TEXT DEFAULT '[]',      -- JSON array
+                quality_score   REAL DEFAULT NULL,      -- 0.0 ~ 1.0
+                detail_json     TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reflection_agent_date ON strategy_reflection_logs (agent_type, created_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_policy_state (
+                agent_type     TEXT PRIMARY KEY,        -- judgment | research
+                policy_version TEXT NOT NULL,
+                policy_json    TEXT NOT NULL DEFAULT '{}',
+                updated_at     TEXT NOT NULL,
+                note           TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_policy_update_queue (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at          TEXT NOT NULL,
+                agent_type          TEXT NOT NULL,
+                suggestion_json     TEXT NOT NULL DEFAULT '{}',
+                low_risk            INTEGER NOT NULL DEFAULT 1,
+                status              TEXT NOT NULL DEFAULT 'pending', -- pending/applied/rejected
+                applied_version     TEXT DEFAULT '',
+                source_reflection_id INTEGER DEFAULT NULL,
+                note                TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_policy_queue_status_date ON strategy_policy_update_queue (status, created_at)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS realized_pnl_snapshots (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at    TEXT NOT NULL,

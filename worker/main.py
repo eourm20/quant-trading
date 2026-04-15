@@ -534,6 +534,24 @@ def run_weekly_self_correction():
         logger.debug(f"[자기보정] 텔레그램 발송 실패: {e}")
 
 
+def run_reflection_policy_cycle():
+    """Reflection -> Policy update 자동 루프 실행."""
+    try:
+        from worker.strategy_reflection import run_policy_update_cycle
+        cfg = _WORKER_CONFIG.get("strategy_tuning", {}) if isinstance(_WORKER_CONFIG, dict) else {}
+        min_samples = int(cfg.get("min_samples", 10))
+        auto_apply_low_risk = bool(cfg.get("auto_apply_low_risk", True))
+        out = run_policy_update_cycle(min_samples=min_samples, auto_apply_low_risk=auto_apply_low_risk)
+        reflection_written = int((out.get("queued", 0) + out.get("applied", 0)) > 0)
+        logger.info(
+            f"[PolicyLoop] preflight_pass=1 missing_fields=[] "
+            f"policy_version=system reflection_written={reflection_written} "
+            f"queued={out.get('queued',0)} applied={out.get('applied',0)} skipped={out.get('skipped',0)}"
+        )
+    except Exception as e:
+        logger.warning(f"[PolicyLoop] 실패: {e}", exc_info=True)
+
+
 
 # 뉴스 알림 쿨다운: {stock_code: 마지막_알림_시각}
 def run_agent_action_log_refresh():
@@ -1760,6 +1778,16 @@ def run_check():
             if agent_tools_summary:
                 send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
 
+            incomplete_context = bool(
+                isinstance(claude_opinion, str) and claude_opinion.strip().startswith("INCOMPLETE_CONTEXT")
+            )
+            if incomplete_context:
+                logger.info(
+                    f"[{signal.stock_name}] INCOMPLETE_CONTEXT로 실행 차단 "
+                    f"(signal_id={signal_id}, opinion={claude_opinion[:120]})"
+                )
+                continue
+
             if claude_opinion:
                 _maybe_save_hold_conditions(signal, claude_opinion)
 
@@ -1841,6 +1869,9 @@ def main():
     scheduler.add_job(run_weekly_self_correction, "cron",
                       day_of_week="mon", hour=9, minute=5,
                       id="weekly_self_correction")
+    scheduler.add_job(run_reflection_policy_cycle, "cron",
+                      day_of_week="mon-fri", hour=16, minute=20,
+                      id="daily_reflection_policy_loop")
     scheduler.add_job(run_agent_action_log_refresh, "cron",
                       day_of_week="mon", hour=9, minute=10,
                       id="weekly_agent_action_log_refresh")
