@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 # 기존 claude_judge에서 _TRADING_KNOWLEDGE를 재사용
 def _get_trading_knowledge() -> str:
     try:
-        from worker.claude_judge import _TRADING_KNOWLEDGE
-        return _TRADING_KNOWLEDGE
+        from worker.claude_judge import _TRADING_KNOWLEDGE_ACTIVE
+        return _TRADING_KNOWLEDGE_ACTIVE
     except Exception:
         return ""
 
