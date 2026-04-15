@@ -46,6 +46,52 @@ def _f(value) -> float:
         return 0.0
 
 
+_WL_SIGNAL_FIELDS = (
+    "rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
+    "volume_surge_ratio", "cci_oversold", "cci_overbought",
+    "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
+    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+    "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
+    "stochastic_golden_cross", "stochastic_death_cross",
+    "ichimoku_golden_cross", "ichimoku_death_cross",
+    "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
+)
+
+def _repair_legacy_watchlist_conditions(conn: sqlite3.Connection, stock_code: str | None = None) -> int:
+    """
+    Legacy rows may contain only horizon/name and no monitoring conditions.
+    Do not infer trading conditions with defaults.
+    Instead, mark row as "reassessment required" and disable monitoring until re-judged.
+    """
+    where_code = " AND code = ?" if stock_code else ""
+    rows = conn.execute(
+        f"SELECT code, {', '.join(_WL_SIGNAL_FIELDS)} FROM watchlist WHERE 1=1{where_code}",
+        ((stock_code,) if stock_code else ()),
+    ).fetchall()
+    repaired = 0
+    for row in rows:
+        if any(row[f] is not None for f in _WL_SIGNAL_FIELDS):
+            continue
+        note_row = conn.execute(
+            "SELECT strategy_note FROM watchlist WHERE code = ?",
+            (row["code"],),
+        ).fetchone()
+        old_note = (note_row["strategy_note"] if note_row and note_row["strategy_note"] else "").strip()
+        marker = "[REASSESS_REQUIRED]"
+        if marker in old_note:
+            new_note = old_note
+        else:
+            ts = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            extra = f"{marker} {ts} legacy watchlist row had no monitoring conditions."
+            new_note = f"{old_note}\n{extra}".strip() if old_note else extra
+        conn.execute(
+            "UPDATE watchlist SET enabled = 0, strategy_note = ? WHERE code = ?",
+            (new_note, row["code"]),
+        )
+        repaired += 1
+    return repaired
+
+
 def init_db():
     with get_conn() as conn:
         conn.execute("""
@@ -126,6 +172,7 @@ def init_db():
         except Exception:
             pass
         _migrate_watchlist_columns(conn)
+        _repair_legacy_watchlist_conditions(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,6 +295,21 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_verdict ON signals (verdict, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_screening_stock_date ON screening_log (stock_code, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_screening_recommendation ON screening_log (recommendation, created_at)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_action_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                signal_id INTEGER NOT NULL,
+                stock_code TEXT NOT NULL,
+                stock_name TEXT NOT NULL,
+                signal_type TEXT DEFAULT NULL,
+                tool_sequence TEXT DEFAULT NULL,
+                reasoning_chain TEXT DEFAULT NULL,
+                final_opinion TEXT DEFAULT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_action_signal_id ON agent_action_logs (signal_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_action_created_at ON agent_action_logs (created_at)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cooldowns (
                 key TEXT PRIMARY KEY,
@@ -525,6 +587,14 @@ _WL_FLAG_FIELDS = {
     "ichimoku_golden_cross", "ichimoku_death_cross",
     "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
 }
+
+
+def repair_watchlist_conditions(stock_code: str | None = None) -> int:
+    """Public helper: repair legacy watchlist rows missing every monitoring condition."""
+    with get_conn() as conn:
+        repaired = _repair_legacy_watchlist_conditions(conn, stock_code=stock_code)
+        conn.commit()
+    return repaired
 
 
 def get_watchlist() -> list[dict]:
@@ -1499,6 +1569,49 @@ def update_signal_agent_trace(
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def save_agent_action_log(
+    signal_id: int,
+    stock_code: str,
+    stock_name: str,
+    signal_type: str | None,
+    tool_sequence: list[str],
+    reasoning_chain: list[str],
+    final_opinion: str | None = None,
+) -> int:
+    """Persist one agent trace record into the archive table."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO agent_action_logs
+                (created_at, signal_id, stock_code, stock_name, signal_type,
+                 tool_sequence, reasoning_chain, final_opinion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                signal_id,
+                stock_code,
+                stock_name,
+                signal_type or None,
+                json.dumps(tool_sequence or [], ensure_ascii=False),
+                json.dumps(reasoning_chain or [], ensure_ascii=False),
+                final_opinion,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def purge_agent_action_logs(days: int = 7) -> int:
+    """Delete archived agent traces older than the retention window."""
+    keep_days = max(1, int(days or 7))
+    cutoff = (_now_kst() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM agent_action_logs WHERE created_at < ?", (cutoff,))
+        conn.commit()
+        return int(cur.rowcount or 0)
 
 
 def update_signal_result(signal_id: int, result_pct: float, period: str = "3d") -> bool:

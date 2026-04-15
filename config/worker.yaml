@@ -10,7 +10,7 @@ worker:
   news_ai_max_calls_per_run: 2
   agent_max_steps: 7
   agent_max_tokens: 700
-  agent_target_unique_tools: 0
+  agent_target_unique_tools: 6
   research_agent_max_steps: 10
   research_agent_max_tokens: 1200
   research_agent_target_unique_tools: 4

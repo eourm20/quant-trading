@@ -176,7 +176,15 @@ class AddToWatchlistTool(BaseTool):
     ) -> dict:
         conditions = conditions or {}
         try:
-            from data.db import upsert_stock, get_watchlist, save_screening_log, update_screening_action
+            from data.db import (
+                upsert_stock,
+                get_watchlist,
+                get_position,
+                update_position_field,
+                save_screening_log,
+                update_screening_action,
+            )
+            from worker.watchlist_policy import normalize_watchlist_payload
             if self.addition_count >= int(self.max_additions or 0):
                 logger.warning(
                     f"[Agent] add_to_watchlist 한도 도달: {self.addition_count}/{self.max_additions} "
@@ -219,8 +227,30 @@ class AddToWatchlistTool(BaseTool):
                 except Exception:
                     pass
                 return {"ok": True, "already_exists": True, "stock_code": stock_code}
-            payload = {"horizon": horizon, **conditions}
-            upsert_stock(stock_code, stock_name, enabled=True, conditions=payload)
+            watchlist_payload, position_payload = normalize_watchlist_payload(
+                horizon=horizon,
+                analysis=None,
+                raw_conditions=conditions,
+            )
+            upsert_stock(stock_code, stock_name, enabled=True, conditions=watchlist_payload)
+            if position_payload and get_position(stock_code):
+                for field, value in position_payload.items():
+                    update_position_field(stock_code, field, value)
+            try:
+                from data.db import save_strategy_note
+                save_strategy_note(
+                    "watchlist",
+                    f"{stock_name} watchlist 파이프라인 등록",
+                    (
+                        f"stock_code={stock_code}\n"
+                        f"horizon={horizon}\n"
+                        f"reason={reason or '-'}\n"
+                        f"watchlist_payload={json.dumps(watchlist_payload, ensure_ascii=False)}\n"
+                        f"position_payload={json.dumps(position_payload, ensure_ascii=False)}"
+                    ),
+                )
+            except Exception as _note_e:
+                logger.warning(f"[Agent] strategy_note 저장 실패: {stock_name}({stock_code}) {_note_e}")
             self.addition_count += 1
             try:
                 _log_id = save_screening_log(
@@ -241,6 +271,8 @@ class AddToWatchlistTool(BaseTool):
                                 "reason": reason or "",
                                 "source": "research_agent",
                                 "horizon": horizon,
+                                "watchlist_payload": watchlist_payload,
+                                "position_payload": position_payload,
                             },
                             ensure_ascii=False,
                             indent=2,

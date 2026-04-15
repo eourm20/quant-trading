@@ -1303,72 +1303,13 @@ def _analyze_candidate(
 
 def add_to_watchlist(stock_code: str, stock_name: str, analysis: dict) -> bool:
     """분석 결과로 watchlist에 추가. 자동/수동 모드 공용."""
-    from data.db import get_conn
-
-    # AI가 제안한 조건별 활성화 설정 사용
-    ai_conditions = analysis.get("enabled_conditions", {})
-    conditions = {}
-
-    # 포지션 전용 필드 — watchlist에 넣지 않음 (매수 후 positions 테이블에서 관리)
-    _position_only_fields = {
-        "target_price", "stop_loss_price",
-        "rsi_oversold_add", "bollinger_lower_break_add", "ma5_recovery_add",
-    }
-
-    # 값이 있는 조건 (임계값 설정)
-    value_fields = {
-        "rsi_oversold", "rsi_overbought",
-        "rsi_oversold_intraday", "rsi_critical", "volume_surge_ratio",
-        "cci_oversold", "cci_overbought",
-    }
-    # 불리언 조건 (활성화/비활성화만)
-    flag_fields = {
-        "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
-        "ma5_recovery", "new_high_20d",
-        "macd_golden_cross", "macd_death_cross",
-        "bollinger_upper_break", "bollinger_lower_break",
-        "bollinger_critical_below",
-        "stochastic_golden_cross", "stochastic_death_cross",
-        "ichimoku_golden_cross", "ichimoku_death_cross",
-        "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
-    }
-
-    for cond_id, cond_info in ai_conditions.items():
-        if not isinstance(cond_info, dict) or not cond_info.get("enabled"):
-            continue
-        if cond_id in _position_only_fields:
-            continue  # 매수 후 positions에서 관리
-        if cond_id in value_fields:
-            val = cond_info.get("value")
-            if val is None:
-                val = analysis.get(cond_id, 0)
-            # 콤마 제거 + 숫자 변환 (AI가 "51,000" 형태로 출력할 수 있음)
-            _int_fields = {"cci_oversold", "cci_overbought"}
-            try:
-                val = float(str(val).replace(",", "").strip())
-                if cond_id in _int_fields:
-                    val = int(val)
-            except (ValueError, TypeError):
-                logger.warning(f"[스크리닝] {stock_name} {cond_id}={val} 숫자 변환 실패 → 무시")
-                continue
-            conditions[cond_id] = val
-        elif cond_id in flag_fields:
-            conditions[cond_id] = True
-
-    # AI가 enabled_conditions를 안 줬을 때 fallback (포지션 필드 제외)
-    if not conditions:
-        conditions = {
-            "rsi_oversold": analysis.get("rsi_oversold", 40),
-            "rsi_overbought": analysis.get("rsi_overbought", 65),
-            "golden_cross": True,
-            "death_cross": True,
-            "volume_surge_ratio": 2.0,
-            "bollinger_lower_break": True,
-            "ma20_support_break": True,
-        }
-
+    from worker.watchlist_policy import normalize_watchlist_payload
     horizon = analysis.get("horizon", "중기")
-    conditions["horizon"] = horizon
+    conditions, _ = normalize_watchlist_payload(
+        horizon=horizon,
+        analysis=analysis,
+        raw_conditions=None,
+    )
 
     from data.db import upsert_stock
     upsert_stock(stock_code, stock_name, True, conditions)
@@ -1509,11 +1450,20 @@ def run_daily_screening():
 
             # Agent mode does not write per-candidate screening_log by default; keep a trace in strategy_notes.
             try:
-                from data.db import save_strategy_note as _save_strategy_note
+                from data.db import save_strategy_note as _save_strategy_note, save_agent_action_log as _save_agent_action_log
                 _save_strategy_note(
                     "watchlist",
                     "ResearchAgent daily screening completed",
                     f"tools={tools_summary}\ntool_coverage_score={coverage_score}\nadded_count={added_count}\n\n{result_text[:3000]}",
+                )
+                _save_agent_action_log(
+                    signal_id=0,
+                    stock_code="SCREENING",
+                    stock_name="RESEARCH_AGENT",
+                    signal_type="research_screening",
+                    tool_sequence=_agent.used_tools,
+                    reasoning_chain=getattr(_agent, "reasoning_chain", []),
+                    final_opinion=result_text[:4000],
                 )
                 try:
                     from worker.agents.tools.rag_tools import (
@@ -2187,6 +2137,50 @@ def _calculate_adjustments(regime: dict, stock: dict) -> dict:
     return adjustments
 
 
+def _has_reassess_marker(stock: dict) -> bool:
+    note = str(stock.get("strategy_note") or "")
+    return "[REASSESS_REQUIRED]" in note
+
+
+def _build_initial_conditions_from_regime(regime: dict, stock: dict) -> dict:
+    """
+    Build first monitoring conditions for legacy rows with no condition fields.
+    This is regime-based judgment, not static defaults.
+    """
+    trend = regime.get("trend", "sideways")
+    volatility = regime.get("volatility", "normal")
+    horizon = stock.get("horizon", "중기")
+
+    # Horizon-aware neutral baselines
+    rsi_oversold = {"단기": 38, "중기": 40, "장기": 42}.get(horizon, 40)
+    rsi_overbought = {"단기": 65, "중기": 67, "장기": 70}.get(horizon, 67)
+    volume_surge_ratio = 2.0
+
+    # Regime adjustments
+    if trend == "downtrend":
+        rsi_oversold = min(45, rsi_oversold + 3)   # earlier catch in downtrend
+        rsi_overbought = max(55, rsi_overbought - 3)
+    elif trend == "uptrend":
+        rsi_oversold = max(35, rsi_oversold - 2)
+        rsi_overbought = min(80, rsi_overbought + 3)
+
+    if volatility == "high":
+        volume_surge_ratio = 2.5
+    elif volatility == "low":
+        volume_surge_ratio = 1.8
+
+    # Core watchlist monitors for pre-entry/post-entry shared signaling
+    return {
+        "rsi_oversold": int(rsi_oversold),
+        "rsi_overbought": int(rsi_overbought),
+        "volume_surge_ratio": round(float(volume_surge_ratio), 1),
+        "golden_cross": True,
+        "death_cross": True,
+        "bollinger_lower_break": True,
+        "ma20_support_break": True,
+    }
+
+
 def _parse_price_int(val) -> int:
     """현재가/가격 문자열을 int로 파싱."""
     try:
@@ -2205,20 +2199,29 @@ def reassess_watchlist(kiwoom) -> None:
     from worker.indicators import calculate_rsi, calculate_chart_summary
     from notifications.telegram import send_message
 
-    stocks = [s for s in get_watchlist() if s.get("enabled")]
+    stocks = get_watchlist()
     held_codes = {str(h.get("stock_code", "")) for h in get_portfolio()}
-    targets = [s for s in stocks if s["code"] not in held_codes]
+    enabled_targets = [s for s in stocks if s.get("enabled") and s["code"] not in held_codes]
+    reassess_targets = [s for s in stocks if (not s.get("enabled")) and _has_reassess_marker(s) and s["code"] not in held_codes]
+    # Keep deterministic order and avoid duplicates
+    targets_map = {s["code"]: s for s in (enabled_targets + reassess_targets)}
+    targets = list(targets_map.values())
 
     if not targets:
-        logger.info("[재평가] 미보유 watchlist 종목 없음 — 스킵")
+        logger.info("[재평가] 대상 종목 없음 — 스킵")
         return
 
-    logger.info(f"[재평가] 미보유 {len(targets)}개 종목 조건 재평가 시작")
+    logger.info(
+        f"[재평가] 시작: enabled={len(enabled_targets)}개, "
+        f"reassess_required={len(reassess_targets)}개"
+    )
     changes = []
+    reactivated = []
 
     for stock in targets:
         code = stock["code"]
         name = stock["name"]
+        is_reassess = (not stock.get("enabled")) and _has_reassess_marker(stock)
         try:
             price_data = kiwoom.get_current_price(code)
             current_price = _parse_price_int(
@@ -2258,18 +2261,42 @@ def reassess_watchlist(kiwoom) -> None:
             ) if len(closes) >= 5 else None
 
             regime = _detect_regime(chart, rsi, current_price)
-            adjs = _calculate_adjustments(regime, stock)
-
-            if adjs:
-                for field, value in adjs.items():
+            if is_reassess:
+                init_conditions = _build_initial_conditions_from_regime(regime, stock)
+                for field, value in init_conditions.items():
                     update_stock_field(code, field, value)
-                changes.append({
-                    "name": name, "code": code,
-                    "regime": regime, "adjustments": adjs,
+                update_stock_field(code, "enabled", True)
+
+                old_note = str(stock.get("strategy_note") or "")
+                resolved_line = (
+                    f"[REASSESS_RESOLVED] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"regime={regime['trend']}/{regime['volatility']} score={regime['score']}"
+                )
+                new_note = (old_note + "\n" + resolved_line).strip() if old_note else resolved_line
+                update_stock_field(code, "strategy_note", new_note)
+
+                reactivated.append({
+                    "name": name,
+                    "code": code,
+                    "regime": regime,
+                    "conditions": init_conditions,
                 })
-                adj_str = ", ".join(f"{k}: {stock.get(k)}→{v}" for k, v in adjs.items())
-                logger.info(f"[재평가] {name}: {regime['trend']}/{regime['volatility']} "
-                            f"(score={regime['score']}) → {adj_str}")
+                logger.info(
+                    f"[재평가-복구] {name}: {regime['trend']}/{regime['volatility']} "
+                    f"(score={regime['score']}) → enabled=1"
+                )
+            else:
+                adjs = _calculate_adjustments(regime, stock)
+                if adjs:
+                    for field, value in adjs.items():
+                        update_stock_field(code, field, value)
+                    changes.append({
+                        "name": name, "code": code,
+                        "regime": regime, "adjustments": adjs,
+                    })
+                    adj_str = ", ".join(f"{k}: {stock.get(k)}→{v}" for k, v in adjs.items())
+                    logger.info(f"[재평가] {name}: {regime['trend']}/{regime['volatility']} "
+                                f"(score={regime['score']}) → {adj_str}")
 
             time.sleep(1)
 
@@ -2278,8 +2305,15 @@ def reassess_watchlist(kiwoom) -> None:
             time.sleep(2)
 
     # ── 결과 리포트 ──
-    if changes:
-        lines = [f"🔄 *watchlist 조건 재평가* ({len(changes)}개 조정)\n"]
+    if changes or reactivated:
+        lines = []
+        if reactivated:
+            lines.append(f"✅ *REASSESS 복구* ({len(reactivated)}개)")
+            for c in reactivated:
+                r = c["regime"]
+                lines.append(f"• *{c['name']}* ({r['trend']}, {r['volatility']}) 재활성화")
+        if changes:
+            lines.append(f"\n🔄 *watchlist 조건 재평가* ({len(changes)}개 조정)")
         for c in changes:
             r = c["regime"]
             trend_emoji = {"uptrend": "📈", "downtrend": "📉", "sideways": "➡️"}[r["trend"]]
@@ -2296,11 +2330,22 @@ def reassess_watchlist(kiwoom) -> None:
             f"{c['name']} {k}: {c['adjustments'][k]}"
             for c in changes for k in c["adjustments"]
         )
+        react_summary = ", ".join(
+            f"{c['name']} reactivated"
+            for c in reactivated
+        )
+        detail_parts = [x for x in [adj_summary, react_summary] if x]
         save_strategy_note(
             category="watchlist",
-            summary=f"09:15 레짐 재평가 자동 조정 ({len(changes)}개 종목)",
-            detail=adj_summary,
+            summary=(
+                f"09:15 레짐 재평가 자동 조정 "
+                f"(조정 {len(changes)}개 / 복구 {len(reactivated)}개)"
+            ),
+            detail="\n".join(detail_parts),
         )
-        logger.info(f"[재평가] {len(changes)}개 종목 조정 완료")
+        logger.info(
+            f"[재평가] 완료: 조정 {len(changes)}개, "
+            f"reassess 복구 {len(reactivated)}개"
+        )
     else:
         logger.info("[재평가] 조정 필요 종목 없음")

@@ -148,13 +148,103 @@ class ExecuteOrderTool(BaseTool):
             )
             ord_no = result.get("ord_no") or result.get("odno")
             logger.info(f"[Agent] {side} 체결: {stock_name}({stock_code}) {quantity}주 — {reason} (주문번호: {ord_no})")
-            return {
+            payload = {
                 "status": "executed",
                 "stock_code": stock_code,
                 "order_type": side,
                 "quantity": quantity,
                 "order_no": ord_no,
             }
+            ExecuteOrderTool._run_post_trade_pipeline(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_type=order_type,
+                quantity=quantity,
+                price=price,
+                reason=reason,
+                order_no=ord_no,
+                result_payload=payload,
+            )
+            return payload
         except Exception as e:
             logger.error(f"[Agent] 주문 실패: {stock_name} {side} — {e}")
             return {"status": "error", "error": str(e)}
+
+    @staticmethod
+    def _run_post_trade_pipeline(
+        *,
+        stock_code: str,
+        stock_name: str,
+        order_type: str,
+        quantity: int,
+        price: int,
+        reason: str,
+        order_no: str | None,
+        result_payload: dict,
+    ) -> None:
+        """Enforce mandatory post-order workflow in code (not prompt rules)."""
+        pipeline_steps: list[str] = []
+
+        try:
+            from worker.clients.kiwoom_client import KiwoomClient
+            from worker.portfolio_sync import sync_all
+            sync_all(KiwoomClient())
+            pipeline_steps.append("portfolio_sync")
+        except Exception as e:
+            logger.warning(f"[Agent] post-trade portfolio_sync 실패: {e}")
+
+        try:
+            from data.db import reset_cooldowns_for_stock, set_add_cooldown_after_trade
+            cnt = reset_cooldowns_for_stock(stock_code)
+            pipeline_steps.append(f"cooldown_reset:{cnt}")
+            if order_type == "1":
+                add_cnt = set_add_cooldown_after_trade(stock_code, suppress_minutes=60)
+                pipeline_steps.append(f"add_cooldown:{add_cnt}")
+        except Exception as e:
+            logger.warning(f"[Agent] post-trade cooldown 처리 실패: {e}")
+
+        if order_type == "1":
+            try:
+                from data.db import create_position_from_trade, get_position, update_position_field
+                created = create_position_from_trade(stock_code, stock_name, price or 0, quantity)
+                pipeline_steps.append(f"position_create:{'created' if created else 'exists'}")
+
+                try:
+                    from worker.claude_judge import judge_position_values
+                    pos = get_position(stock_code) or {}
+                    avg_price = int(pos.get("avg_price") or 0)
+                    current_price = int(price or avg_price or 0)
+                    ai = judge_position_values(stock_code, stock_name, avg_price, quantity, current_price=current_price)
+                    if ai:
+                        for k in ("target_price", "stop_loss_price", "add_buy_price"):
+                            v = ai.get(k)
+                            if v:
+                                update_position_field(stock_code, k, v)
+                        pipeline_steps.append("position_ai_update")
+                        result_payload["position_ai"] = {
+                            "target_price": ai.get("target_price", 0),
+                            "stop_loss_price": ai.get("stop_loss_price", 0),
+                            "add_buy_price": ai.get("add_buy_price", 0),
+                        }
+                except Exception as e:
+                    logger.warning(f"[Agent] post-trade AI position 설정 실패: {e}")
+            except Exception as e:
+                logger.warning(f"[Agent] post-trade position 생성 실패: {e}")
+
+        try:
+            from data.db import save_strategy_note
+            side = "매수" if order_type == "1" else "매도"
+            save_strategy_note(
+                "trade",
+                f"{stock_name} {quantity}주 {side} (agent pipeline)",
+                (
+                    f"order_no={order_no or '-'}\n"
+                    f"reason={reason or '-'}\n"
+                    f"steps={' -> '.join(pipeline_steps) if pipeline_steps else '-'}"
+                ),
+            )
+            pipeline_steps.append("strategy_log")
+        except Exception as e:
+            logger.warning(f"[Agent] post-trade strategy_note 저장 실패: {e}")
+
+        result_payload["post_trade_pipeline"] = pipeline_steps
