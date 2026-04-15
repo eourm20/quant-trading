@@ -32,11 +32,41 @@ class GetSignalHistoryTool(BaseTool):
         "required": ["stock_code"],
     }
 
+    @staticmethod
+    def _to_int(v) -> int:
+        try:
+            return abs(int(float(str(v or "0").replace(",", "").strip() or "0")))
+        except Exception:
+            return 0
+
     def execute(self, stock_code: str, signal_type: str = "", limit: int = 5) -> dict:
         try:
             from data.db import get_signal_history
             rows = get_signal_history(stock_code, signal_type=signal_type, limit=limit)
-            return {"history": rows}
+
+            # 실시간 현재가 기반 live_return_pct 보강 (result_pct 미집계 기간 대응)
+            current_price = 0
+            try:
+                from worker.clients.kiwoom_client import KiwoomClient
+                pd = KiwoomClient().get_current_price(stock_code) or {}
+                current_price = self._to_int(
+                    pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or pd.get("current_price")
+                )
+            except Exception:
+                current_price = 0
+
+            enriched = []
+            for r in rows:
+                row = dict(r)
+                base = self._to_int(row.get("current_price"))
+                live_pct = None
+                if current_price > 0 and base > 0:
+                    live_pct = round((current_price - base) / base * 100.0, 2)
+                row["live_current_price"] = current_price or None
+                row["live_return_pct"] = live_pct
+                enriched.append(row)
+
+            return {"history": enriched}
         except Exception as e:
             return {"error": str(e)}
 

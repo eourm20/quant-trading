@@ -221,8 +221,15 @@ class BaseAgent:
             # 도구 호출
             if choice.finish_reason == "tool_calls":
                 # 도구 호출 전 GPT 추론 텍스트 캡처 (있을 때만)
-                if choice.message.content:
-                    self._reasoning_steps.append(choice.message.content)
+                if choice.message.content and str(choice.message.content).strip():
+                    self._reasoning_steps.append(str(choice.message.content).strip())
+                else:
+                    try:
+                        _names = [tc.function.name for tc in (choice.message.tool_calls or [])]
+                        if _names:
+                            self._reasoning_steps.append(f"[tool_calls] {', '.join(_names)}")
+                    except Exception:
+                        pass
 
                 # assistant 메시지 전체를 그대로 추가 (tool_calls 포함)
                 messages.append(choice.message)

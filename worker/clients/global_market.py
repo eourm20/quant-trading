@@ -6,8 +6,24 @@
 
 import logging
 import httpx
+import time
 
 logger = logging.getLogger(__name__)
+_LAST_401_LOG_TS = 0.0
+_LOG_COOLDOWN_SEC = 1800  # 30 minutes
+
+
+def _log_fetch_error(stage: str, err: Exception) -> None:
+    """401은 Yahoo 정책 이슈로 빈번하므로 저소음 로그로 처리."""
+    global _LAST_401_LOG_TS
+    status = getattr(getattr(err, "response", None), "status_code", None)
+    if status == 401:
+        now = time.time()
+        if (now - _LAST_401_LOG_TS) >= _LOG_COOLDOWN_SEC:
+            _LAST_401_LOG_TS = now
+            logger.info(f"글로벌 지수 {stage} 401 응답 (Yahoo 제한 가능) — fallback 진행")
+        return
+    logger.warning(f"글로벌 지수 {stage} 조회 실패: {err}")
 
 # 조회할 글로벌 심볼 (Yahoo Finance 코드)
 _SYMBOLS = {
@@ -65,7 +81,7 @@ def get_global_indices() -> dict[str, dict]:
             return result
         logger.warning(f"글로벌 지수 v7 응답 비어있음: {resp.text[:200]}")
     except Exception as e:
-        logger.warning(f"글로벌 지수 v7 조회 실패: {e}")
+        _log_fetch_error("v7", e)
 
     # 2차: query2 v7
     try:
@@ -78,7 +94,7 @@ def get_global_indices() -> dict[str, dict]:
             return result2
         logger.warning(f"글로벌 지수 v7 query2 응답 비어있음: {resp2.text[:200]}")
     except Exception as e2:
-        logger.warning(f"글로벌 지수 v7 query2 조회 실패: {e2}")
+        _log_fetch_error("v7 query2", e2)
 
     # 3차: v8 chart API (심볼별 개별 조회)
     try:
@@ -101,7 +117,7 @@ def get_global_indices() -> dict[str, dict]:
         if result3:
             return result3
     except Exception as e3:
-        logger.warning(f"글로벌 지수 v8 조회 실패: {e3}")
+        _log_fetch_error("v8", e3)
 
     return {}
 

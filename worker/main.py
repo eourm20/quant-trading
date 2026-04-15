@@ -188,6 +188,21 @@ def _parse_ymd(value: str) -> str:
     return s if len(s) == 8 and s.isdigit() else ""
 
 
+def _business_days_elapsed(start_dt, end_dt) -> int:
+    """start_dt(당일 포함) 다음 거래일~end_dt까지의 평일 개수.
+    한국 휴일 캘린더는 미반영, 주말만 제외.
+    """
+    if not start_dt or not end_dt or end_dt <= start_dt:
+        return 0
+    days = 0
+    cur = start_dt + _td(days=1)
+    while cur <= end_dt:
+        if cur.weekday() < 5:
+            days += 1
+        cur += _td(days=1)
+    return days
+
+
 def _resolve_eval_price(stock_code: str, target_dt, today_dt):
     """성과 평가 가격 결정.
     - target이 오늘이고 정규장(main) 진행 중이면 현재가
@@ -655,29 +670,30 @@ def run_news_monitor():
 
     logger.debug(f"[news_monitor] done: holdings={len(holdings)}, ai_calls={news_ai_calls}")
 def update_signal_results():
-    """신호 발생 후 1일/3일/5일/10일 결과 수익률을 현재가 기준으로 업데이트."""
-    from datetime import timedelta
+    """신호 발생 후 1일/3일/5일/10일 결과 수익률 업데이트 (영업일 기준)."""
+    from datetime import datetime
     from data.db import get_conn
 
     periods = [
-        ("1d", 1, 2, "result_1d"),
-        ("3d", 3, 4, "result_pct"),
-        ("5d", 5, 6, "result_5d"),
-        ("10d", 10, 11, "result_10d"),
+        ("1d", 1, "result_1d"),
+        ("3d", 3, "result_pct"),
+        ("5d", 5, "result_5d"),
+        ("10d", 10, "result_10d"),
     ]
+    today_kst = _now_kst().date()
 
-    for period_name, days_after, days_before, col_name in periods:
-        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
+    for period_name, days_after, col_name in periods:
         with get_conn() as conn:
             rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, current_price FROM signals "
-                f"WHERE {col_name} IS NULL AND created_at >= ? AND created_at < ?",
-                (cutoff_from, cutoff_to),
+                f"SELECT id, stock_code, stock_name, current_price, created_at FROM signals "
+                f"WHERE {col_name} IS NULL",
             ).fetchall()
 
         for row in rows:
             try:
+                created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
+                if _business_days_elapsed(created_dt, today_kst) < days_after:
+                    continue
                 pd = kiwoom.get_current_price(row["stock_code"])
                 now_price = abs(int(str(
                     pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
@@ -721,72 +737,6 @@ def update_signal_results():
 
 
 def update_paper_results():
-    """모의투자 1일/3일/5일 수익률 업데이트."""
-    from datetime import timedelta
-    from data.db import get_conn, update_paper_result
-
-    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
-    for period_name, days_after, days_before, col_name in periods:
-        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to   = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, price FROM paper_trades "
-                f"WHERE {col_name} IS NULL AND created_at >= ? AND created_at < ?",
-                (cutoff_from, cutoff_to),
-            ).fetchall()
-        for row in rows:
-            try:
-                pd = kiwoom.get_current_price(row["stock_code"])
-                now_price = abs(int(str(pd.get("cur_prc") or pd.get("stk_prpr") or "0").replace(",", "")))
-                if now_price and row["price"]:
-                    pct = (now_price - row["price"]) / row["price"] * 100
-                    update_paper_result(row["id"], round(pct, 2), period=period_name)
-                    logger.debug(f"[모의투자 결과 {period_name}] {row['stock_name']}: {pct:+.2f}%")
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"[모의투자 결과 실패] {row['stock_name']}: {e}")
-
-
-def update_trade_results():
-    """실거래 1일/3일/5일 성과 업데이트 (매수/매도 방향 반영)."""
-    from datetime import timedelta
-    from data.db import get_conn, update_trade_result
-
-    periods = [("1d", 1, 2, "result_1d"), ("3d", 3, 4, "result_3d"), ("5d", 5, 6, "result_5d")]
-    for period_name, days_after, days_before, col_name in periods:
-        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT trade_id, stock_code, stock_name, side, price FROM trades "
-                f"WHERE {col_name} IS NULL AND price > 0 AND executed_at >= ? AND executed_at < ?",
-                (cutoff_from, cutoff_to),
-            ).fetchall()
-
-        for row in rows:
-            try:
-                pd = kiwoom.get_current_price(row["stock_code"])
-                now_price = abs(int(str(pd.get("cur_prc") or pd.get("stk_prpr") or "0").replace(",", "")))
-                base = int(row["price"] or 0)
-                if now_price <= 0 or base <= 0:
-                    continue
-
-                raw_pct = (now_price - base) / base * 100
-                side = str(row["side"] or "")
-                # 매도 포지션은 하락이 유리하므로 부호 반전
-                signed_pct = -raw_pct if side in ("매도", "SELL", "sell") else raw_pct
-                update_trade_result(row["trade_id"], round(signed_pct, 2), period=period_name)
-                logger.debug(
-                    f"[실거래 결과 {period_name}] {row['stock_name']} {side}: "
-                    f"원시 {raw_pct:+.2f}% / 반영 {signed_pct:+.2f}%"
-                )
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"[실거래 결과 실패] {row['stock_name']}: {e}")
-
-
-def update_paper_results():
     """모의투자 1일/3일/5일 수익률 업데이트.
     기준가:
     - 평가일이 오늘이고 장중(main)이면 현재가
@@ -814,9 +764,9 @@ def update_paper_results():
                 if base <= 0:
                     continue
                 created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
-                target_dt = created_dt + timedelta(days=days_after)
-                if target_dt > today_kst:
+                if _business_days_elapsed(created_dt, today_kst) < days_after:
                     continue
+                target_dt = created_dt + _td(days=days_after)
 
                 eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
                 if eval_price <= 0:
@@ -858,9 +808,9 @@ def update_trade_results():
                 if base <= 0:
                     continue
                 executed_dt = datetime.strptime(str(row["executed_at"])[:10], "%Y-%m-%d").date()
-                target_dt = executed_dt + timedelta(days=days_after)
-                if target_dt > today_kst:
+                if _business_days_elapsed(executed_dt, today_kst) < days_after:
                     continue
+                target_dt = executed_dt + _td(days=days_after)
 
                 eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
                 if eval_price <= 0:
@@ -925,46 +875,6 @@ def sync_realized_pnl():
 
 
 def update_screening_results():
-    """스크리닝 종목의 7일/30일 후 수익률 자동 업데이트."""
-    from datetime import timedelta
-    from data.db import get_conn, update_screening_result
-
-    periods = [
-        ("7d", 7, 8),
-        ("30d", 30, 31),
-    ]
-
-    for period_name, days_after, days_before in periods:
-        cutoff_from = (_now_kst() - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        cutoff_to = (_now_kst() - timedelta(days=days_after)).strftime("%Y-%m-%d")
-        col = "result_7d" if period_name == "7d" else "result_30d"
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, current_price "
-                f"FROM screening_log "
-                f"WHERE {col} IS NULL AND current_price IS NOT NULL AND created_at >= ? AND created_at < ?",
-                (cutoff_from, cutoff_to),
-            ).fetchall()
-
-        for row in rows:
-            try:
-                pd = kiwoom.get_current_price(row["stock_code"])
-                now_price = abs(int(str(
-                    pd.get("cur_prc") or pd.get("stk_prpr") or "0"
-                ).replace(",", "")))
-                base = row["current_price"]
-                if not base:
-                    continue
-                if now_price and base:
-                    pct = (now_price - base) / base * 100
-                    update_screening_result(row["id"], round(pct, 2), period=period_name)
-                    logger.debug(f"[스크리닝 결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"[스크리닝 결과 {period_name} 실패] {row['stock_name']}: {e}")
-
-
-def update_screening_results():
     """스크리닝 종목의 7일/30일 후 수익률 자동 업데이트.
     누락 방지:
     - 기존 좁은 시간창(7~8일, 30~31일) 대신
@@ -1019,9 +929,9 @@ def update_screening_results():
                 if base <= 0:
                     continue
                 created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
-                target_dt = created_dt + timedelta(days=days_after)
-                if target_dt > today_kst:
+                if _business_days_elapsed(created_dt, today_kst) < days_after:
                     continue
+                target_dt = created_dt + _td(days=days_after)
 
                 eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
                 if eval_price <= 0:
@@ -1236,6 +1146,58 @@ def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
     )
 
 
+def _parse_watchlist_decision(opinion: str) -> str | None:
+    """매도 후 watchlist 유지/제외 판단 파싱.
+    반환: keep | drop | reassess | None
+    """
+    text = str(opinion or "")
+    for line in text.splitlines():
+        s = line.strip().lower()
+        if not s:
+            continue
+        if s.startswith("[watchlist") or s.startswith("[워치리스트결정]") or s.startswith("[관심종목결정]"):
+            if any(k in s for k in ("keep", "유지")):
+                return "keep"
+            if any(k in s for k in ("drop", "remove", "삭제", "제거")):
+                return "drop"
+            if any(k in s for k in ("reassess", "재평가", "보류")):
+                return "reassess"
+    return None
+
+
+def _apply_post_sell_watchlist_decision(signal, claude_opinion: str) -> None:
+    """전량 매도 후 watchlist 처리.
+    유효한 결정이 없으면 기본 DROP(제거).
+    """
+    try:
+        from data.db import delete_stock, update_stock_field, get_watchlist, save_strategy_note
+        decision = _parse_watchlist_decision(claude_opinion) or "drop"
+
+        if decision == "drop":
+            removed = delete_stock(signal.stock_code)
+            logger.info(f"[{signal.stock_name}] post-sell watchlist 결정: drop (removed={removed})")
+            save_strategy_note("watchlist", f"{signal.stock_name} 전량매도 후 watchlist 제거", "decision=drop(default_if_invalid)")
+            return
+
+        if decision == "reassess":
+            row = next((s for s in get_watchlist() if s.get("code") == signal.stock_code), None)
+            old_note = str((row or {}).get("strategy_note") or "")
+            marker = f"[POST_EXIT_REVIEW_REQUIRED] {_now_kst().strftime('%Y-%m-%d %H:%M:%S')}"
+            new_note = (old_note + "\n" + marker).strip() if old_note else marker
+            update_stock_field(signal.stock_code, "enabled", 0)
+            update_stock_field(signal.stock_code, "strategy_note", new_note)
+            logger.info(f"[{signal.stock_name}] post-sell watchlist 결정: reassess (enabled=0)")
+            save_strategy_note("watchlist", f"{signal.stock_name} 전량매도 후 재평가 대기", "decision=reassess")
+            return
+
+        # keep
+        update_stock_field(signal.stock_code, "enabled", 1)
+        logger.info(f"[{signal.stock_name}] post-sell watchlist 결정: keep (enabled=1)")
+        save_strategy_note("watchlist", f"{signal.stock_name} 전량매도 후 watchlist 유지", "decision=keep")
+    except Exception as e:
+        logger.warning(f"[{signal.stock_name}] post-sell watchlist 처리 실패: {e}")
+
+
 def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: int = 0, buy_budget: int = 0) -> None:
     """AI 판단이 매수/매도이고 추천수량이 있으면 자동 주문 실행. 추천수량 없으면 홀드."""
     import re
@@ -1313,6 +1275,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
             return
 
     # 하드캡: 매도 — 보유 수량 초과 방지
+    held_qty_before = 0
     if order_type == "2":
         # 전량 매도 처리 시 위에서 이미 조회했을 수 있으나 재조회해도 무방 (캐시됨)
         held_qty = next(
@@ -1320,6 +1283,7 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
              if str(h.get("stock_code", "")) == signal.stock_code),
             0,
         )
+        held_qty_before = held_qty
         if held_qty <= 0:
             logger.info(f"[{signal.stock_name}] 미보유 종목 매도 스킵")
             return
@@ -1386,6 +1350,9 @@ def _auto_execute(signal, claude_opinion: str, signal_id: int | None, deposit: i
         # 매수 후 AI 포지션 판단 (목표가/손절가/추가매수가 설정)
         if order_type == "1":
             _set_position_by_ai(signal.stock_code, signal.stock_name, signal.current_price, qty)
+        # 전량 매도 후 watchlist 처리 (유효 결정 없으면 기본 drop)
+        if order_type == "2" and held_qty_before > 0 and qty >= held_qty_before:
+            _apply_post_sell_watchlist_decision(signal, claude_opinion)
     except Exception as e:
         logger.error(f"[{signal.stock_name}] 자동 주문 실패: {e}")
         send_message(f"❌ 자동 주문 실패: *{signal.stock_name}* — `{e}`")
@@ -1766,22 +1733,25 @@ def run_check():
             if claude_opinion:
                 try:
                     trace = get_last_agent_trace()
-                    if trace.get("tool_sequence"):
-                        update_signal_agent_trace(
-                            signal_id,
-                            trace["tool_sequence"],
-                            trace.get("reasoning_chain", []),
-                        )
-                        save_agent_action_log(
-                            signal_id=signal_id,
-                            stock_code=signal.stock_code,
-                            stock_name=signal.stock_name,
-                            signal_type=getattr(signal, "signal_type", None),
-                            tool_sequence=trace["tool_sequence"],
-                            reasoning_chain=trace.get("reasoning_chain", []),
-                            final_opinion=claude_opinion,
-                        )
-                        agent_tools_summary = " → ".join(trace["tool_sequence"])
+                    tool_sequence = list((trace or {}).get("tool_sequence") or [])
+                    reasoning_chain = list((trace or {}).get("reasoning_chain") or [])
+
+                    update_signal_agent_trace(
+                        signal_id,
+                        tool_sequence,
+                        reasoning_chain,
+                    )
+                    save_agent_action_log(
+                        signal_id=signal_id,
+                        stock_code=signal.stock_code,
+                        stock_name=signal.stock_name,
+                        signal_type=getattr(signal, "signal_type", None),
+                        tool_sequence=tool_sequence,
+                        reasoning_chain=reasoning_chain,
+                        final_opinion=claude_opinion,
+                    )
+                    if tool_sequence:
+                        agent_tools_summary = " → ".join(tool_sequence)
                 except Exception as _e:
                     logger.debug(f"[AgentTrace] 저장 실패: {_e}")
             _rag_index_signal(signal, signal_id, claude_opinion,
