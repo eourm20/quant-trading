@@ -50,7 +50,7 @@ worker:
 
 watchlist_management:
   inactive_days_alert: 30
-  inactive_days_removal: 90
+  inactive_days_removal: 30
   alert_interval_days: 7
 
 sector:

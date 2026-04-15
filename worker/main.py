@@ -1068,7 +1068,16 @@ def check_inactive_stocks():
         if last_signal:
             days_since = (_now_kst() - datetime.strptime(last_signal[:10], "%Y-%m-%d")).days
         else:
-            days_since = 999
+            # 신호 이력이 없으면 watchlist 등록일(created_at) 기준으로 계산
+            created_at = stock.get("created_at", "")
+            if created_at:
+                try:
+                    created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                    days_since = (_now_kst() - created_dt).days
+                except ValueError:
+                    continue
+            else:
+                continue
 
         if days_since >= INACTIVE_DAYS:
             alerts.append((name, days_since))
@@ -1081,9 +1090,9 @@ def check_inactive_stocks():
 
 
 def check_removal_candidates():
-    """미보유 종목 중 90일 미신호 → 관심종목 자동 삭제."""
+    """미보유 종목 중 장기 미신호(기본 30일) → 관심종목 자동 삭제."""
     _wm = _WORKER_CONFIG.get("watchlist_management", {})
-    INACTIVE_DAYS = int(_wm.get("inactive_days_removal", 90))
+    INACTIVE_DAYS = int(_wm.get("inactive_days_removal", 30))
     ALERT_INTERVAL_DAYS = int(_wm.get("alert_interval_days", 7))
 
     holdings = {str(h.get("stock_code", "")): h for h in get_portfolio()}
