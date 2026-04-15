@@ -711,10 +711,16 @@ def get_trade_opinion(
         try:
             from worker.agents.judgment_agent import JudgmentAgent
             _wcfg = (_cfg.get("worker") or {})
+            _agent_model = str(_wcfg.get("judgment_agent_model") or os.getenv("OPENAI_MODEL", "gpt-4.1")).strip()
+            _agent_api_key = str(_wcfg.get("judgment_agent_api_key") or os.getenv("OPENAI_API_KEY", "")).strip()
+            _agent_base_url = str(_wcfg.get("judgment_agent_base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
             _agent = JudgmentAgent(
                 max_steps=int(_wcfg.get("agent_max_steps", 7)),
                 max_tokens=int(_wcfg.get("agent_max_tokens", 700)),
                 target_unique_tools=int(_wcfg.get("agent_target_unique_tools", 0)),
+                model=_agent_model,
+                api_key=_agent_api_key,
+                base_url=(_agent_base_url or None),
             )
             _retry_count = max(0, int(_wcfg.get("agent_rate_limit_retries", 2)))
             _retry_wait = max(1, int(_wcfg.get("agent_rate_limit_wait_seconds", 12)))

@@ -21,11 +21,7 @@ logger = logging.getLogger(__name__)
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 _MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
-if not _OPENAI_KEY:
-    raise RuntimeError("Agent 모드는 OPENAI_API_KEY 필수입니다.")
-
 from openai import OpenAI
-_client = OpenAI(api_key=_OPENAI_KEY)
 
 
 class BaseAgent:
@@ -35,16 +31,25 @@ class BaseAgent:
         self,
         tools: list,
         system_prompt: str,
-        model: str = _MODEL,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
         max_steps: int = 10,
         max_tokens: int = 1024,
     ):
         from worker.agents.tools.registry import build_schema
+        resolved_api_key = (api_key or _OPENAI_KEY or "").strip()
+        if not resolved_api_key:
+            raise RuntimeError(
+                "Agent 모드 API 키가 없습니다. OPENAI_API_KEY 또는 worker.yaml의 에이전트 API 키를 설정하세요."
+            )
+        resolved_base_url = (base_url or "").strip() or None
         self._tool_schemas = [build_schema(t) for t in tools]
         self._tool_map = {t.name: t for t in tools}
         self._available_tool_names = [t.name for t in tools if getattr(t, "name", "")]
         self._system_prompt = self._compose_system_prompt(system_prompt, tools)
-        self._model = model
+        self._model = (model or _MODEL)
+        self._client = OpenAI(api_key=resolved_api_key, base_url=resolved_base_url)
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._used_tools: list[str] = []
@@ -185,7 +190,7 @@ class BaseAgent:
         self._diversity_nudge_used = False
 
         for step in range(self._max_steps):
-            response = _client.chat.completions.create(
+            response = self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
                 tools=self._tool_schemas,

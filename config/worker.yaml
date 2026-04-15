@@ -5,19 +5,31 @@ worker:
   news_cooldown_hours: 8
   use_ai_judgment: true
   use_agent_mode: true
+  # Role-based model routing (OpenAI-compatible API).
+  # 운영 기본값은 기존 GPT 계열을 유지하고, 필요 시 아래 3개 키를 역할별로 교체하세요.
+  # 예시(판단=DeepSeek): judgment_agent_model: "deepseek-chat"
+  # 예시(검증/리서치=Qwen): research_agent_model: "qwen-max"
+  # 예시(외부 provider): *_agent_base_url, *_agent_api_key 설정
+  # Single-agent style operation: use one model across judgment/research.
+  judgment_agent_model: "gpt-4.1-mini"
+  judgment_agent_base_url: ""
+  judgment_agent_api_key: ""
+  research_agent_model: "gpt-4.1-mini"
+  research_agent_base_url: ""
+  research_agent_api_key: ""
   ai_cache_minutes: 180
-  news_ai_max_calls_per_run: 2
+  news_ai_max_calls_per_run: 1
   agent_max_steps: 7
-  agent_max_tokens: 700
-  agent_target_unique_tools: 6
-  agent_rate_limit_retries: 2
-  agent_rate_limit_wait_seconds: 12
+  agent_max_tokens: 550
+  agent_target_unique_tools: 5
+  agent_rate_limit_retries: 3
+  agent_rate_limit_wait_seconds: 2
   research_agent_max_steps: 10
-  research_agent_max_tokens: 1200
-  research_agent_target_unique_tools: 4
-  research_agent_rate_limit_retries: 2
-  research_agent_rate_limit_wait_seconds: 12
-  research_max_candidates: 5
+  research_agent_max_tokens: 900
+  research_agent_target_unique_tools: 3
+  research_agent_rate_limit_retries: 3
+  research_agent_rate_limit_wait_seconds: 2
+  research_max_candidates: 4
   news_monitor_times: "8:55,12:00"
   rag_realtime_index: false
   rag_batch_times: "8:55,13:05,16:05"

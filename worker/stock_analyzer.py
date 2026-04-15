@@ -1428,10 +1428,16 @@ def run_daily_screening():
             _kospi = _rate(_kw.get_market_index("kospi"))
             _t.sleep(0.5)
             _kosdaq = _rate(_kw.get_market_index("kosdaq"))
+            _agent_model = str(_worker_cfg.get("research_agent_model") or os.getenv("OPENAI_MODEL", "gpt-4.1")).strip()
+            _agent_api_key = str(_worker_cfg.get("research_agent_api_key") or os.getenv("OPENAI_API_KEY", "")).strip()
+            _agent_base_url = str(_worker_cfg.get("research_agent_base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
             _agent = ResearchAgent(
                 max_steps=int(_worker_cfg.get("research_agent_max_steps", 10)),
                 max_tokens=int(_worker_cfg.get("research_agent_max_tokens", 1200)),
                 target_unique_tools=int(_worker_cfg.get("research_agent_target_unique_tools", 4)),
+                model=_agent_model,
+                api_key=_agent_api_key,
+                base_url=(_agent_base_url or None),
             )
             _max_candidates = max(1, int(_worker_cfg.get("research_max_candidates", 5)))
             logger.info(f"[ResearchAgent Screening] max_candidates={_max_candidates}")

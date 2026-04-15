@@ -50,11 +50,22 @@ _SYSTEM_PROMPT = """당신은 개인 투자자의 퀀트 트레이딩 시스템�
 class ResearchAgent:
     """장 마감 후 유망 종목 발굴 Agent."""
 
-    def __init__(self, max_steps: int = 10, max_tokens: int = 1200, target_unique_tools: int = 4):
+    def __init__(
+        self,
+        max_steps: int = 10,
+        max_tokens: int = 1200,
+        target_unique_tools: int = 4,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ):
         tools = load_research_tools()
         self._agent = BaseAgent(
             tools=tools,
             system_prompt=_SYSTEM_PROMPT,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
             max_steps=max_steps,
             max_tokens=max_tokens,
         )

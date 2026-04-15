@@ -60,11 +60,22 @@ _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템
 class JudgmentAgent:
     """신호 1건에 대한 매매 판단 Agent."""
 
-    def __init__(self, max_steps: int = 7, max_tokens: int = 700, target_unique_tools: int = 0):
+    def __init__(
+        self,
+        max_steps: int = 7,
+        max_tokens: int = 700,
+        target_unique_tools: int = 0,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ):
         tools = load_judgment_tools()
         self._agent = BaseAgent(
             tools=tools,
             system_prompt=_SYSTEM_PROMPT,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
             max_steps=max_steps,
             max_tokens=max_tokens,
         )
