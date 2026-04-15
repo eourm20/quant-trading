@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+import json
 from datetime import timedelta
 
 from worker.agents.base_agent import BaseAgent
@@ -56,6 +57,78 @@ class ResearchAgent:
             max_tokens=max_tokens,
         )
         self._target_unique_tools = max(0, int(target_unique_tools or 0))
+        self._preflight_used_tools: list[str] = []
+        self._preflight_missing_fields: list[str] = []
+
+    def _run_preflight(self) -> tuple[bool, dict, list[str]]:
+        """리서치 실행 전 필수 컨텍스트 강제 수집/검증."""
+        self._preflight_used_tools = []
+        required = [
+            "market_brief",
+            "rss_macro_brief",
+            "existing_exposure_check",
+            "basic_disclosure_context",
+        ]
+        ctx: dict = {}
+
+        def _call(name: str, **kwargs):
+            tool = self._agent._tool_map.get(name)
+            self._preflight_used_tools.append(name)
+            if not tool:
+                return {"error": f"tool_not_found:{name}"}
+            try:
+                return tool.execute(**kwargs)
+            except Exception as e:
+                return {"error": str(e)}
+
+        ctx["market_brief"] = _call("market_news_brief", max_items=5)
+        ctx["rss_macro_brief"] = _call("rss_macro_brief", max_total=6)
+        pf = _call("get_portfolio")
+
+        holdings_codes = set()
+        if isinstance(pf, dict):
+            for h in (pf.get("holdings") or []):
+                c = str(h.get("stock_code") or "").strip().lstrip("A")
+                if c:
+                    holdings_codes.add(c)
+
+        watchlist_codes = set()
+        try:
+            from data.db import get_watchlist
+            watchlist_codes = {str(w.get("code") or "").strip().lstrip("A") for w in get_watchlist()}
+            watchlist_codes = {c for c in watchlist_codes if c}
+        except Exception:
+            watchlist_codes = set()
+
+        overlaps = sorted(list(holdings_codes & watchlist_codes))
+        ctx["existing_exposure_check"] = {
+            "ok": True,
+            "holdings_count": len(holdings_codes),
+            "watchlist_count": len(watchlist_codes),
+            "duplicate_codes": overlaps,
+        }
+
+        proxy_code = ""
+        if holdings_codes:
+            proxy_code = next(iter(holdings_codes))
+        elif watchlist_codes:
+            proxy_code = next(iter(watchlist_codes))
+        else:
+            proxy_code = "005930"
+        ctx["basic_disclosure_context"] = _call("get_dart", stock_code=proxy_code)
+
+        validator = self._agent._tool_map.get("preflight_validator")
+        if not validator:
+            return False, ctx, ["preflight_validator"]
+        validation = validator.execute(
+            agent_type="research",
+            required_fields=required,
+            context=ctx,
+        )
+        missing = validation.get("missing_fields", []) if isinstance(validation, dict) else required
+        ok = bool(isinstance(validation, dict) and validation.get("ok") and not missing)
+        self._preflight_missing_fields = list(missing or [])
+        return ok, ctx, self._preflight_missing_fields
 
     def _build_performance_summary(self) -> str:
         """성과 요약을 고정 입력으로 주입하기 위한 텍스트."""
@@ -178,14 +251,45 @@ class ResearchAgent:
         kospi_rate, kosdaq_rate: 당일 지수 등락률
         max_candidates: 최대 분석 후보 수
         """
+        pre_ok, pre_ctx, missing = self._run_preflight()
+        logger.info(
+            f"[ResearchAgent] preflight_{'pass' if pre_ok else 'fail'} "
+            f"missing_fields={missing} used_tools={self._preflight_used_tools}"
+        )
+        if not pre_ok:
+            try:
+                from data.db import save_strategy_note
+                save_strategy_note(
+                    "general",
+                    "Research preflight fail",
+                    (
+                        "[REASSESS_REQUIRED] research preflight incomplete\n"
+                        f"missing_fields={','.join(missing)}\n"
+                        f"used_tools={','.join(self._preflight_used_tools)}"
+                    ),
+                )
+            except Exception:
+                pass
+            return f"INCOMPLETE_CONTEXT: missing_fields={','.join(missing)}"
+
         limit = max(1, int(max_candidates or 1))
         self._agent.configure_tool("add_to_watchlist", max_additions=limit, addition_count=0)
         self._agent.configure_run(target_unique_tools=self._target_unique_tools)
         perf_summary = self._build_performance_summary()
 
+        def _brief(v, limit=180):
+            text = json.dumps(v, ensure_ascii=False, default=str)
+            return text[:limit] + ("..." if len(text) > limit else "")
+
         initial_message = f"""## 오늘 시장 환경
 - KOSPI: {kospi_rate:+.2f}%
 - KOSDAQ: {kosdaq_rate:+.2f}%
+
+## Preflight Context (validated)
+- market_brief: {_brief(pre_ctx.get('market_brief', {}))}
+- rss_macro_brief: {_brief(pre_ctx.get('rss_macro_brief', {}))}
+- existing_exposure_check: {_brief(pre_ctx.get('existing_exposure_check', {}))}
+- basic_disclosure_context: {_brief(pre_ctx.get('basic_disclosure_context', {}))}
 
 ## 최근 성과 요약 (고정 반영 규칙)
 아래 요약은 참고가 아니라 필수 반영 대상입니다. 추천 판단 시 반드시 우선 반영하세요.

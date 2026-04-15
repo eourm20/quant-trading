@@ -82,6 +82,170 @@ class GetEntryReasonTool(BaseTool):
             return {"error": str(e)}
 
 
+class PositionContextBriefTool(BaseTool):
+    name = "position_context_brief"
+    label = "포지션 컨텍스트 요약"
+    description = (
+        "종목별 포지션 상태(평단/수량/목표가/손절가/추가매수가), 최근 전략노트, "
+        "현재가 기준 등락률(수익률)을 함께 요약합니다. "
+        "판단 전에 '왜 들어갔는지 + 지금 수익구간인지'를 빠르게 확인할 때 사용하세요."
+    )
+    input_schema = {
+        "properties": {
+            "stock_code": {"type": "string", "description": "종목 코드"},
+            "stock_name": {"type": "string", "description": "종목명(선택, 노트 매칭 보조)", "default": ""},
+            "notes_limit": {"type": "integer", "description": "전략 노트 최대 조회 건수", "default": 5},
+        },
+        "required": ["stock_code"],
+    }
+
+    @staticmethod
+    def _norm_code(code: str) -> str:
+        c = str(code or "").strip()
+        if c.startswith("A") and len(c) >= 7:
+            return c[1:]
+        return c
+
+    @staticmethod
+    def _to_int(v) -> int:
+        try:
+            return abs(int(float(str(v or "0").replace(",", "").strip() or "0")))
+        except Exception:
+            return 0
+
+    def execute(self, stock_code: str, stock_name: str = "", notes_limit: int = 5) -> dict:
+        try:
+            from data.db import get_position, get_strategy_notes
+            from worker.clients.kiwoom_client import KiwoomClient
+
+            code_norm = self._norm_code(stock_code)
+            position = get_position(code_norm) or {}
+            avg_price = self._to_int(position.get("avg_price"))
+            quantity = self._to_int(position.get("quantity"))
+
+            current_price = 0
+            current_price_source = "unknown"
+            try:
+                kw = KiwoomClient()
+                # 1) 실시간 현재가 API 우선
+                cp = kw.get_current_price(code_norm) or {}
+                current_price = self._to_int(
+                    cp.get("cur_prc") or cp.get("stk_prpr") or cp.get("prpr") or cp.get("current_price")
+                )
+                if current_price > 0:
+                    current_price_source = "kiwoom_current_price"
+                else:
+                    # 2) 폴백: 보유데이터
+                    holdings = kw.get_holdings()
+                    for h in holdings:
+                        h_code = self._norm_code(h.get("stk_cd") or h.get("stock_code", ""))
+                        if h_code == code_norm:
+                            current_price = self._to_int(h.get("cur_prc") or h.get("current_price"))
+                            if current_price > 0:
+                                current_price_source = "portfolio_fallback"
+                            break
+            except Exception:
+                pass
+
+            current_return_rate = None
+            if avg_price > 0 and current_price > 0:
+                current_return_rate = round((current_price - avg_price) / avg_price * 100.0, 2)
+
+            notes = get_strategy_notes(limit=50)
+            keywords = [kw for kw in [stock_name, code_norm] if kw]
+            if keywords:
+                def _match(n):
+                    text = str(n.get("summary", "")) + str(n.get("detail", ""))
+                    return any(kw in text for kw in keywords)
+                notes = [n for n in notes if _match(n)]
+            notes = notes[: max(1, int(notes_limit or 5))]
+
+            return {
+                "stock_code": code_norm,
+                "stock_name": stock_name or position.get("stock_name", ""),
+                "in_position": bool(position),
+                "position": {
+                    "avg_price": avg_price,
+                    "quantity": quantity,
+                    "target_price": self._to_int(position.get("target_price")),
+                    "stop_loss_price": self._to_int(position.get("stop_loss_price")),
+                    "add_buy_price": self._to_int(position.get("add_buy_price")),
+                    "strategy_note": position.get("strategy_note", "") or "",
+                },
+                "current_price": current_price,
+                "current_price_source": current_price_source,
+                "current_return_rate": current_return_rate,
+                "current_return_pct": current_return_rate,
+                "notes": notes,
+                "notes_count": len(notes),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class PreflightValidatorTool(BaseTool):
+    name = "preflight_validator"
+    label = "프리플라이트 검증"
+    description = (
+        "에이전트 실행 전 필수 컨텍스트 충족 여부를 검증합니다. "
+        "필수 항목 누락 시 missing_fields를 반환하고 INCOMPLETE_CONTEXT 처리에 사용하세요."
+    )
+    input_schema = {
+        "properties": {
+            "agent_type": {"type": "string", "description": "judgment 또는 research"},
+            "required_fields": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "필수 컨텍스트 키 목록",
+                "default": [],
+            },
+            "context": {
+                "type": "object",
+                "description": "컨텍스트 맵. required_fields의 키를 포함해야 함.",
+                "default": {},
+            },
+        },
+        "required": ["agent_type", "required_fields", "context"],
+    }
+
+    @staticmethod
+    def _is_present(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, dict):
+            if value.get("error"):
+                return False
+            if value.get("ok") is False and ("error" in value or "missing_fields" in value):
+                return False
+            if not value:
+                return False
+            return True
+        if isinstance(value, (list, tuple, set)):
+            return len(value) > 0
+        if isinstance(value, str):
+            return bool(value.strip())
+        return True
+
+    def execute(self, agent_type: str, required_fields: list[str], context: dict) -> dict:
+        try:
+            required = [str(x).strip() for x in (required_fields or []) if str(x).strip()]
+            missing = []
+            for key in required:
+                if key not in context or not self._is_present(context.get(key)):
+                    missing.append(key)
+            present = [k for k in required if k not in missing]
+            return {
+                "ok": len(missing) == 0,
+                "agent_type": agent_type,
+                "required_fields": required,
+                "present_fields": present,
+                "missing_fields": missing,
+                "incomplete_context": len(missing) > 0,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e), "missing_fields": required_fields or []}
+
+
 class UpdateWatchlistTool(BaseTool):
     name = "update_watchlist"
     label = "조건값 변경"

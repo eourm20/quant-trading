@@ -6,6 +6,7 @@ Judgment Agent — 신호 수신 시 AI가 도구를 스스로 호출하여 매�
 
 from __future__ import annotations
 import logging
+import json
 
 from worker.agents.base_agent import BaseAgent
 from worker.agents.tools.registry import load_judgment_tools
@@ -66,6 +67,59 @@ class JudgmentAgent:
             max_tokens=max_tokens,
         )
         self._target_unique_tools = max(0, int(target_unique_tools or 0))
+        self._preflight_used_tools: list[str] = []
+        self._preflight_missing_fields: list[str] = []
+
+    def _run_preflight(self, signal) -> tuple[bool, dict, list[str]]:
+        """필수 컨텍스트를 코드 파이프라인으로 강제 수집/검증."""
+        self._preflight_used_tools = []
+        required = [
+            "position_context",
+            "previous_judgment",
+            "market_brief",
+            "stock_news",
+            "macro_brief",
+        ]
+        ctx: dict = {}
+
+        def _call(name: str, **kwargs):
+            tool = self._agent._tool_map.get(name)
+            self._preflight_used_tools.append(name)
+            if not tool:
+                return {"error": f"tool_not_found:{name}"}
+            try:
+                return tool.execute(**kwargs)
+            except Exception as e:
+                return {"error": str(e)}
+
+        ctx["position_context"] = _call(
+            "position_context_brief",
+            stock_code=signal.stock_code,
+            stock_name=signal.stock_name,
+            notes_limit=5,
+        )
+        ctx["previous_judgment"] = _call(
+            "get_signal_history",
+            stock_code=signal.stock_code,
+            signal_type=signal.signal_type or "",
+            limit=5,
+        )
+        ctx["market_brief"] = _call("market_news_brief", max_items=5)
+        ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=5)
+        ctx["macro_brief"] = _call("rss_macro_brief", max_total=6)
+
+        validator = self._agent._tool_map.get("preflight_validator")
+        if not validator:
+            return False, ctx, ["preflight_validator"]
+        validation = validator.execute(
+            agent_type="judgment",
+            required_fields=required,
+            context=ctx,
+        )
+        missing = validation.get("missing_fields", []) if isinstance(validation, dict) else required
+        ok = bool(isinstance(validation, dict) and validation.get("ok") and not missing)
+        self._preflight_missing_fields = list(missing or [])
+        return ok, ctx, self._preflight_missing_fields
 
     def run(self, signal) -> str:
         """
@@ -91,7 +145,34 @@ class JudgmentAgent:
         is_holding = signal.in_portfolio
         signal_type = signal.signal_type
 
+        pre_ok, pre_ctx, missing = self._run_preflight(signal)
+        logger.info(
+            f"[JudgmentAgent] preflight_{'pass' if pre_ok else 'fail'} "
+            f"stock={signal.stock_name}({signal.stock_code}) "
+            f"missing_fields={missing} used_tools={self._preflight_used_tools}"
+        )
+        if not pre_ok:
+            try:
+                from data.db import save_strategy_note
+                save_strategy_note(
+                    "watchlist",
+                    f"{signal.stock_name} preflight fail",
+                    (
+                        "[REASSESS_REQUIRED] judgment preflight incomplete\n"
+                        f"stock_code={signal.stock_code}\n"
+                        f"missing_fields={','.join(missing)}\n"
+                        f"used_tools={','.join(self._preflight_used_tools)}"
+                    ),
+                )
+            except Exception:
+                pass
+            return f"INCOMPLETE_CONTEXT: missing_fields={','.join(missing)}"
+
         self._agent.configure_run(target_unique_tools=self._target_unique_tools)
+
+        def _brief(v, limit=200):
+            text = json.dumps(v, ensure_ascii=False, default=str)
+            return text[:limit] + ("..." if len(text) > limit else "")
 
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})
@@ -103,6 +184,13 @@ class JudgmentAgent:
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 - 매매 기간(horizon): {horizon or '미설정'}
 - 보유 여부: {'보유 중' if is_holding else '미보유'}
+
+## Preflight Context (validated)
+- position_context: {_brief(pre_ctx.get('position_context', {}))}
+- previous_judgment: {_brief(pre_ctx.get('previous_judgment', {}))}
+- market_brief: {_brief(pre_ctx.get('market_brief', {}))}
+- stock_news: {_brief(pre_ctx.get('stock_news', {}))}
+- macro_brief: {_brief(pre_ctx.get('macro_brief', {}))}
 
 상황을 파악하고 필요한 도구를 직접 선택하여 매매 판단을 내려주세요.
 Fallback chain if primary tool fails: search_agent_memory_context -> search_similar_signals -> get_trade_performance -> search_text_context."""

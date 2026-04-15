@@ -1954,6 +1954,11 @@ def main():
 
     scheduler.start()
     try:
+        logger.info("[초기화] scheduler start 직후 reassess_watchlist 1회 실행")
+        reassess_watchlist(kiwoom)
+    except Exception as e:
+        logger.warning(f"[초기화] 즉시 reassess_watchlist 실행 실패: {e}")
+    try:
         while True:
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):

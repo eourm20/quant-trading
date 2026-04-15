@@ -171,3 +171,134 @@ class GetGlobalMarketTool(BaseTool):
             return result
         except Exception as e:
             return {"error": str(e)}
+
+
+class MarketNewsBriefTool(BaseTool):
+    name = "market_news_brief"
+    label = "시장 브리프"
+    description = (
+        "당일 시장 흐름을 요약합니다. "
+        "KOSPI/KOSDAQ 지수, 글로벌 지수, 외인 순매수/거래량 급증 상위(수급 proxy), "
+        "시장 헤드라인 기반 섹터 분위기를 함께 반환합니다."
+    )
+    input_schema = {
+        "properties": {
+            "max_items": {
+                "type": "integer",
+                "description": "수급/헤드라인 최대 반영 건수",
+                "default": 5,
+            },
+        },
+        "required": [],
+    }
+
+    @staticmethod
+    def _to_int(v) -> int:
+        try:
+            return abs(int(float(str(v or "0").replace(",", "").strip() or "0")))
+        except Exception:
+            return 0
+
+    def execute(self, max_items: int = 5) -> dict:
+        try:
+            from worker.clients.kiwoom_client import KiwoomClient
+            from worker.clients.global_market import get_global_indices
+            from worker.clients.news_client import search_news, NAVER_CLIENT_ID
+
+            max_items = max(1, int(max_items or 5))
+            kw = KiwoomClient()
+
+            kospi = kw.get_market_index("kospi") or {}
+            kosdaq = kw.get_market_index("kosdaq") or {}
+
+            global_indices = get_global_indices() or {}
+            foreign_buy = (kw.get_foreign_net_buy() or [])[:max_items]
+            volume_surge = (kw.get_volume_surge() or [])[:max_items]
+
+            sector_headlines = []
+            if NAVER_CLIENT_ID:
+                try:
+                    sector_headlines = search_news("국내 증시 업종 수급", display=max_items, sort="date")
+                except Exception:
+                    sector_headlines = []
+
+            def _idx_payload(raw: dict) -> dict:
+                return {
+                    "current": str(raw.get("cur_prc") or raw.get("bstp_nmix_prpr") or ""),
+                    "change_rate": str(raw.get("flu_rt") or raw.get("bstp_nmix_prdy_ctrt") or ""),
+                }
+
+            def _stock_payload(rows: list[dict]) -> list[dict]:
+                out = []
+                for r in rows:
+                    out.append(
+                        {
+                            "stock_code": str(r.get("code") or r.get("stk_cd") or "").strip().lstrip("A"),
+                            "stock_name": str(r.get("name") or r.get("stk_nm") or "").strip(),
+                            "change_rate": str(r.get("flu_rt") or r.get("prdy_ctrt") or r.get("change_rate") or ""),
+                            "volume": self._to_int(r.get("trde_qty") or r.get("acml_vol") or r.get("volume")),
+                        }
+                    )
+                return out
+
+            headline_lines = [
+                f"{h.get('pub_date', '')} {str(h.get('title', '')).strip()[:70]}".strip()
+                for h in sector_headlines
+                if str(h.get("title", "")).strip()
+            ]
+
+            brief_lines = [
+                f"KOSPI {(_idx_payload(kospi).get('change_rate') or 'N/A')} / "
+                f"KOSDAQ {(_idx_payload(kosdaq).get('change_rate') or 'N/A')}",
+                f"외인순매수 상위 {len(foreign_buy)}종목, 거래량급증 상위 {len(volume_surge)}종목",
+            ]
+            if headline_lines:
+                brief_lines.append(f"섹터 헤드라인 {len(headline_lines)}건")
+
+            return {
+                "brief": " | ".join(brief_lines),
+                "indices": {
+                    "kospi": _idx_payload(kospi),
+                    "kosdaq": _idx_payload(kosdaq),
+                    "global": global_indices,
+                },
+                "flow": {
+                    "foreign_net_buy_top": _stock_payload(foreign_buy),
+                    "volume_surge_top": _stock_payload(volume_surge),
+                },
+                "sector_headlines": headline_lines[:max_items],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+
+class RssMacroBriefTool(BaseTool):
+    name = "rss_macro_brief"
+    label = "RSS 거시 브리프"
+    description = (
+        "RSS 기반 거시/정책/사회 이슈를 요약합니다. "
+        "당일 시장 판단 전에 외생 변수(정책, 국제, 사회 리스크) 컨텍스트를 확보할 때 사용하세요."
+    )
+    input_schema = {
+        "properties": {
+            "max_total": {
+                "type": "integer",
+                "description": "최대 헤드라인 수",
+                "default": 6,
+            },
+        },
+        "required": [],
+    }
+
+    def execute(self, max_total: int = 6) -> dict:
+        try:
+            from worker.clients.news_client import get_macro_news_for_ai
+
+            text = get_macro_news_for_ai(max_total=max_total)
+            if not text:
+                return {"brief": "관련 RSS 이슈 없음", "headlines": []}
+
+            lines = [ln.strip().lstrip("-").strip() for ln in str(text).splitlines() if ln.strip()]
+            return {"brief": text, "headlines": lines}
+        except Exception as e:
+            return {"error": str(e)}
