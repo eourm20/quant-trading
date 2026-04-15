@@ -1,12 +1,11 @@
 ﻿# Worker runtime config
 worker:
-  interval_seconds: 300
+  interval_seconds: 600
   sync_realtime_minutes: 10
   news_cooldown_hours: 8
   use_ai_judgment: true
   use_agent_mode: true
   ai_cache_minutes: 180
-  ai_max_calls_per_run: 2
   news_ai_max_calls_per_run: 2
   agent_max_steps: 7
   agent_max_tokens: 700

@@ -48,7 +48,8 @@ from worker.portfolio_sync import sync_all
 from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
-                     update_signal_result, update_signal_agent_trace, update_stock_field, save_strategy_note,
+                     update_signal_result, update_signal_agent_trace, save_agent_action_log, purge_agent_action_logs,
+                     update_stock_field, save_strategy_note,
                      get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
                      get_positions, get_position, update_position_field, create_position_from_trade,
                      save_realized_pnl_snapshot)
@@ -520,6 +521,16 @@ def run_weekly_self_correction():
 
 
 # 뉴스 알림 쿨다운: {stock_code: 마지막_알림_시각}
+def run_agent_action_log_refresh():
+    """Weekly rolling refresh for agent_action_logs."""
+    keep_days = max(1, int(_WORKER_CONFIG.get("agent_action_log_keep_days", 7)))
+    try:
+        deleted = purge_agent_action_logs(days=keep_days)
+        logger.info(f"[AgentTrace] rolling refresh complete: deleted={deleted}, keep_days={keep_days}")
+    except Exception as e:
+        logger.warning(f"[AgentTrace] rolling refresh failed: {e}")
+
+
 _news_alert_cooldown: dict = {}
 _NEWS_COOLDOWN_HOURS = int(_WORKER_CONFIG.get("news_cooldown_hours", 8))
 
@@ -1630,7 +1641,6 @@ def run_check():
 
     use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))
     ai_cache_minutes = int(_WORKER_CONFIG.get("ai_cache_minutes", 20))
-    ai_max_calls_per_run = max(0, int(_WORKER_CONFIG.get("ai_max_calls_per_run", 4)))
     ai_calls = 0
     holdings = get_portfolio()
 
@@ -1697,19 +1707,13 @@ def run_check():
                         claude_opinion = cached_opinion
                         logger.info(f"[{signal.stock_name}] AI 판단 캐시 재사용 ({ai_cache_minutes}분 TTL)")
                     else:
-                        if ai_calls >= ai_max_calls_per_run:
-                            logger.info(
-                                f"[{signal.stock_name}] AI 호출 예산 소진으로 스킵 "
-                                f"({ai_calls}/{ai_max_calls_per_run})"
-                            )
-                        else:
-                            sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
-                            claude_opinion = get_trade_opinion(
-                                signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
-                            )
-                            ai_calls += 1
-                            _set_cached_ai_opinion(signal, claude_opinion)
-                            logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
+                        sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
+                        claude_opinion = get_trade_opinion(
+                            signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
+                        )
+                        ai_calls += 1
+                        _set_cached_ai_opinion(signal, claude_opinion)
+                        logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
@@ -1768,6 +1772,15 @@ def run_check():
                             trace["tool_sequence"],
                             trace.get("reasoning_chain", []),
                         )
+                        save_agent_action_log(
+                            signal_id=signal_id,
+                            stock_code=signal.stock_code,
+                            stock_name=signal.stock_name,
+                            signal_type=getattr(signal, "signal_type", None),
+                            tool_sequence=trace["tool_sequence"],
+                            reasoning_chain=trace.get("reasoning_chain", []),
+                            final_opinion=claude_opinion,
+                        )
                         agent_tools_summary = " → ".join(trace["tool_sequence"])
                 except Exception as _e:
                     logger.debug(f"[AgentTrace] 저장 실패: {_e}")
@@ -1786,7 +1799,7 @@ def run_check():
                 else:
                     _paper_execute(signal, claude_opinion, signal_id)
 
-    logger.info(f"=== 조건 체크 완료 === (AI calls: {ai_calls}/{ai_max_calls_per_run})")
+    logger.info(f"=== 조건 체크 완료 === (AI calls: {ai_calls})")
 
 
 def main():
@@ -1858,6 +1871,9 @@ def main():
     scheduler.add_job(run_weekly_self_correction, "cron",
                       day_of_week="mon", hour=9, minute=5,
                       id="weekly_self_correction")
+    scheduler.add_job(run_agent_action_log_refresh, "cron",
+                      day_of_week="mon", hour=9, minute=10,
+                      id="weekly_agent_action_log_refresh")
     scheduler.add_job(update_paper_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="paper_result_update")
