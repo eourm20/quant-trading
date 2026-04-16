@@ -1324,6 +1324,39 @@ def _auto_execute(
         logger.info(f"[{signal.stock_name}] 자동 모드: AI 홀드 — 스킵")
         return
 
+    # 매수 직전마다 최신 예수금/실질 매수여력을 다시 산출해 stale budget 사용을 방지한다.
+    if order_type == "1":
+        try:
+            latest_deposit = int((kiwoom.get_deposit() or {}).get("order_available") or 0)
+            latest_buy_budget = latest_deposit
+            try:
+                from data.db import get_positions as _get_positions
+                holdings_now = get_portfolio()
+                positions_map = {p["stock_code"]: p for p in _get_positions()}
+                add_reserve = 0
+                for h in holdings_now:
+                    code = str(h.get("stock_code", ""))
+                    pos = positions_map.get(code)
+                    qty_h = int(h.get("quantity") or 0)
+                    if pos and pos.get("add_buy_price"):
+                        add_reserve += int(pos["add_buy_price"]) * int(qty_h * 0.5)
+                    else:
+                        add_reserve += int((h.get("eval_amount") or 0) * 0.15)
+                latest_buy_budget = max(0, latest_deposit - int(add_reserve))
+            except Exception as _reserve_e:
+                logger.warning(f"[{signal.stock_name}] 매수 직전 reserve 계산 실패, order_available 기준 사용: {_reserve_e}")
+
+            if latest_deposit != int(deposit or 0) or latest_buy_budget != int(buy_budget or 0):
+                logger.info(
+                    f"[{signal.stock_name}] 매수 직전 여력 재조회 반영: "
+                    f"deposit {int(deposit or 0):,}원 -> {latest_deposit:,}원, "
+                    f"buy_budget {int(buy_budget or 0):,}원 -> {latest_buy_budget:,}원"
+                )
+            deposit = latest_deposit
+            buy_budget = latest_buy_budget
+        except Exception as _deposit_e:
+            logger.warning(f"[{signal.stock_name}] 매수 직전 예수금 재조회 실패(기존값 사용): {_deposit_e}")
+
     strong_exit = _is_strong_exit_signal(signal) if order_type == "2" else False
     if order_type == "2" and strong_exit:
         _pending_weak_exit_confirm.pop(signal.stock_code, None)
@@ -1434,11 +1467,29 @@ def _auto_execute(
     # 하드캡: 매수 — 실질 매수 여력 초과 방지
     if order_type == "1" and signal.current_price > 0:
         budget = buy_budget if buy_budget > 0 else deposit
-        max_qty = budget // signal.current_price
+        max_qty_cash = budget // signal.current_price
+        max_qty_margin = None
+        try:
+            margin_check_price = order_price if order_price > 0 else signal.current_price
+            margin_info = kiwoom.get_orderable_qty_by_margin(signal.stock_code, margin_check_price)
+            margin_qty = int(margin_info.get("max_qty") or 0)
+            max_qty_margin = margin_qty
+            if margin_qty <= 0:
+                logger.info(
+                    f"[{signal.stock_name}] 증거금 주문가능수량이 0주로 조회되어 매수 스킵 "
+                    f"(kt00011, price={margin_check_price:,})"
+                )
+                return
+        except Exception as _margin_e:
+            logger.warning(f"[{signal.stock_name}] 증거금 가능수량 조회 실패(현금 하드캡만 적용): {_margin_e}")
+
+        max_qty = max_qty_cash if max_qty_margin is None else min(max_qty_cash, max_qty_margin)
         if qty > max_qty:
             logger.warning(
                 f"[{signal.stock_name}] 추천수량 {qty}주 → {max_qty}주로 조정 "
-                f"(매수여력 {budget:,}원 / 현재가 {signal.current_price:,}원)"
+                f"(현금기준 {max_qty_cash}주"
+                f"{f', 증거금기준 {max_qty_margin}주' if max_qty_margin is not None else ''} / "
+                f"매수여력 {budget:,}원 / 현재가 {signal.current_price:,}원)"
             )
             qty = max_qty
         if qty <= 0:

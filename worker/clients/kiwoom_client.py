@@ -394,6 +394,63 @@ class KiwoomClient:
             order_available = deposit
         return {"deposit": deposit, "order_available": order_available}
 
+    def get_orderable_qty_by_margin(self, stock_code: str, price: int = 0) -> dict:
+        """종목별 증거금 기준 주문가능수량 조회 (kt00011).
+        반환:
+          {
+            "stock_code": str,
+            "price": int,
+            "max_qty": int,          # 보수적으로 산출한 최대 가능 수량
+            "raw_qty_fields": dict,  # *_ord_alowq 계열 원시값
+            "raw": dict              # 원본 payload
+          }
+        """
+        body = {"stk_cd": stock_code}
+        if int(price or 0) > 0:
+            body["uv"] = str(int(price))
+
+        payload = self._post(
+            "/api/dostk/acnt",
+            "kt00011",
+            body,
+        )
+
+        def _int(v) -> int:
+            s = str(v or "0").replace(",", "").strip()
+            if not s:
+                return 0
+            try:
+                return abs(int(float(s)))
+            except Exception:
+                return 0
+
+        qty_fields = {}
+        for k, v in payload.items():
+            key = str(k or "")
+            if "ord_alowq" in key:
+                qty_fields[key] = _int(v)
+
+        # 우선순위:
+        # 1) 100% 증거금 가능수량 (가장 보수적)
+        # 2) min_ord_alowq
+        # 3) ord_alowq 계열 중 양수 최소값
+        max_qty = 0
+        if "profa_100ord_alowq" in qty_fields:
+            max_qty = qty_fields.get("profa_100ord_alowq", 0)
+        if max_qty <= 0 and "min_ord_alowq" in qty_fields:
+            max_qty = qty_fields.get("min_ord_alowq", 0)
+        if max_qty <= 0:
+            positives = [q for q in qty_fields.values() if q > 0]
+            max_qty = min(positives) if positives else 0
+
+        return {
+            "stock_code": stock_code,
+            "price": int(price or 0),
+            "max_qty": int(max_qty),
+            "raw_qty_fields": qty_fields,
+            "raw": payload,
+        }
+
     def get_market_index(self, market: str = "kospi") -> dict:
         """업종(지수) 현재가 조회 (ka20001)
         market: "kospi" 또는 "kosdaq"
