@@ -11,7 +11,7 @@ worker:
   # 예시(검증/리서치=Qwen): research_agent_model: "qwen-max"
   # 예시(외부 provider): *_agent_base_url, *_agent_api_key 설정
   # Single-agent style operation: use one model across judgment/research.
-  judgment_agent_model: "gpt-4.1-mini"
+  judgment_agent_model: "gpt-4.1"
   judgment_agent_base_url: ""
   judgment_agent_api_key: ""
   research_agent_model: "gpt-4.1-mini"

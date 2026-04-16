@@ -1263,16 +1263,27 @@ def _auto_execute(
         buy_tokens = ("[매수]", "[추가매수", "[물타기", " 매수", "매수 ", "buy", "entry")
         sell_tokens = ("[매도]", " 매도", "매도 ", "sell", "exit")
 
-        if any(tok in first for tok in buy_tokens):
+        # 1) 첫 줄에 명시된 단일 verdict를 최우선 사용
+        first_compact = first.replace(" ", "")
+        if first_compact.startswith("[매도]") or first_compact.startswith("매도"):
+            return "2", "매도"
+        if first_compact.startswith("[매수]") or first_compact.startswith("[추가매수") or first_compact.startswith("[물타기"):
             return "1", "매수"
-        if any(tok in first for tok in sell_tokens):
+        if first.startswith("[sell]") or first.startswith("sell") or first.startswith("exit"):
+            return "2", "매도"
+        if first.startswith("[buy]") or first.startswith("buy") or first.startswith("entry"):
+            return "1", "매수"
+
+        # 2) fallback: 상단 문맥에서 충돌 없이 한쪽만 검출될 때만 실행
+        buy_hit = any(tok in head for tok in buy_tokens)
+        sell_hit = any(tok in head for tok in sell_tokens)
+        if buy_hit and not sell_hit:
+            return "1", "매수"
+        if sell_hit and not buy_hit:
             return "2", "매도"
 
-        if any(tok in head for tok in buy_tokens):
-            return "1", "매수"
-        if any(tok in head for tok in sell_tokens):
-            return "2", "매도"
-
+        # 충돌/미검출은 오주문 방지를 위해 스킵
+        logger.warning("[order-detect] ambiguous opinion head; skip auto order")
         return None, None
 
     order_type, side = _detect_order_side(claude_opinion)
