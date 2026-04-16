@@ -43,6 +43,12 @@ worker:
   dip_buy_cooldown_hours: 6
   weak_exit_confirm_minutes: 20
   weak_exit_partial_ratio: 0.5
+  # qty 누락 시 정책: hold | fallback
+  missing_qty_policy: fallback
+  # fallback 매수 시 주문가능금액 대비 비중
+  fallback_buy_ratio: 0.10
+  min_target_profit_pct: 2.0
+  min_target_profit_krw: 100
   strong_exit_condition_ids: "stop_loss_price,target_price,ma20_support_break,death_cross,macd_death_cross,ichimoku_death_cross,ichimoku_cloud_breakdown,stochastic_death_cross"
   strategy_tuning:
     min_samples: 10

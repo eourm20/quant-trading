@@ -1246,12 +1246,37 @@ def _auto_execute(
 ) -> None:
     """AI 판단이 매수/매도이고 추천수량이 있으면 자동 주문 실행. 추천수량 없으면 홀드."""
     import re
-    first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
-    if "[매수]" in first_line or "[추가매수" in first_line or "[물타기" in first_line:
-        order_type, side = "1", "매수"
-    elif "[매도]" in first_line:
-        order_type, side = "2", "매도"
-    else:
+
+    def _detect_order_side(opinion_text: str) -> tuple[str | None, str | None]:
+        """Bracket 형식이 없어도 매수/매도 의도를 최대한 안정적으로 판별."""
+        if not isinstance(opinion_text, str):
+            return None, None
+
+        lines = [ln.strip() for ln in opinion_text.splitlines() if ln.strip()]
+        first = (lines[0] if lines else "").lower()
+        head = "\n".join(lines[:3]).lower()
+
+        # 홀드/관망 표현이 있으면 우선 실행 금지
+        if any(tok in first for tok in ("[hold]", "hold", "홀드", "관망")):
+            return None, None
+
+        buy_tokens = ("[매수]", "[추가매수", "[물타기", " 매수", "매수 ", "buy", "entry")
+        sell_tokens = ("[매도]", " 매도", "매도 ", "sell", "exit")
+
+        if any(tok in first for tok in buy_tokens):
+            return "1", "매수"
+        if any(tok in first for tok in sell_tokens):
+            return "2", "매도"
+
+        if any(tok in head for tok in buy_tokens):
+            return "1", "매수"
+        if any(tok in head for tok in sell_tokens):
+            return "2", "매도"
+
+        return None, None
+
+    order_type, side = _detect_order_side(claude_opinion)
+    if not order_type:
         logger.info(f"[{signal.stock_name}] 자동 모드: AI 홀드 — 스킵")
         return
 
@@ -1288,22 +1313,36 @@ def _auto_execute(
                 order_price = signal.current_price
 
     # 매도인데 추천수량 없으면 보유 전량으로 처리
-    if not qty and order_type == "2":
-        holdings = get_portfolio()
-        qty = next(
-            (int(h.get("quantity") or 0) for h in holdings
-             if str(h.get("stock_code", "")) == signal.stock_code),
-            0,
-        )
-        if qty > 0:
-            logger.info(f"[{signal.stock_name}] 매도 추천수량 미기재 → 보유 전량 {qty}주로 처리")
-        else:
-            logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
-            return
+    missing_qty_policy = str(_WORKER_CONFIG.get("missing_qty_policy", "fallback")).strip().lower()
+    fallback_buy_ratio = float(_WORKER_CONFIG.get("fallback_buy_ratio", 0.1))
+    fallback_buy_ratio = min(1.0, max(0.01, fallback_buy_ratio))
+
+    if not qty and missing_qty_policy == "fallback":
+        if order_type == "2":
+            holdings = get_portfolio()
+            qty = next(
+                (int(h.get("quantity") or 0) for h in holdings
+                 if str(h.get("stock_code", "")) == signal.stock_code),
+                0,
+            )
+            if qty > 0:
+                logger.info(f"[{signal.stock_name}] ?? ?? ??(??): ???? {qty}? ??")
+        elif order_type == "1" and signal.current_price > 0:
+            budget = buy_budget if buy_budget > 0 else deposit
+            alloc = int(budget * fallback_buy_ratio)
+            qty = alloc // signal.current_price
+            if qty <= 0 and budget >= signal.current_price:
+                qty = 1
+            if qty > 0:
+                logger.info(
+                    f"[{signal.stock_name}] ?? ?? ??(??): {qty}? "
+                    f"(budget={budget:,}, ratio={fallback_buy_ratio:.2f})"
+                )
 
     if not qty:
-        logger.info(f"[{signal.stock_name}] 자동 모드: 추천수량 없음 — 홀드")
+        logger.info(f"[{signal.stock_name}] ?? ??: ???? ?? ? ??")
         return
+
 
     # Adaptive policy gate from historical similar outcomes.
     adaptive = None
@@ -1624,6 +1663,26 @@ def _set_position_by_ai(stock_code: str, stock_name: str, current_price: int, qt
         tp = result.get("target_price", 0)
         sl = result.get("stop_loss_price", 0)
         ab = result.get("add_buy_price", 0)
+
+        # Guardrail: prevent ultra-tight target prices that trigger instant tiny-profit exits.
+        try:
+            min_target_profit_pct = float(_WORKER_CONFIG.get("min_target_profit_pct", 2.0))
+        except Exception:
+            min_target_profit_pct = 2.0
+        try:
+            min_target_profit_krw = int(_WORKER_CONFIG.get("min_target_profit_krw", 100))
+        except Exception:
+            min_target_profit_krw = 100
+
+        if tp and avg_price > 0:
+            min_tp_by_pct = int(round(avg_price * (1.0 + (min_target_profit_pct / 100.0))))
+            min_tp = max(min_tp_by_pct, avg_price + max(0, min_target_profit_krw))
+            if tp < min_tp:
+                logger.info(
+                    f"[{stock_name}] AI 목표가 보정: {tp:,} -> {min_tp:,} "
+                    f"(min_profit={min_target_profit_pct:.2f}%, min_krw={min_target_profit_krw})"
+                )
+                tp = min_tp
 
         if tp:
             update_position_field(stock_code, "target_price", tp)
