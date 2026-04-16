@@ -193,6 +193,39 @@ def _confirm_weak_exit_ready(stock_code: str) -> bool:
     return False
 
 
+def _parse_trade_dt(value: str) -> datetime | None:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return None
+
+
+def _has_recent_buy_trade(stock_code: str, within_minutes: int) -> bool:
+    if within_minutes <= 0:
+        return False
+    try:
+        from data.db import get_recent_trades_for_stock
+
+        now = _now_kst()
+        trades = get_recent_trades_for_stock(stock_code, days=3) or []
+        for t in trades:
+            if str(t.get("side") or "").strip() != "매수":
+                continue
+            dt = _parse_trade_dt(t.get("executed_at"))
+            if not dt:
+                continue
+            if (now - dt).total_seconds() <= within_minutes * 60:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _parse_ymd(value: str) -> str:
     s = str(value or "").replace("-", "").strip()
     return s if len(s) == 8 and s.isdigit() else ""
@@ -1354,6 +1387,21 @@ def _auto_execute(
         logger.info(f"[{signal.stock_name}] ?? ??: ???? ?? ? ??")
         return
 
+    if order_type == "1":
+        buy_reentry_block_minutes = max(0, int(_WORKER_CONFIG.get("buy_reentry_block_minutes", 60)))
+        if _has_recent_buy_trade(signal.stock_code, buy_reentry_block_minutes):
+            logger.info(
+                f"[{signal.stock_name}] 최근 매수 이력({buy_reentry_block_minutes}분 이내)로 재매수 차단"
+            )
+            return
+
+        signal_type = str(getattr(signal, "signal_type", "") or "")
+        if signal.in_portfolio and signal_type != "add":
+            logger.info(
+                f"[{signal.stock_name}] 보유 종목 비-add 신호에서 매수 차단 (signal_type={signal_type or 'unknown'})"
+            )
+            return
+
 
     # Adaptive policy gate from historical similar outcomes.
     adaptive = None
@@ -1457,7 +1505,8 @@ def _auto_execute(
                 logger.warning(f"[{signal.stock_name}] 모의투자 체결 DB 저장 실패: {_e}")
 
         from data.db import reset_cooldowns_for_stock, update_signal_action, save_strategy_note, set_add_cooldown_after_trade
-        reset_cooldowns_for_stock(signal.stock_code)
+        if order_type != "1":
+            reset_cooldowns_for_stock(signal.stock_code)
         if order_type == "1":
             set_add_cooldown_after_trade(signal.stock_code)
             # 매수 직후 1시간 동안 entry 신호 재발동 방지
@@ -1820,7 +1869,12 @@ def run_check():
             claude_opinion = None
             if use_claude:
                 try:
-                    cached_opinion = _get_cached_ai_opinion(signal, ai_cache_minutes)
+                    cache_allowed = (
+                        ai_cache_minutes > 0
+                        and not bool(getattr(signal, "in_portfolio", False))
+                        and str(getattr(signal, "signal_type", "") or "") in ("entry", "both")
+                    )
+                    cached_opinion = _get_cached_ai_opinion(signal, ai_cache_minutes) if cache_allowed else None
                     if cached_opinion:
                         claude_opinion = cached_opinion
                         logger.info(f"[{signal.stock_name}] AI 판단 캐시 재사용 ({ai_cache_minutes}분 TTL)")
@@ -1830,7 +1884,8 @@ def run_check():
                             signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
                         )
                         ai_calls += 1
-                        _set_cached_ai_opinion(signal, claude_opinion)
+                        if cache_allowed:
+                            _set_cached_ai_opinion(signal, claude_opinion)
                         logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")

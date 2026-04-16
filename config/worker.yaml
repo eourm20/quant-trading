@@ -18,6 +18,7 @@ worker:
   research_agent_base_url: ""
   research_agent_api_key: ""
   ai_cache_minutes: 180
+  buy_reentry_block_minutes: 60
   news_ai_max_calls_per_run: 1
   agent_max_steps: 7
   agent_max_tokens: 550
