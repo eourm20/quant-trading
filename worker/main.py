@@ -1904,14 +1904,14 @@ def run_check():
         logger.debug("장 운영 시간 외 - 스킵")
         return
 
+    # Run check only in regular session (both real/mock).
+    if session != "main":
+        logger.info(f"??? ? ??({session}) - run_check ??")
+        return
+
     # DB에서 최신 종목/조건 로드 (MCP로 변경 시 즉시 반영)
     stocks = [s for s in get_watchlist() if s.get("enabled", False)]
     conditions = load_conditions()
-
-    # 정규장 외 세션: entry 조건 제외 (exit/add/both만)
-    if session != "main":
-        conditions = [c for c in conditions if c.get("signal_type", "both") != "entry"]
-
     logger.info(f"=== 조건 체크 시작 [{session}] ({len(stocks)}개 종목, {len(conditions)}개 조건) ===")
 
     use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))
