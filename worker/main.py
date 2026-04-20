@@ -413,7 +413,7 @@ def _maybe_save_hold_conditions(signal, opinion: str):
 
 
 def run_weekly_performance_report():
-    """매주 월요일 09:00 — 지난주 AI 신호 성과 리포트를 전략 노트에 기록하고 텔레그램 발송."""
+    """매주 월요일 09:00 - 지난주 AI 신호 성과 리포트를 전략 노트에 기록하고 텔레그램 발송."""
     from data.db import get_weekly_performance_report, save_strategy_note
     from notifications.telegram import send_message
 
@@ -425,89 +425,111 @@ def run_weekly_performance_report():
         return
 
     if not rpt or rpt.get("rated_count", 0) == 0:
-        logger.info("[성과리포트] 최근 7일 평가 가능 신호 없음 — 스킵")
+        logger.info("[성과리포트] 최근 7일 평가 가능 신호 없음 - 스킵")
         return
 
-    rated = rpt["rated_count"]
-    total = rpt["signal_count"]
-    wr = rpt["win_rate_3d"]
-    avg3 = rpt["avg_return_3d"]
-    avg1 = rpt["avg_return_1d"]
-    avg5 = rpt["avg_return_5d"]
-    best = rpt.get("best_stock") or {}
-    worst = rpt.get("worst_stock") or {}
+    def _section_lines(title: str, block: dict) -> list[str]:
+        total = int(block.get("signal_count") or 0)
+        rated = int(block.get("rated_count") or 0)
+        lines = [f"## {title}", f"- 신호 {total}건 (평가 {rated}건)"]
 
-    # ── 판정별 요약 ──
-    vbd = rpt.get("verdict_breakdown", {})
-    vbd_lines = []
-    for v, s in vbd.items():
-        vbd_lines.append(
-            f"  [{v}] {s['count']}건 | 승률 {s['win_rate']}% | 평균 {s['avg_return']:+.2f}%"
-        )
+        if rated == 0:
+            lines.append("- 평가 완료된 신호 없음")
+            return lines
 
-    # ── 모의투자 요약 ──
-    paper = rpt.get("paper_summary")
-    paper_line = ""
-    if paper and paper.get("count"):
-        paper_line = (
-            f"\n📋 모의투자: {paper['count']}건 | 승률 {paper.get('win_rate', '-')}% | "
-            f"평균 {paper.get('avg_return', 0):+.2f}%"
-        )
+        wr = block.get("win_rate_3d")
+        avg3 = block.get("avg_return_3d")
+        avg1 = block.get("avg_return_1d")
+        avg5 = block.get("avg_return_5d")
+        lines.append(f"- 승률 {wr}% | 3일 평균 {avg3:+.2f}%")
+        if avg1 is not None:
+            lines.append(f"- 1일 평균 {avg1:+.2f}%")
+        if avg5 is not None:
+            lines.append(f"- 5일 평균 {avg5:+.2f}%")
+
+        vbd = block.get("verdict_breakdown", {})
+        if vbd:
+            lines.append("- 판정별")
+            for verdict, stat in vbd.items():
+                lines.append(
+                    f"  [{verdict}] {stat['count']}건 | 승률 {stat['win_rate']}% | 평균 {stat['avg_return']:+.2f}%"
+                )
+
+        best = block.get("best_stock") or {}
+        worst = block.get("worst_stock") or {}
+        if best:
+            lines.append(f"- 최고: {best.get('name', '?')} ({best.get('return', 0):+.2f}%)")
+        if worst:
+            lines.append(f"- 최악: {worst.get('name', '?')} ({worst.get('return', 0):+.2f}%)")
+        return lines
+
+    total_block = {
+        "signal_count": rpt.get("signal_count"),
+        "rated_count": rpt.get("rated_count"),
+        "win_rate_3d": rpt.get("win_rate_3d"),
+        "avg_return_3d": rpt.get("avg_return_3d"),
+        "avg_return_1d": rpt.get("avg_return_1d"),
+        "avg_return_5d": rpt.get("avg_return_5d"),
+        "best_stock": rpt.get("best_stock"),
+        "worst_stock": rpt.get("worst_stock"),
+        "verdict_breakdown": rpt.get("verdict_breakdown") or {},
+    }
+    portfolio_block = rpt.get("portfolio") or {}
+    watchlist_block = rpt.get("watchlist") or {}
 
     summary = (
-        f"주간 성과 리포트 — 신호 {total}건 / 평가 {rated}건 / "
-        f"승률 {wr}% / 3일평균 {avg3:+.2f}%"
+        f"주간 성과 리포트(통합/포트/워치) - 통합 신호 {total_block['signal_count']}건 / "
+        f"평가 {total_block['rated_count']}건 / 승률 {total_block['win_rate_3d']}% / "
+        f"3일평균 {total_block['avg_return_3d']:+.2f}%"
     )
 
-    detail_parts = [
-        f"## 주간 성과 요약 (최근 7일)",
-        f"- 총 신호: {total}건 (평가 완료: {rated}건)",
-        f"- 3일 승률: {wr}% | 평균 수익: {avg3:+.2f}%",
-    ]
-    if avg1 is not None:
-        detail_parts.append(f"- 1일 평균: {avg1:+.2f}%")
-    if avg5 is not None:
-        detail_parts.append(f"- 5일 평균: {avg5:+.2f}%")
-    if best:
-        detail_parts.append(f"- 최고 수익: {best.get('name','?')} ({best.get('return', 0):+.2f}%)")
-    if worst:
-        detail_parts.append(f"- 최대 손실: {worst.get('name','?')} ({worst.get('return', 0):+.2f}%)")
-    if vbd_lines:
-        detail_parts.append("\n## 판정별 성과")
-        detail_parts.extend(vbd_lines)
-    if paper_line:
-        detail_parts.append(paper_line)
+    detail_parts = [f"## 주간 성과 요약 (최근 {int(rpt.get('period_days') or 7)}일)"]
+    detail_parts.extend(_section_lines("통합", total_block))
+    detail_parts.append("")
+    detail_parts.extend(_section_lines("Portfolio (보유 종목 기반)", portfolio_block))
+    detail_parts.append("")
+    detail_parts.extend(_section_lines("Watchlist (비보유 종목 기반)", watchlist_block))
+
+    paper = rpt.get("paper_summary")
+    if paper and paper.get("count"):
+        detail_parts.append("")
+        detail_parts.append(
+            f"- 모의투자: {paper['count']}건 | 승률 {paper.get('win_rate', '-')}% | 평균 {paper.get('avg_return', 0):+.2f}%"
+        )
 
     detail = "\n".join(detail_parts)
 
     try:
         save_strategy_note(category="general", summary=summary, detail=detail)
-        logger.info(f"[성과리포트] 전략 노트 저장 완료")
+        logger.info("[성과리포트] 전략 노트 저장 완료")
     except Exception as e:
         logger.warning(f"[성과리포트] 전략 노트 저장 실패: {e}")
         return
 
-    # 텔레그램 발송
     try:
-        msg = (
-            f"📈 *주간 성과 리포트*\n\n"
-            f"신호 {total}건 (평가 {rated}건)\n"
-            f"승률 {wr}% | 3일 평균 {avg3:+.2f}%\n"
-        )
-        if avg1 is not None:
-            msg += f"1일 평균 {avg1:+.2f}%"
-        if avg5 is not None:
-            msg += f" | 5일 평균 {avg5:+.2f}%"
-        msg += "\n"
-        for line in vbd_lines:
-            msg += f"\n{line.strip()}"
-        if best:
-            msg += f"\n\n🏆 최고: {best.get('name','?')} {best.get('return', 0):+.2f}%"
-        if worst:
-            msg += f"\n💀 최악: {worst.get('name','?')} {worst.get('return', 0):+.2f}%"
-        if paper_line:
-            msg += f"\n{paper_line.strip()}"
-        send_message(msg)
+        msg_lines = ["📈 *주간 성과 리포트*", ""]
+
+        def _telegram_section(title: str, block: dict):
+            total = int(block.get("signal_count") or 0)
+            rated = int(block.get("rated_count") or 0)
+            msg_lines.append(f"*{title}*")
+            msg_lines.append(f"신호 {total}건 (평가 {rated}건)")
+            if rated > 0:
+                msg_lines.append(
+                    f"승률 {block.get('win_rate_3d')}% | 3일 평균 {block.get('avg_return_3d'):+.2f}%"
+                )
+                vbd = block.get("verdict_breakdown", {})
+                for verdict, stat in vbd.items():
+                    msg_lines.append(
+                        f"{verdict} {stat['count']}건 | 승률 {stat['win_rate']}% | 평균 {stat['avg_return']:+.2f}%"
+                    )
+            msg_lines.append("")
+
+        _telegram_section("통합", total_block)
+        _telegram_section("Portfolio", portfolio_block)
+        _telegram_section("Watchlist", watchlist_block)
+
+        send_message("\n".join(msg_lines).strip())
     except Exception as e:
         logger.debug(f"[성과리포트] 텔레그램 발송 실패: {e}")
 
