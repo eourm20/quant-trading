@@ -9,7 +9,9 @@ import argparse
 import logging
 import logging.handlers
 import os
+import signal
 import sys
+import threading
 import time
 from datetime import datetime, time as dtime, timezone, timedelta as _td
 
@@ -100,6 +102,12 @@ _post_buy_lock: dict[str, datetime] = {}
 _ai_judgment_cache: dict[str, tuple[datetime, str]] = {}
 _rag_pending_signal_ids: set[int] = set()
 _pending_weak_exit_confirm: dict[str, datetime] = {}
+_shutdown_event = threading.Event()
+
+
+def _handle_shutdown_signal(signum, _frame):
+    logger.info(f"[종료신호] signal={signum}")
+    _shutdown_event.set()
 
 # KRX 거래 세션 (규정값)
 _SESSIONS: dict[str, tuple[dtime, dtime]] = {
@@ -2258,15 +2266,29 @@ def main():
             )
     run_check()
 
+    for sig_name in ("SIGTERM", "SIGINT"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handle_shutdown_signal)
+        except Exception:
+            pass
+
     scheduler.start()
-    logger.info("[초기화] reassess_watchlist는 스케줄 시간에만 실행")
+    logger.info("[shutdown] worker loop started")
     try:
-        while True:
+        while not _shutdown_event.is_set():
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown(wait=False)
-        logger.info("워커 종료")
-        send_message("🛑 Quant Trading 워커가 종료되었습니다.")
+        _shutdown_event.set()
+    finally:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        logger.info("worker terminated")
+        send_message("?? Quant Trading ??? ???????.")
 
 
 if __name__ == "__main__":
