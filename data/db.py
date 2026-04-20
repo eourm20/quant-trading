@@ -46,6 +46,24 @@ def _f(value) -> float:
         return 0.0
 
 
+# HOLD verdict is treated as "correct" when return stays in neutral band.
+HOLD_NEUTRAL_BAND_PCT = max(0.0, float(os.getenv("HOLD_NEUTRAL_BAND_PCT", "1.0")))
+
+
+def _is_verdict_hit_3d(verdict: str | None, return_3d: float | None, hold_band_pct: float = HOLD_NEUTRAL_BAND_PCT) -> bool:
+    if verdict is None or return_3d is None:
+        return False
+    band = max(0.0, float(hold_band_pct))
+    r3 = float(return_3d)
+    if verdict == "매수":
+        return r3 > band
+    if verdict == "매도":
+        return r3 < -band
+    if verdict == "홀드":
+        return -band <= r3 <= band
+    return False
+
+
 _WL_SIGNAL_FIELDS = (
     "rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
     "volume_surge_ratio", "cci_oversold", "cci_overbought",
@@ -1840,9 +1858,7 @@ def get_verdict_accuracy(days: int = 14) -> dict:
         s["count"] += 1
         r3 = r["result_pct"] or 0
         s["sum_3d"] += r3
-        if v in ("매수", "홀드") and r3 > 0:
-            s["hit_3d"] += 1
-        elif v == "매도" and r3 < 0:
+        if _is_verdict_hit_3d(v, r3):
             s["hit_3d"] += 1
         if r["result_1d"] is not None:
             s["sum_1d"] += r["result_1d"]
@@ -1988,7 +2004,7 @@ def get_condition_accuracy(days: int = 30, min_count: int = 3) -> list[dict]:
             s = stats[cond]
             s["count"] += 1
             s["sum_3d"] += r3
-            if (v in ("매수", "홀드") and r3 > 0) or (v == "매도" and r3 < 0):
+            if _is_verdict_hit_3d(v, r3):
                 s["hit_3d"] += 1
             if r5 is not None:
                 s["sum_5d"] += r5
@@ -2039,7 +2055,7 @@ def get_pattern_accuracy(days: int = 30, min_count: int = 2) -> list[dict]:
             s = stats[pat]
             s["count"] += 1
             s["sum_3d"] += r3
-            if (v in ("매수", "홀드") and r3 > 0) or (v == "매도" and r3 < 0):
+            if _is_verdict_hit_3d(v, r3):
                 s["hit_3d"] += 1
 
     result = []
@@ -2130,12 +2146,7 @@ def get_weekly_performance_report(days: int = 7) -> dict:
             }
 
         returns_3d = [r["result_3d"] for r in rated]
-        wins = sum(
-            1
-            for r in rated
-            if (r["verdict"] in ("매수", "홀드") and r["result_3d"] > 0)
-            or (r["verdict"] == "매도" and r["result_3d"] < 0)
-        )
+        wins = sum(1 for r in rated if _is_verdict_hit_3d(r["verdict"], r["result_3d"]))
         win_rate = round(wins / rated_count * 100, 1)
         avg_3d = round(sum(returns_3d) / rated_count, 2)
 
@@ -2158,9 +2169,7 @@ def get_weekly_performance_report(days: int = 7) -> dict:
             s = vbreakdown[verdict]
             s["count"] += 1
             s["sum_3d"] += r["result_3d"]
-            if (verdict in ("매수", "홀드") and r["result_3d"] > 0) or (
-                verdict == "매도" and r["result_3d"] < 0
-            ):
+            if _is_verdict_hit_3d(verdict, r["result_3d"]):
                 s["wins"] += 1
 
         verdict_breakdown = {
