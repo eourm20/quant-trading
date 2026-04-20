@@ -382,7 +382,9 @@ add_to_watchlist 호출은 최대 {limit}회까지만 허용됩니다.
 
 Output format constraints (keep concise):
 - Maximum 12 lines total.
-- For each selected stock, output only: "<stock>(<code>): decision" / "reason" / "watchlist: done|not added(reason)".
+- For each selected stock, output only: "<stock>(<code>): <decision>" / "reason: <text>" / "watchlist: done|not added(reason)".
+- Allowed decision values are strictly one of: "편입", "보류", "부적합".
+- Do not repeat labels in decision field (forbidden examples: "편입 여부 편입", "decision: 편입").
 - No long background explanation, no duplicated wording.
 Tool coverage constraints:
 - Use at least {self._target_unique_tools} distinct tools before final answer, unless hard failures occur.

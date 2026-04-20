@@ -126,6 +126,10 @@ def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
         norm = norm.strip("`")
         if not norm:
             continue
+        # Normalize duplicated decision labels like "편입 여부 편입" -> "편입".
+        norm = re.sub(r":\s*편입\s*여부\s*(편입|보류|부적합)", r": \1", norm)
+        norm = re.sub(r":\s*decision\s*:\s*(편입|보류|부적합)", r": \1", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\s+", " ", norm).strip()
 
         # Example: "1. 남해화학(025860): 편입 적합"
         if re.match(r"^\d+\.\s+", norm):
