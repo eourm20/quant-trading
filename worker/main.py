@@ -2288,7 +2288,7 @@ def main():
         except Exception:
             pass
         logger.info("worker terminated")
-        send_message("?? Quant Trading ??? ???????.")
+        send_message("🛑 Quant Trading 워커가 종료되었습니다.")
 
 
 if __name__ == "__main__":
