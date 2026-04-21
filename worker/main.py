@@ -181,8 +181,9 @@ def _is_strong_exit_signal(signal) -> bool:
         return True
 
     # Fallback: condition text hints for hard exits.
+    # "목표가" 제외: 목표가 도달은 AI가 모멘텀 보고 부분/전량 판단 (hard_keywords에서 분리)
     text = " ".join(str(x) for x in (getattr(signal, "triggered_conditions", []) or []))
-    hard_keywords = ("손절", "목표가", "데드크로스", "하향 이탈", "구름대 이탈")
+    hard_keywords = ("손절", "데드크로스", "하향 이탈", "구름대 이탈")
     return any(k in text for k in hard_keywords)
 
 
@@ -1630,6 +1631,30 @@ def _auto_execute(
         # 매수 후 AI 포지션 판단 (목표가/손절가/추가매수가 설정)
         if order_type == "1":
             _set_position_by_ai(signal.stock_code, signal.stock_name, signal.current_price, qty)
+        # 부분 익절 후 손절가 자동 상향 (잔량 보호)
+        if order_type == "2" and held_qty_before > 0 and qty < held_qty_before:
+            _sell_price = signal.current_price or order_price or 0
+            if _sell_price > 0:
+                try:
+                    from data.db import get_positions as _get_pos, update_position_field as _upd_pos
+                    _pos = next((p for p in _get_pos() if p.get("stock_code") == signal.stock_code), None)
+                    if _pos:
+                        _cur_stop = _pos.get("stop_loss_price") or 0
+                        _new_stop = int(_sell_price * 0.97)
+                        if _new_stop > _cur_stop:
+                            _upd_pos(signal.stock_code, "stop_loss_price", _new_stop)
+                            logger.info(
+                                f"[{signal.stock_name}] 부분 익절 후 손절가 자동 상향: "
+                                f"{_cur_stop:,}원 → {_new_stop:,}원 (매도가 {_sell_price:,}원 × 0.97)"
+                            )
+                            send_message(
+                                f"🔒 *손절가 자동 상향*\n"
+                                f"종목: *{signal.stock_name}*\n"
+                                f"부분 익절 {qty}주 후 잔량 보호\n"
+                                f"손절가: {_cur_stop:,}원 → {_new_stop:,}원"
+                            )
+                except Exception as _sl_e:
+                    logger.warning(f"[{signal.stock_name}] 부분 익절 후 손절가 자동 상향 실패: {_sl_e}")
         # 전량 매도 후 watchlist 처리 (유효 결정 없으면 기본 drop)
         if order_type == "2" and held_qty_before > 0 and qty >= held_qty_before:
             _apply_post_sell_watchlist_decision(signal, claude_opinion)
@@ -1912,6 +1937,29 @@ def run_check():
     # DB에서 최신 종목/조건 로드 (MCP로 변경 시 즉시 반영)
     stocks = [s for s in get_watchlist() if s.get("enabled", False)]
     conditions = load_conditions()
+
+    # R/R 기반 처리 우선순위 정렬: entry 신호 경합 시 R/R 높은 종목부터 처리해 현금 배분 최적화
+    # positions에 저장된 avg_price·target_price·stop_loss_price로 R/R 추정
+    # 미보유(positions 없음) 종목은 watchlist의 target/stop 사용, 없으면 0으로 뒤로 밀림
+    try:
+        from data.db import get_positions as _get_positions_sort
+        _pos_map = {p["stock_code"]: p for p in _get_positions_sort()}
+
+        def _rr_score(stock: dict) -> float:
+            code = stock.get("code", "")
+            pos = _pos_map.get(code, {})
+            target = pos.get("target_price") or stock.get("target_price") or 0
+            stop   = pos.get("stop_loss_price") or stock.get("stop_loss_price") or 0
+            avg    = pos.get("avg_price") or stock.get("avg_price") or 0
+            if target and stop and avg and avg > stop:
+                return (target - avg) / (avg - stop)
+            return 0.0
+
+        stocks.sort(key=_rr_score, reverse=True)
+        logger.debug(f"[우선순위] R/R 기준 정렬 완료: {[s.get('name','') for s in stocks]}")
+    except Exception as _sort_e:
+        logger.warning(f"[우선순위] R/R 정렬 실패, 기본 순서 유지: {_sort_e}")
+
     logger.info(f"=== 조건 체크 시작 [{session}] ({len(stocks)}개 종목, {len(conditions)}개 조건) ===")
 
     use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))

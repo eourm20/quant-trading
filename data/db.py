@@ -1498,9 +1498,22 @@ def _extract_verdict(claude_opinion: str | None) -> str | None:
     if not claude_opinion:
         return None
     first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
+    # 정확한 패턴: [매수], [매도], [홀드]
     for v in ["매수", "매도", "홀드"]:
         if f"[{v}]" in first_line:
             return v
+    # 복합 패턴: [추가매수(매수)], [물타기(매수)] 등
+    for v in ["매수", "매도", "홀드"]:
+        if "[" in first_line and f"({v})" in first_line:
+            return v
+    # 대괄호 없이 시작하는 패턴: "매수 — ...", "매도\n..."
+    for v in ["매수", "매도", "홀드"]:
+        if first_line.startswith(v):
+            return v
+    # 첫 단어가 판정인 경우
+    words = [w.strip() for w in first_line.split() if w.strip()]
+    if words and words[0] in ["매수", "매도", "홀드"]:
+        return words[0]
     return None
 
 
