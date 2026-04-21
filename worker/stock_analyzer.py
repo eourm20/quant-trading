@@ -510,6 +510,12 @@ def _prefilter_candidates(candidates: list[dict], kiwoom, lightweight: bool = Fa
                     near_miss.append((1, cand))
                     continue
 
+            # 하네스 랭킹용 지표를 candidate에 첨부 (재조회 없이 재활용)
+            cand["_rsi"]          = calculate_rsi(closes) if len(closes) >= 15 else None
+            cand["_volume_ratio"] = (volumes[0] / (sum(volumes[1:21]) / 20)) if len(volumes) >= 21 and sum(volumes[1:21]) > 0 else None
+            cand["_ma5"]          = sum(closes[:5]) / 5 if len(closes) >= 5 else None
+            cand["_ma20"]         = sum(closes[:20]) / 20 if len(closes) >= 20 else None
+            cand["_change_pct"]   = change_pct
             passed.append(cand)
             time.sleep(1)
 
@@ -659,18 +665,60 @@ def run_intraday_scan():
     for cand in filtered:
         set_cooldown(f"intraday_scan:{cand['stock_code']}", cooldown_minutes=12 * 60)
 
-    ai_target = filtered
-    logger.info(f"[장중 스캔] 프리필터 통과 {len(ai_target)}개 → AI 분석 시작")
+    # ── 하네스: mini로 후보 랭킹 → 상위 5개만 풀 모델 분석 ──
+    _harness_top = int(_PREFILTER_CONFIG.get("harness_top_n", 5))
+    ai_target = _harness_rank_candidates(filtered, top_n=_harness_top)
+    logger.info(
+        f"[장중 스캔] 프리필터 통과 {len(filtered)}개 "
+        f"→ 하네스 선정 {len(ai_target)}개 → AI 분석 시작"
+    )
+
+    # ── 서브에이전트: 선정 종목 DART + 뉴스 병렬 mini 요약 ──
+    from concurrent.futures import ThreadPoolExecutor as _TPE2
+    import time as _time_sa
+
+    def _fetch_texts(cand: dict) -> dict:
+        code  = cand["stock_code"]
+        name  = cand["stock_name"]
+        dart, news, sec_news = "", "", ""
+        try:
+            from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
+            if DART_API_KEY:
+                dart = format_full_context_for_ai(code)
+        except Exception:
+            pass
+        try:
+            from worker.clients.news_client import format_news_for_ai, format_sector_news_for_ai, NAVER_CLIENT_ID
+            if NAVER_CLIENT_ID:
+                news = format_news_for_ai(name, max_items=5)
+        except Exception:
+            pass
+        d, n, s, m = _summarize_candidate_texts(name, dart, news, sec_news, macro_news_text)
+        return {"stock_code": code, "dart": d, "news": n, "sector_news": s, "macro": m}
+
+    _text_map: dict[str, dict] = {}
+    try:
+        with _TPE2(max_workers=min(len(ai_target), 5)) as _tex:
+            for _r in _tex.map(_fetch_texts, ai_target):
+                _text_map[_r["stock_code"]] = _r
+        logger.debug(f"[서브에이전트-SA] 장중 스캔 텍스트 요약 완료: {list(_text_map.keys())}")
+    except Exception as _sa_err:
+        logger.warning(f"[서브에이전트-SA] 텍스트 요약 실패, 원문 사용: {_sa_err}")
 
     added = []
     pending = []
     result_counts = {}  # 판정별 집계
     for cand in ai_target:
         try:
+            _tx = _text_map.get(cand["stock_code"], {})
             analysis = _analyze_candidate(
                 cand["stock_code"], cand["stock_name"],
                 kiwoom=kiwoom, market_text=market_text,
                 macro_news_text=macro_news_text,
+                presummarized_dart=_tx.get("dart") or None,
+                presummarized_news=_tx.get("news") or None,
+                presummarized_sector_news=_tx.get("sector_news") or None,
+                presummarized_macro=_tx.get("macro") or None,
             )
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")
@@ -1016,6 +1064,116 @@ def _build_screening_insights() -> str:
         return "조회 실패"
 
 
+# ═══════════════════════════ mini 유틸 (스크리너 전용) ═══════════════════════════
+
+def _call_mini_sa(prompt: str, max_tokens: int = 200) -> str:
+    """stock_analyzer 전용 mini 모델 호출. 실패 시 빈 문자열 반환."""
+    if not _ai_client:
+        return ""
+    try:
+        if _AI_BACKEND == "anthropic":
+            resp = _ai_client.messages.create(
+                model=_AI_MODEL_MINI, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        else:
+            resp = _ai_client.chat.completions.create(
+                model=_AI_MODEL_MINI, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.debug(f"[mini-SA] 호출 실패: {e}")
+        return ""
+
+
+def _harness_rank_candidates(candidates: list[dict], top_n: int = 5) -> list[dict]:
+    """mini 1회 호출로 후보 종목들을 랭킹하여 상위 top_n개 반환.
+
+    top_n 이하이면 랭킹 없이 그대로 반환.
+    mini 실패 시 원래 순서 그대로 상위 top_n개 반환 (안전 폴백).
+    """
+    if len(candidates) <= top_n:
+        return candidates
+
+    lines = []
+    for c in candidates:
+        rsi   = c.get("_rsi")
+        vr    = c.get("_volume_ratio")
+        ma5   = c.get("_ma5")
+        ma20  = c.get("_ma20")
+        chg   = c.get("_change_pct", 0)
+        trend = "정배열" if (ma5 and ma20 and ma5 >= ma20) else "역배열"
+        lines.append(
+            f"{c['stock_name']}({c['stock_code']}): "
+            f"RSI={f'{rsi:.0f}' if rsi else '?'}, 추세={trend}, "
+            f"거래량={f'{vr:.1f}' if vr else '?'}배, 등락률={chg:+.1f}%"
+        )
+
+    prompt = (
+        "아래 종목 중 단기 편입 가치 높은 상위 "
+        f"{top_n}개 종목코드만 골라줘.\n"
+        "기준: 낮은 RSI(과매도 근접) + 정배열 추세 + 적정 거래량.\n"
+        "종목코드 6자리만 쉼표 구분으로 출력. 설명 없이.\n\n"
+        + "\n".join(lines)
+    )
+
+    result = _call_mini_sa(prompt, max_tokens=80)
+
+    import re
+    selected_codes = [
+        c.strip() for c in re.split(r"[,\s]+", result)
+        if c.strip() and len(c.strip()) == 6 and c.strip().isdigit()
+    ]
+    valid_codes = {c["stock_code"] for c in candidates}
+    ranked = [c for c in candidates if c["stock_code"] in selected_codes
+              and c["stock_code"] in valid_codes]
+
+    # mini가 누락 코드를 반환하면 원래 순서로 보완
+    if len(ranked) < top_n:
+        for c in candidates:
+            if c not in ranked:
+                ranked.append(c)
+            if len(ranked) >= top_n:
+                break
+
+    logger.info(
+        f"[하네스-SA] {len(candidates)}개 → 상위 {top_n}개 선정: "
+        f"{[c['stock_name'] for c in ranked[:top_n]]}"
+    )
+    return ranked[:top_n]
+
+
+def _summarize_candidate_texts(
+    stock_name: str,
+    dart_text: str,
+    news_text: str,
+    sector_news_text: str,
+    macro_news_text: str,
+) -> tuple[str, str, str, str]:
+    """DART + 뉴스 3종을 mini로 병렬 요약. 실패 시 원본 반환."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _s(text: str, label: str, limit: int = 1500) -> str:
+        if not text:
+            return text
+        p = (
+            f"{label} 내용이다.\n"
+            f"매매 판단에 중요한 내용(실적·수주·악재·정책 등)만 1~2줄 요약.\n"
+            f"없으면 '특이사항 없음'만 출력. 설명 없이 요약만.\n\n"
+            f"{text[:limit]}"
+        )
+        return _call_mini_sa(p, max_tokens=120) or text
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        fd = ex.submit(_s, dart_text,        f"{stock_name} DART 공시", 2000)
+        fn = ex.submit(_s, news_text,        f"{stock_name} 종목 뉴스")
+        fs = ex.submit(_s, sector_news_text, "업종 뉴스")
+        fm = ex.submit(_s, macro_news_text,  "거시경제 뉴스")
+    return fd.result(), fn.result(), fs.result(), fm.result()
+
+
 # ═══════════════════════════ AI 편입 분석 ═══════════════════════════
 
 def _analyze_candidate(
@@ -1024,8 +1182,14 @@ def _analyze_candidate(
     kiwoom=None,
     market_text: str | None = None,
     macro_news_text: str = "",
+    presummarized_dart: str | None = None,
+    presummarized_news: str | None = None,
+    presummarized_sector_news: str | None = None,
+    presummarized_macro: str | None = None,
 ) -> dict:
     """후보 종목 1개를 차트+공시+뉴스로 분석하여 편입 적합성 판단.
+
+    presummarized_* 가 제공되면 해당 텍스트 조회를 건너뜀 (서브에이전트 사전 요약 활용).
 
     Returns:
         {recommendation, reason, target_price, stop_loss_price, horizon, rsi_oversold, rsi_overbought}
@@ -1069,37 +1233,43 @@ def _analyze_candidate(
     if not chart or not _ai_client:
         return {"recommendation": "분석 불가"}
 
-    # 2. DART 공시 + 재무
-    dart_text = ""
-    try:
-        from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
-        if DART_API_KEY:
-            dart_text = format_full_context_for_ai(stock_code)
-    except Exception:
-        pass
+    # 2. DART 공시 + 재무 (사전 요약 제공 시 조회 생략)
+    dart_text = presummarized_dart or ""
+    if not dart_text:
+        try:
+            from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
+            if DART_API_KEY:
+                dart_text = format_full_context_for_ai(stock_code)
+        except Exception:
+            pass
 
-    # 3. 뉴스 (종목 + 섹터)
-    news_text = ""
-    sector_news_text = ""
-    try:
-        from worker.clients.news_client import (
-            format_news_for_ai, format_sector_news_for_ai, NAVER_CLIENT_ID,
-        )
-        if NAVER_CLIENT_ID:
-            news_text = format_news_for_ai(stock_name, max_items=5)
-            # 업종명 확보 → 섹터 뉴스
-            sector_code = str(price_data.get("upjong_cd") or "").strip()
-            sector_name = str(price_data.get("upjong_nm") or "").strip()
-            if not sector_name and sector_code and kiwoom:
-                try:
-                    sector_data = kiwoom.get_sector_index(sector_code)
-                    sector_name = str(sector_data.get("upjong_nm") or "").strip()
-                except Exception:
-                    pass
-            if sector_name:
-                sector_news_text = format_sector_news_for_ai(sector_name, max_items=3)
-    except Exception:
-        pass
+    # 3. 뉴스 (종목 + 섹터, 사전 요약 제공 시 조회 생략)
+    news_text = presummarized_news or ""
+    sector_news_text = presummarized_sector_news or ""
+    if not news_text:
+        try:
+            from worker.clients.news_client import (
+                format_news_for_ai, format_sector_news_for_ai, NAVER_CLIENT_ID,
+            )
+            if NAVER_CLIENT_ID:
+                news_text = format_news_for_ai(stock_name, max_items=5)
+                # 업종명 확보 → 섹터 뉴스
+                sector_code = str(price_data.get("upjong_cd") or "").strip()
+                sector_name = str(price_data.get("upjong_nm") or "").strip()
+                if not sector_name and sector_code and kiwoom:
+                    try:
+                        sector_data = kiwoom.get_sector_index(sector_code)
+                        sector_name = str(sector_data.get("upjong_nm") or "").strip()
+                    except Exception:
+                        pass
+                if sector_name and not sector_news_text:
+                    sector_news_text = format_sector_news_for_ai(sector_name, max_items=3)
+        except Exception:
+            pass
+
+    # macro 뉴스 (사전 요약 제공 시 생략)
+    if presummarized_macro is not None:
+        macro_news_text = presummarized_macro
 
     # 4. 포트폴리오 맥락 (현재 보유 종목 수, 현금 비중 등)
     portfolio_context = ""
@@ -1584,19 +1754,60 @@ def run_daily_screening():
         logger.info("[스크리닝] 프리필터 후 후보 없음")
         return
 
-    logger.info(f"[스크리닝] 후보 {len(candidates)}개 → AI 분석 시작")
+    # ── 하네스: mini로 후보 랭킹 → 상위 5개만 풀 모델 분석 ──
+    _harness_top_d = int(_PREFILTER_CONFIG.get("harness_top_n", 5))
+    candidates = _harness_rank_candidates(candidates, top_n=_harness_top_d)
+    logger.info(
+        f"[스크리닝] 하네스 선정 {len(candidates)}개 → AI 분석 시작"
+    )
+
+    # ── 서브에이전트: 선정 종목 DART + 뉴스 병렬 mini 요약 ──
+    from concurrent.futures import ThreadPoolExecutor as _TPE3
+
+    def _fetch_texts_d(cand: dict) -> dict:
+        code  = cand["stock_code"]
+        name  = cand["stock_name"]
+        dart, news, sec_news = "", "", ""
+        try:
+            from worker.clients.dart_client import format_full_context_for_ai, DART_API_KEY
+            if DART_API_KEY:
+                dart = format_full_context_for_ai(code)
+        except Exception:
+            pass
+        try:
+            from worker.clients.news_client import format_news_for_ai, NAVER_CLIENT_ID
+            if NAVER_CLIENT_ID:
+                news = format_news_for_ai(name, max_items=5)
+        except Exception:
+            pass
+        d, n, s, m = _summarize_candidate_texts(name, dart, news, sec_news, macro_news_text)
+        return {"stock_code": code, "dart": d, "news": n, "sector_news": s, "macro": m}
+
+    _text_map_d: dict[str, dict] = {}
+    try:
+        with _TPE3(max_workers=min(len(candidates), 5)) as _tex3:
+            for _r in _tex3.map(_fetch_texts_d, candidates):
+                _text_map_d[_r["stock_code"]] = _r
+        logger.debug(f"[서브에이전트-SA] 일일 스크리닝 텍스트 요약 완료")
+    except Exception as _sa_err2:
+        logger.warning(f"[서브에이전트-SA] 텍스트 요약 실패, 원문 사용: {_sa_err2}")
 
     added = []
     pending = []
     result_counts = {}  # 판정별 집계
     for cand in candidates:
         try:
+            _tx_d = _text_map_d.get(cand["stock_code"], {})
             analysis = _analyze_candidate(
                 cand["stock_code"],
                 cand["stock_name"],
                 kiwoom=kiwoom,
                 market_text=market_text,
                 macro_news_text=macro_news_text,
+                presummarized_dart=_tx_d.get("dart") or None,
+                presummarized_news=_tx_d.get("news") or None,
+                presummarized_sector_news=_tx_d.get("sector_news") or None,
+                presummarized_macro=_tx_d.get("macro") or None,
             )
             rec = analysis.get("recommendation", "분석 실패")
             rr = analysis.get("rr_ratio", "N/A")

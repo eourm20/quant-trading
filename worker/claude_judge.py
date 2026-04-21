@@ -283,6 +283,146 @@ def _p(value) -> int:
         return 0
 
 
+# ═══════════════════════════ mini 유틸 ═══════════════════════════
+
+def _call_mini(prompt: str, max_tokens: int = 200) -> str:
+    """mini 모델 단일 호출. 실패 시 빈 문자열 반환."""
+    try:
+        if _BACKEND == "anthropic":
+            resp = _client.messages.create(
+                model=MODEL_MINI, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return resp.content[0].text.strip()
+        else:
+            resp = _client.chat.completions.create(
+                model=MODEL_MINI, max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.debug(f"[mini] 호출 실패: {e}")
+        return ""
+
+
+def _summarize_dart_mini(dart_text: str, stock_name: str) -> str:
+    """DART 공시 원문을 mini로 1~2줄 요약. 실패 시 원본 반환."""
+    if not dart_text or dart_text == "공시 조회 불가":
+        return dart_text
+    prompt = (
+        f"{stock_name} DART 공시 내용이다.\n"
+        f"주가에 직접 영향(수주·실적·유증·CB·관리종목 등)을 주는 내용만 1~2줄 요약.\n"
+        f"없으면 '특이사항 없음'만 출력. 설명·헤더 없이 요약만.\n\n"
+        f"{dart_text[:2000]}"
+    )
+    return _call_mini(prompt, max_tokens=150) or dart_text
+
+
+def _summarize_news_mini(
+    news_text: str,
+    sector_news_text: str,
+    macro_news_text: str,
+    stock_name: str,
+) -> tuple[str, str, str]:
+    """뉴스 3종을 mini로 각각 1줄 요약. 병렬 실행. 실패 시 원본 반환."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _summ(text: str, label: str, limit: int = 1500) -> str:
+        if not text:
+            return text
+        p = (
+            f"{label} 뉴스다.\n"
+            f"매매 판단에 중요한 내용(실적·수주·악재·정책 등)만 1줄 요약.\n"
+            f"없으면 '특이사항 없음'만 출력. 설명 없이 요약만.\n\n"
+            f"{text[:limit]}"
+        )
+        return _call_mini(p, max_tokens=100) or text
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f1 = ex.submit(_summ, news_text,       f"{stock_name} 종목")
+        f2 = ex.submit(_summ, sector_news_text, "업종")
+        f3 = ex.submit(_summ, macro_news_text,  "거시경제")
+    return f1.result() or news_text, f2.result() or sector_news_text, f3.result() or macro_news_text
+
+
+# ═══════════════════════════ 하네스 ═══════════════════════════
+
+HARNESS_SKIP         = "SKIP"
+HARNESS_DIRECT_SELL  = "DIRECT_SELL"
+HARNESS_AMBIGUOUS    = "AMBIGUOUS"
+
+
+def harness_check(signal, holdings: list) -> str:
+    """신호를 빠르게 분류하여 처리 경로 결정 (모델 호출 없음).
+
+    DIRECT_SELL : 풀 모델 없이 즉시 매도 처리
+    SKIP        : 처리 불필요 — 로그만 남기고 무시
+    AMBIGUOUS   : 풀 모델로 전달
+    """
+    current_price   = getattr(signal, "current_price", 0) or 0
+    rsi             = getattr(signal, "rsi", None)
+    volume_ratio    = getattr(signal, "volume_ratio", None)
+    triggered_text  = " ".join(str(x) for x in (getattr(signal, "triggered_conditions", []) or []))
+    in_portfolio    = bool(getattr(signal, "in_portfolio", False))
+
+    # ── DIRECT_SELL: 손절가 이탈 ──
+    if in_portfolio and current_price > 0:
+        try:
+            from data.db import get_positions as _gp
+            pos = {p["stock_code"]: p for p in _gp()}.get(signal.stock_code, {})
+            stop_loss = pos.get("stop_loss_price") or 0
+            if stop_loss > 0 and current_price <= stop_loss:
+                logger.info(
+                    f"[하네스] {signal.stock_name}: 손절가 이탈 "
+                    f"({current_price:,}≤{stop_loss:,}) → DIRECT_SELL"
+                )
+                return HARNESS_DIRECT_SELL
+        except Exception:
+            pass
+
+    # ── DIRECT_SELL: 하드 매도 트리거 (보유 종목만) ──
+    if in_portfolio:
+        hard_kw = ("데드크로스", "구름대 이탈", "하향 이탈")
+        if any(k in triggered_text for k in hard_kw):
+            logger.info(
+                f"[하네스] {signal.stock_name}: 하드 매도 트리거 → DIRECT_SELL"
+            )
+            return HARNESS_DIRECT_SELL
+
+    # ── SKIP: 오늘 홀드 판단 3회 이상 ──
+    try:
+        from data.db import get_conn as _gc
+        from datetime import date as _date
+        today = str(_date.today())
+        with _gc() as conn:
+            hold_cnt = conn.execute(
+                "SELECT COUNT(*) FROM signals "
+                "WHERE stock_code=? AND created_at>=? "
+                "AND (claude_opinion LIKE '[홀드]%' OR claude_opinion LIKE '홀드%')",
+                (signal.stock_code, today),
+            ).fetchone()[0]
+        if hold_cnt >= 3:
+            logger.info(
+                f"[하네스] {signal.stock_name}: 오늘 홀드 {hold_cnt}회 → SKIP"
+            )
+            return HARNESS_SKIP
+    except Exception:
+        pass
+
+    # ── SKIP: RSI 중립 + 거래량 매우 약 + 전환 신호 없음 ──
+    strong_kw = ("골든크로스", "데드크로스", "과매도", "볼린저", "이탈", "돌파", "급등")
+    if (rsi is not None and 44 <= rsi <= 56
+            and volume_ratio is not None and volume_ratio < 0.5
+            and not any(k in triggered_text for k in strong_kw)):
+        logger.info(
+            f"[하네스] {signal.stock_name}: RSI 중립({rsi:.1f}) + "
+            f"거래량 약({volume_ratio:.2f}배) → SKIP"
+        )
+        return HARNESS_SKIP
+
+    return HARNESS_AMBIGUOUS
+
+
 def _f(value) -> float:
     if not value:
         return 0.0
@@ -1059,6 +1199,23 @@ def _legacy_get_trade_opinion(
             macro_news_text = get_macro_news_for_ai()
     except Exception as e:
         logger.debug(f"뉴스 조회 실패: {e}")
+
+    # ── 서브에이전트: DART + 뉴스 병렬 mini 요약 ──
+    # 긴 원문 텍스트만 mini로 압축 → 풀 모델 컨텍스트 길이 절감
+    # 차트 지표·포지션·시장 환경은 이미 구조화된 수치 → 그대로 전달
+    try:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=2) as _ex:
+            _fd = _ex.submit(_summarize_dart_mini, dart_text, signal.stock_name)
+            _fn = _ex.submit(
+                _summarize_news_mini,
+                news_text, sector_news_text, macro_news_text, signal.stock_name,
+            )
+        dart_text = _fd.result() or dart_text
+        news_text, sector_news_text, macro_news_text = _fn.result()
+        logger.debug(f"[서브에이전트] {signal.stock_name}: DART+뉴스 mini 요약 완료")
+    except Exception as _sa_e:
+        logger.debug(f"[서브에이전트] mini 요약 실패, 원문 사용: {_sa_e}")
 
     # ── 글로벌 지수 조회 ──
     global_indices_text = ""

@@ -2025,24 +2025,43 @@ def run_check():
             claude_opinion = None
             if use_claude:
                 try:
-                    cache_allowed = (
-                        ai_cache_minutes > 0
-                        and not bool(getattr(signal, "in_portfolio", False))
-                        and str(getattr(signal, "signal_type", "") or "") in ("entry", "both")
+                    # ── 하네스: 처리 경로 결정 ──
+                    from worker.claude_judge import (
+                        harness_check,
+                        HARNESS_SKIP, HARNESS_DIRECT_SELL, HARNESS_AMBIGUOUS,
                     )
-                    cached_opinion = _get_cached_ai_opinion(signal, ai_cache_minutes) if cache_allowed else None
-                    if cached_opinion:
-                        claude_opinion = cached_opinion
-                        logger.info(f"[{signal.stock_name}] AI 판단 캐시 재사용 ({ai_cache_minutes}분 TTL)")
-                    else:
-                        sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
-                        claude_opinion = get_trade_opinion(
-                            signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
+                    harness_result = harness_check(signal, holdings)
+
+                    if harness_result == HARNESS_SKIP:
+                        logger.info(f"[{signal.stock_name}] 하네스 SKIP — 신호 무시")
+                        continue
+
+                    if harness_result == HARNESS_DIRECT_SELL:
+                        claude_opinion = (
+                            "[매도]\n"
+                            "• 근거1: 손절가 이탈 또는 하드 매도 트리거 — 하네스 직행 처리"
                         )
-                        ai_calls += 1
-                        if cache_allowed:
-                            _set_cached_ai_opinion(signal, claude_opinion)
-                        logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
+                        logger.info(f"[{signal.stock_name}] 하네스 DIRECT_SELL → 풀 모델 생략")
+
+                    else:  # AMBIGUOUS → 기존 풀 모델 경로
+                        cache_allowed = (
+                            ai_cache_minutes > 0
+                            and not bool(getattr(signal, "in_portfolio", False))
+                            and str(getattr(signal, "signal_type", "") or "") in ("entry", "both")
+                        )
+                        cached_opinion = _get_cached_ai_opinion(signal, ai_cache_minutes) if cache_allowed else None
+                        if cached_opinion:
+                            claude_opinion = cached_opinion
+                            logger.info(f"[{signal.stock_name}] AI 판단 캐시 재사용 ({ai_cache_minutes}분 TTL)")
+                        else:
+                            sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
+                            claude_opinion = get_trade_opinion(
+                                signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
+                            )
+                            ai_calls += 1
+                            if cache_allowed:
+                                _set_cached_ai_opinion(signal, claude_opinion)
+                            logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
