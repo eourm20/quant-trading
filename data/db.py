@@ -1,4 +1,4 @@
-"""
+﻿"""
 SQLite 거래 로그 DB
 """
 
@@ -68,7 +68,7 @@ _WL_SIGNAL_FIELDS = (
     "rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
     "volume_surge_ratio", "cci_oversold", "cci_overbought",
     "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
-    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+    "ma5_recovery", "new_high_20d", "trend_follow_entry", "macd_golden_cross", "macd_death_cross",
     "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
     "stochastic_golden_cross", "stochastic_death_cross",
     "ichimoku_golden_cross", "ichimoku_death_cross",
@@ -166,6 +166,7 @@ def init_db():
             ("ma5_support_break", "INTEGER DEFAULT NULL"),
             ("ma5_recovery", "INTEGER DEFAULT NULL"),
             ("new_high_20d", "INTEGER DEFAULT NULL"),
+            ("trend_follow_entry", "INTEGER DEFAULT NULL"),
             ("macd_golden_cross", "INTEGER DEFAULT NULL"),
             ("macd_death_cross", "INTEGER DEFAULT NULL"),
             ("bollinger_upper_break", "INTEGER DEFAULT NULL"),
@@ -513,7 +514,7 @@ def _migrate_watchlist_columns(conn):
     _VALUE_FIELDS = {"rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
                      "volume_surge_ratio", "cci_oversold", "cci_overbought"}
     _FLAG_FIELDS = {"golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
-                    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+                    "ma5_recovery", "new_high_20d", "trend_follow_entry", "macd_golden_cross", "macd_death_cross",
                     "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
                     "stochastic_golden_cross", "stochastic_death_cross",
                     "ichimoku_golden_cross", "ichimoku_death_cross",
@@ -588,7 +589,8 @@ def _seed_conditions():
         ("rsi_oversold_intraday", "RSI 과매도 (5분봉)", "rsi_lte_intraday", "rsi_oversold_intraday", 60, "RSI 5분봉 과매도 ({rsi_intraday:.1f} <= {threshold})", None, 4, "5분봉 RSI(14기간)가 과매도 기준(종목별 30~35) 이하일 때. 단기 종목 당일 급락 감지 신호.", "entry"),
         ("golden_cross", "MA 골든크로스", "flag", "golden_cross", 1440, "골든크로스 (MA5 {ma5:,} > MA20 {ma20:,})", "golden_cross", 5, "단기 이동평균(MA5)이 장기 이동평균(MA20)을 아래에서 위로 돌파하는 순간. 중기 상승 추세 전환 신호.", "entry"),
         ("death_cross", "MA 데드크로스", "flag", "death_cross", 1440, "데드크로스 (MA5 {ma5:,} < MA20 {ma20:,})", "death_cross", 6, "단기 이동평균(MA5)이 장기 이동평균(MA20)을 위에서 아래로 돌파하는 순간. 중기 하락 추세 전환 신호.", "exit"),
-        ("new_high_20d", "20일 신고가 돌파", "flag", "new_high_20d", 240, "20일 신고가 돌파 ({price:,}원)", "new_high_20d", 7, "현재가가 최근 20거래일 중 가장 높은 고가를 돌파. 강한 상승 모멘텀 신호. 신고가 돌파 매수 전략에 활용.", "both"),
+        ("new_high_20d", "20일 신고가 돌파", "flag", "new_high_20d", 60, "20일 신고가 돌파 ({price:,}원)", "new_high_20d", 7, "현재가가 최근 20거래일 중 가장 높은 고가를 돌파. 강한 상승 모멘텀 신호. 신고가 돌파 매수 전략에 활용.", "entry"),
+        ("trend_follow_entry", "추세 추종 진입", "trend_follow_entry", "trend_follow_entry", 60, "추세 추종 진입 (RSI {rsi:.1f}, 거래량 {ratio:.1f}배, MA5 {ma5:,} > MA20 {ma20:,})", None, 8, "가격이 MA5/MA20 위이고 상승 추세며 RSI 55~75, 거래량 배율 필터를 통과하는 경우 추세 추종 매수를 시도.", "entry"),
         ("ma20_support_break", "MA20 하향 이탈", "flag", "ma20_support_break", 240, "MA20 하향 이탈 ({price:,}원 < MA20 {ma20:,}원)", "broke_below_ma20", 8, "전일까지 MA20 위에 있다가 오늘 MA20 아래로 이탈. 중기 지지선 붕괴 신호. 추가 하락 가능성.", "exit"),
         ("ma5_support_break", "MA5 하향 이탈", "flag", "ma5_support_break", 120, "MA5 하향 이탈 ({price:,}원 < MA5 {ma5:,}원)", "broke_below_ma5", 9, "전일까지 MA5 위에 있다가 오늘 MA5 아래로 이탈. 단기 지지선 붕괴 신호. 단기 조정 진입 가능성.", "both"),
         ("ma5_recovery", "MA5 상향 돌파 (회복)", "flag", "ma5_recovery", 120, "MA5 상향 돌파 ({price:,}원 > MA5 {ma5:,}원)", "broke_above_ma5", 10, "전일까지 MA5 아래에 있다가 오늘 MA5 위로 돌파. 단기 반등 회복 신호. 단기 매수 진입 검토.", "entry"),
@@ -620,6 +622,32 @@ def _seed_conditions():
                     "VALUES (?,?,?,?,?,?,?,?,?,?)", row
                 )
             conn.commit()
+        conn.execute(
+            "UPDATE conditions_def "
+            "SET cooldown_minutes = 60, signal_type = 'entry' "
+            "WHERE id = 'new_high_20d'"
+        )
+        conn.execute(
+            """
+            INSERT INTO conditions_def
+            (id, name, evaluator, param, cooldown_minutes, message, chart_field, sort_order, description, signal_type)
+            SELECT
+                'trend_follow_entry',
+                'ì¶”ì„¸ ì¶”ì¢… ì§„ìž…',
+                'trend_follow_entry',
+                'trend_follow_entry',
+                60,
+                'ì¶”ì„¸ ì¶”ì¢… ì§„ìž… (RSI {rsi:.1f}, ê±°ëž˜ëŸ‰ {ratio:.1f}ë°°, MA5 {ma5:,} > MA20 {ma20:,})',
+                NULL,
+                8,
+                'ê°€ê²©ì´ MA5/MA20 ìœ„ì´ê³  ìƒìŠ¹ ì¶”ì„¸ë©° RSI 55~75, ê±°ëž˜ëŸ‰ ë°°ìœ¨ í•„í„°ë¥¼ í†µê³¼í•˜ëŠ” ê²½ìš° ì¶”ì„¸ ì¶”ì¢… ë§¤ìˆ˜ë¥¼ ì‹œë„.',
+                'entry'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM conditions_def WHERE id = 'trend_follow_entry'
+            )
+            """
+        )
+        conn.commit()
 
 
 # ── watchlist ──────────────────────────────────────────────────────────────
@@ -628,7 +656,7 @@ _WL_CONDITION_FIELDS = {
     "rsi_oversold", "rsi_overbought", "rsi_oversold_intraday", "rsi_critical",
     "volume_surge_ratio", "cci_oversold", "cci_overbought",
     "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
-    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+    "ma5_recovery", "new_high_20d", "trend_follow_entry", "macd_golden_cross", "macd_death_cross",
     "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
     "stochastic_golden_cross", "stochastic_death_cross",
     "ichimoku_golden_cross", "ichimoku_death_cross",
@@ -637,7 +665,7 @@ _WL_CONDITION_FIELDS = {
 }
 _WL_FLAG_FIELDS = {
     "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
-    "ma5_recovery", "new_high_20d", "macd_golden_cross", "macd_death_cross",
+    "ma5_recovery", "new_high_20d", "trend_follow_entry", "macd_golden_cross", "macd_death_cross",
     "bollinger_upper_break", "bollinger_lower_break", "bollinger_critical_below",
     "stochastic_golden_cross", "stochastic_death_cross",
     "ichimoku_golden_cross", "ichimoku_death_cross",

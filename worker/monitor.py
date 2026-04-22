@@ -9,6 +9,11 @@ from worker.indicators import calculate_rsi, calculate_volume_ratio, calculate_c
 
 logger = logging.getLogger(__name__)
 
+TREND_FOLLOW_RSI_MIN = 55.0
+TREND_FOLLOW_RSI_MAX = 75.0
+TREND_FOLLOW_VOLUME_MIN = 1.2
+
+
 def load_conditions() -> list[dict]:
     from data.db import get_conditions
     return get_conditions()
@@ -126,6 +131,25 @@ def _evaluate_condition(
             chart_field = cond_def.get("chart_field")
             if enabled and chart and getattr(chart, chart_field, False):
                 return msg_template.format(**fmt)
+
+        elif evaluator == "trend_follow_entry":
+            enabled = stock_cond.get(param)
+            # 신규 조건 롤아웃: 값이 비어있는 기존 watchlist 행도 기본적으로 활성 취급
+            if enabled is None:
+                enabled = True
+            if not enabled:
+                return None
+            if chart is None or rsi is None or volume_ratio is None:
+                return None
+            if not (chart.above_ma5 and chart.above_ma20):
+                return None
+            if chart.trend != "상승":
+                return None
+            if not (TREND_FOLLOW_RSI_MIN <= rsi <= TREND_FOLLOW_RSI_MAX):
+                return None
+            if volume_ratio < TREND_FOLLOW_VOLUME_MIN:
+                return None
+            return msg_template.format(**fmt)
 
     except (KeyError, ValueError) as e:
         logger.warning(f"조건 메시지 포맷 오류 [{cond_def.get('id')}]: {e}")

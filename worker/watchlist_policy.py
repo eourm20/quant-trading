@@ -23,6 +23,7 @@ FLAG_FIELDS = {
     "ma5_support_break",
     "ma5_recovery",
     "new_high_20d",
+    "trend_follow_entry",
     "macd_golden_cross",
     "macd_death_cross",
     "bollinger_upper_break",
@@ -55,6 +56,7 @@ CORE_FALLBACK = {
     "volume_surge_ratio": 2.0,
     "bollinger_lower_break": True,
     "ma20_support_break": True,
+    "trend_follow_entry": True,
 }
 
 _INT_VALUE_FIELDS = {
@@ -144,4 +146,3 @@ def normalize_watchlist_payload(
 
     watchlist_payload["horizon"] = horizon or "중기"
     return watchlist_payload, position_payload
-

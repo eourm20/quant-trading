@@ -64,8 +64,17 @@ conditions:
     evaluator: flag
     param: new_high_20d
     chart_field: new_high_20d
-    cooldown_minutes: 240
+    cooldown_minutes: 60
+    signal_type: entry
     message: "20일 신고가 돌파 ({price:,}원)"
+
+  - id: trend_follow_entry
+    name: 추세 추종 진입
+    evaluator: trend_follow_entry
+    param: trend_follow_entry
+    cooldown_minutes: 60
+    signal_type: entry
+    message: "추세 추종 진입 (RSI {rsi:.1f}, 거래량 {ratio:.1f}배, MA5 {ma5:,} > MA20 {ma20:,})"
 
   - id: ma20_support_break
     name: MA20 하향 이탈
