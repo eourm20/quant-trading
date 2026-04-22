@@ -6,6 +6,7 @@ MCP 코드 구조 기반으로 작성 (POST + api-id 헤더 방식)
 import os
 import logging
 import time
+import threading
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from zoneinfo import ZoneInfo
@@ -39,6 +40,16 @@ class KiwoomClient:
         self._client = httpx.Client(timeout=10.0)
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
+        self._token_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._last_request_ts = 0.0
+        try:
+            self._min_request_interval = max(
+                0.0,
+                float(os.getenv("KIWOOM_MIN_REQUEST_INTERVAL_SECONDS", "0.25")),
+            )
+        except Exception:
+            self._min_request_interval = 0.25
         # 종목명→코드 캐시 (당일 유지)
         self._stock_map: dict[str, str] = {}   # name → code
         self._stock_map_date: str = ""
@@ -55,6 +66,20 @@ class KiwoomClient:
         self._dmst_stex_tp = self._trade_history_markets[0]
         self._stex_tp = "1" if self._is_mock else "3"
 
+    def _wait_rate_limit_slot(self, api_name: str) -> None:
+        if self._min_request_interval <= 0:
+            return
+        wait = 0.0
+        with self._request_lock:
+            now = time.time()
+            elapsed = now - self._last_request_ts
+            if elapsed < self._min_request_interval:
+                wait = self._min_request_interval - elapsed
+            self._last_request_ts = now + wait
+        if wait > 0:
+            logger.debug(f"[throttle] {api_name} {wait:.3f}s wait")
+            time.sleep(wait)
+
     def _post_with_retry(
         self,
         url: str,
@@ -66,6 +91,7 @@ class KiwoomClient:
     ) -> httpx.Response:
         last_resp: httpx.Response | None = None
         for attempt in range(max_retries):
+            self._wait_rate_limit_slot(api_name)
             resp = self._client.post(url, json=json_body, headers=headers)
             last_resp = resp
             if resp.status_code == 429:
@@ -89,27 +115,32 @@ class KiwoomClient:
         if self._token and self._token_expires_at and now < self._token_expires_at - timedelta(seconds=60):
             return self._token
 
-        resp = self._post_with_retry(
-            f"{BASE_URL}/oauth2/token",
-            json_body={
-                "grant_type": "client_credentials",
-                "appkey": APP_KEY,
-                "secretkey": APP_SECRET,
-            },
-            headers={"Content-Type": "application/json;charset=UTF-8"},
-            api_name="oauth2/token",
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        with self._token_lock:
+            now = datetime.now(tz=timezone.utc)
+            if self._token and self._token_expires_at and now < self._token_expires_at - timedelta(seconds=60):
+                return self._token
 
-        token = str(payload.get("token", "")).strip()
-        if not token:
-            raise ValueError(f"토큰 발급 실패: {payload}")
+            resp = self._post_with_retry(
+                f"{BASE_URL}/oauth2/token",
+                json_body={
+                    "grant_type": "client_credentials",
+                    "appkey": APP_KEY,
+                    "secretkey": APP_SECRET,
+                },
+                headers={"Content-Type": "application/json;charset=UTF-8"},
+                api_name="oauth2/token",
+            )
+            resp.raise_for_status()
+            payload = resp.json()
 
-        self._token = token
-        expires_dt = str(payload.get("expires_dt", "")).strip()
-        self._token_expires_at = self._parse_expires_dt(expires_dt)
-        return token
+            token = str(payload.get("token", "")).strip()
+            if not token:
+                raise ValueError(f"토큰 발급 실패: {payload}")
+
+            self._token = token
+            expires_dt = str(payload.get("expires_dt", "")).strip()
+            self._token_expires_at = self._parse_expires_dt(expires_dt)
+            return token
 
     @staticmethod
     def _parse_expires_dt(value: str) -> datetime:
@@ -660,7 +691,6 @@ class KiwoomClient:
         """cont-yn / next-key 페이지네이션 처리하여 전체 결과 반환.
         429 응답 시 최대 max_retries 회 재시도 (지수 백오프).
         """
-        import time as _time
         results = []
         cont_yn = ""
         next_key = ""
@@ -669,21 +699,14 @@ class KiwoomClient:
             if cont_yn:
                 headers["cont-yn"] = cont_yn
                 headers["next-key"] = next_key
-            for attempt in range(max_retries):
-                resp = self._client.post(
-                    f"{BASE_URL}/{path.lstrip('/')}",
-                    json=body,
-                    headers=headers,
-                )
-                if resp.status_code == 429:
-                    wait = 2 ** attempt  # 1s, 2s, 4s
-                    logger.warning(f"[429] {api_id} 레이트 리밋 — {wait}초 후 재시도 ({attempt+1}/{max_retries})")
-                    _time.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                break
-            else:
-                raise RuntimeError(f"{api_id} 429 재시도 초과")
+            resp = self._post_with_retry(
+                f"{BASE_URL}/{path.lstrip('/')}",
+                json_body=body,
+                headers=headers,
+                api_name=api_id,
+                max_retries=max_retries,
+            )
+            resp.raise_for_status()
             payload = resp.json()
             items = payload.get("list", [])
             if isinstance(items, list):
