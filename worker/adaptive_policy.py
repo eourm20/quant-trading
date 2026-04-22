@@ -55,29 +55,57 @@ class AdaptivePolicy:
         }
 
 
-def _fetch_similar_signal_stats(signal_type: str, days: int = 180) -> tuple[int, float | None, float | None]:
+def _fetch_similar_signal_stats(signal_type: str, days: int = 180) -> tuple[int, float | None, float | None, str]:
+    """Return directional edge stats for the judgment policy.
+
+    avg3 is normalized so positive means "the historical action was useful":
+    entry/add want price to rise after buy, exit wants price to fall after sell.
+    """
     since = (_now_kst() - timedelta(days=max(7, int(days)))).strftime("%Y-%m-%d")
+    st = signal_type or ""
+
+    if st == "exit":
+        where = "signal_type = ? AND verdict = '매도'"
+        params = (since, st)
+        hit_sql = "SUM(CASE WHEN result_pct < 0 THEN 1 ELSE 0 END) AS wins"
+        avg_sql = "AVG(-result_pct) AS avg3"
+        basis = "exit_sell_signals"
+    elif st == "add":
+        where = "signal_type = ? AND (action = '매수' OR verdict = '매수')"
+        params = (since, st)
+        hit_sql = "SUM(CASE WHEN result_pct > 0 THEN 1 ELSE 0 END) AS wins"
+        avg_sql = "AVG(result_pct) AS avg3"
+        basis = "add_buy_actions"
+    elif st == "entry":
+        where = "signal_type = ? AND verdict = '매수'"
+        params = (since, st)
+        hit_sql = "SUM(CASE WHEN result_pct > 0 THEN 1 ELSE 0 END) AS wins"
+        avg_sql = "AVG(result_pct) AS avg3"
+        basis = "entry_buy_signals"
+    else:
+        # Mixed/unknown signal types do not have a stable directional meaning.
+        return 0, None, None, "mixed_or_unknown"
+
     with get_conn() as conn:
         row = conn.execute(
-            """
+            f"""
             SELECT
               COUNT(*) AS n,
-              AVG(result_pct) AS avg3,
-              SUM(CASE WHEN result_pct > 0 THEN 1 ELSE 0 END) AS pos
+              {avg_sql},
+              {hit_sql}
             FROM signals
             WHERE created_at >= ?
-              AND signal_type = ?
-              AND verdict = '매수'
+              AND {where}
               AND result_pct IS NOT NULL
             """,
-            (since, signal_type or ""),
+            params,
         ).fetchone()
     n = int(row["n"] or 0) if row else 0
     avg3 = float(row["avg3"]) if row and row["avg3"] is not None else None
     hit = None
     if row and n > 0:
-        hit = round((int(row["pos"] or 0) / n) * 100.0, 1)
-    return n, hit, avg3
+        hit = round((int(row["wins"] or 0) / n) * 100.0, 1)
+    return n, hit, avg3, basis
 
 
 def _fetch_recent_buy_loss_streak(limit: int = 5) -> int:
@@ -108,11 +136,19 @@ def get_judgment_adaptive_policy(
     kosdaq_rate: float = 0.0,
     trigger_count: int = 0,
 ) -> AdaptivePolicy:
-    samples, hit, avg3 = _fetch_similar_signal_stats(signal_type=signal_type or "", days=180)
+    st = signal_type or ""
+    samples, hit, avg3, basis = _fetch_similar_signal_stats(signal_type=st, days=180)
     loss_streak = _fetch_recent_buy_loss_streak(limit=5)
     regime = _market_regime_label(kospi_rate, kosdaq_rate)
 
     score = 0
+    if st in ("both", ""):
+        score -= 1
+    if st == "exit":
+        if samples < 20:
+            score -= 1
+        if avg3 is not None and avg3 <= 0:
+            score -= 1
     if samples >= 8 and hit is not None and avg3 is not None:
         if hit >= 58.0:
             score += 1
@@ -140,7 +176,7 @@ def get_judgment_adaptive_policy(
             avg_3d=avg3,
             qty_multiplier=1.2,
             allow_new_entry=True,
-            reason=f"score={score}, regime={regime}, samples={samples}, hit={hit}, avg3={avg3}",
+            reason=f"score={score}, regime={regime}, basis={basis}, samples={samples}, hit={hit}, edge3={avg3}",
         )
     if score <= -1:
         return AdaptivePolicy(
@@ -150,8 +186,8 @@ def get_judgment_adaptive_policy(
             hit_rate_3d=hit,
             avg_3d=avg3,
             qty_multiplier=0.5,
-            allow_new_entry=(trigger_count >= 4 and regime != "risk_off"),
-            reason=f"score={score}, regime={regime}, loss_streak={loss_streak}, samples={samples}",
+            allow_new_entry=(st == "add" or (trigger_count >= 4 and regime != "risk_off")),
+            reason=f"score={score}, regime={regime}, basis={basis}, loss_streak={loss_streak}, samples={samples}",
         )
     return AdaptivePolicy(
         stance="balanced",
@@ -161,7 +197,7 @@ def get_judgment_adaptive_policy(
         avg_3d=avg3,
         qty_multiplier=1.0,
         allow_new_entry=True,
-        reason=f"score={score}, regime={regime}, samples={samples}",
+        reason=f"score={score}, regime={regime}, basis={basis}, samples={samples}",
     )
 
 
@@ -223,4 +259,3 @@ def get_research_adaptive_policy(
         "max_additions": max_add,
         "reason": f"score={score}, regime={regime}, samples={n}, hit7d={hit}, avg7d={avg7}",
     }
-
