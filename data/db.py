@@ -1973,6 +1973,9 @@ def search_similar_signals(
     rsi_tolerance: float = 5.0,
     volume_low_multiplier: float = 0.5,
     volume_high_multiplier: float = 2.0,
+    require_result: bool = False,
+    min_abs_result_pct: float | None = None,
+    only_verdict_hits: bool = False,
 ) -> list[dict]:
     """현재 지표와 유사한 과거 신호 검색 (SQL 범위 필터 기반 RAG).
 
@@ -2001,6 +2004,20 @@ def search_similar_signals(
     if above_ma20 is not None:
         conditions.append("json_extract(indicator_snapshot, '$.above_ma20') = ?")
         params.append(1 if above_ma20 else 0)
+    if require_result:
+        conditions.append("result_pct IS NOT NULL")
+    if min_abs_result_pct is not None:
+        min_abs = max(0.0, float(min_abs_result_pct))
+        conditions.append("ABS(result_pct) >= ?")
+        params.append(min_abs)
+    if only_verdict_hits:
+        band = max(0.0, float(HOLD_NEUTRAL_BAND_PCT))
+        conditions.append(
+            "((verdict = '매수' AND result_pct > ?) "
+            "OR (verdict = '매도' AND result_pct < -?) "
+            "OR (verdict = '홀드' AND result_pct BETWEEN ? AND ?))"
+        )
+        params += [band, band, -band, band]
 
     where = " AND ".join(conditions)
     params.append(limit)

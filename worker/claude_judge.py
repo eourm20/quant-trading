@@ -963,6 +963,9 @@ def _legacy_get_trade_opinion(
             volume_ratio=signal.volume_ratio if signal.volume_ratio else None,
             limit=3,
             days=90,
+            require_result=True,
+            min_abs_result_pct=1.0,
+            only_verdict_hits=True,
         )
         if _rag_rows:
             _rag_lines = []
@@ -1256,7 +1259,7 @@ def _legacy_get_trade_opinion(
 
 ## 과거 AI 판단 이력 — {signal.signal_type} 신호 기준 (최근 5건)
 {history_text}
-{f'## 유사 지표 사례 (RSI·거래량 유사, 최근 90일){chr(10)}{_rag_context_text}' if _rag_context_text else ''}
+{f'## 유사 지표 사례 (성과 검증·모호구간 제외, 최근 90일){chr(10)}{_rag_context_text}' if _rag_context_text else ''}
 {_dart_section}
 {_news_section}
 {_sector_news_section}
