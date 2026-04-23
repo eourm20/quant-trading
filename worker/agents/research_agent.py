@@ -75,6 +75,121 @@ class ResearchAgent:
         self._policy_version: str = "research-v0"
         self._adaptive_policy: dict = {}
 
+    def _extract_inclusion_decisions(self, text: str) -> list[tuple[str, str]]:
+        """Extract (code, name) pairs decided as inclusion by the agent.
+
+        Rule:
+        - If a stock decision line marks "편입", force add.
+        - If a stock is followed by "watchlist: done", force add.
+        """
+        raw = (text or "").replace("\r", "").strip()
+        if not raw:
+            return []
+
+        lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+        candidates: dict[str, str] = {}
+        current_code = ""
+        current_name = ""
+
+        for ln in lines:
+            norm = re.sub(r"^[#>*\-\s]+", "", ln).strip().strip("`")
+            if not norm:
+                continue
+
+            m = re.search(r"([^\(\n]+)\(([0-9A-Z]{6})\)\s*:\s*(.+)$", norm)
+            if m:
+                name = m.group(1).strip()
+                code = m.group(2).strip()
+                decision = m.group(3).strip().lower()
+                current_code, current_name = code, name
+                if ("편입" in decision) or ("entry" in decision):
+                    candidates[code] = name
+                continue
+
+            lower = norm.lower()
+            if current_code and lower.startswith("watchlist:") and "done" in lower:
+                candidates[current_code] = current_name
+
+        return sorted(candidates.items(), key=lambda x: x[0])
+
+    def _apply_research_decision_rules(self, result_text: str) -> list[str]:
+        """Execute deterministic decision rules from agent conclusions.
+
+        When the agent concludes "편입", execute watchlist registration directly
+        through DB/service rules so the action is deterministic.
+        """
+        inclusions = self._extract_inclusion_decisions(result_text)
+        if not inclusions:
+            return []
+
+        statuses: list[str] = []
+        for code, name in inclusions:
+            try:
+                from data.db import (
+                    get_watchlist,
+                    upsert_stock,
+                    save_screening_log,
+                    update_screening_action,
+                    save_strategy_note,
+                )
+                from worker.watchlist_policy import normalize_watchlist_payload
+
+                existing_codes = {
+                    str(w.get("code", "")).strip()
+                    for w in (get_watchlist() or [])
+                    if str(w.get("code", "")).strip()
+                }
+
+                if code in existing_codes:
+                    statuses.append(f"{code}:already_exists")
+                    logger.info(f"[ResearchAgent] decision-rule skip (already exists) {name}({code})")
+                    continue
+
+                watchlist_payload, _position_payload = normalize_watchlist_payload(
+                    horizon="중기",
+                    analysis=None,
+                    raw_conditions={},
+                )
+                upsert_stock(code, name, enabled=True, conditions=watchlist_payload)
+
+                try:
+                    _log_id = save_screening_log(
+                        stock_code=code,
+                        stock_name=name,
+                        source="research_agent_decision_rule",
+                        recommendation="관심종목 등록",
+                        reason="decision_rule_inclusion",
+                        ai_response=(
+                            "registered by research decision rule engine\n\n"
+                            f"decision=편입\nstock={name}({code})"
+                        ),
+                    )
+                    update_screening_action(_log_id, "auto_accepted")
+                except Exception as _log_e:
+                    logger.warning(f"[ResearchAgent] rule screening_log save failed {name}({code}): {_log_e}")
+
+                try:
+                    save_strategy_note(
+                        "watchlist",
+                        f"{name} rule-based watchlist 등록",
+                        (
+                            f"stock_code={code}\n"
+                            "decision=편입\n"
+                            "execution=research_decision_rule_engine\n"
+                            "reason=decision_rule_inclusion"
+                        ),
+                    )
+                except Exception as _note_e:
+                    logger.warning(f"[ResearchAgent] rule strategy_note save failed {name}({code}): {_note_e}")
+
+                statuses.append(f"{code}:applied")
+                logger.info(f"[ResearchAgent] decision-rule applied {name}({code})")
+            except Exception as e:
+                statuses.append(f"{code}:error")
+                logger.warning(f"[ResearchAgent] decision-rule exception {name}({code}): {e}")
+
+        return statuses
+
     def _run_preflight(self, kospi_rate: float = 0.0, kosdaq_rate: float = 0.0, base_max_additions: int = 5) -> tuple[bool, dict, list[str]]:
         """리서치 실행 전 필수 컨텍스트 강제 수집/검증."""
         self._preflight_used_tools = []
@@ -395,6 +510,9 @@ Tool coverage constraints:
 
         result = self._agent.run(initial_message)
         result = self._compact_result(result)
+        rule_exec_status = self._apply_research_decision_rules(result)
+        if rule_exec_status:
+            result = f"{result}\nrule_exec: {', '.join(rule_exec_status)}"
         reflection_written = reflect_research(
             status="completed",
             result_text=result,

@@ -1617,6 +1617,13 @@ def run_daily_screening():
             logger.info(f"[ResearchAgent Screening] max_candidates={_max_candidates}")
             _retry_count = max(0, int(_worker_cfg.get("research_agent_rate_limit_retries", _worker_cfg.get("agent_rate_limit_retries", 2))))
             _retry_wait = max(1, int(_worker_cfg.get("research_agent_rate_limit_wait_seconds", _worker_cfg.get("agent_rate_limit_wait_seconds", 12))))
+            from data.db import get_watchlist as _get_watchlist
+            _watchlist_before = {
+                str(s.get("code", "")).strip()
+                for s in (_get_watchlist() or [])
+                if str(s.get("code", "")).strip()
+            }
+
             result = ""
             for _attempt in range(_retry_count + 1):
                 try:
@@ -1638,17 +1645,25 @@ def run_daily_screening():
             coverage_score = getattr(_agent, "coverage_score", "N/A")
             result_text = (result or "").strip() or "(empty result)"
             summary_text = _build_agent_telegram_summary(result_text)
-            added_count = int(getattr(_agent, "addition_count", 0) or 0)
+            _watchlist_after = {
+                str(s.get("code", "")).strip()
+                for s in (_get_watchlist() or [])
+                if str(s.get("code", "")).strip()
+            }
+            rule_added_codes = sorted([c for c in (_watchlist_after - _watchlist_before) if c])
+            rule_added_count = len(rule_added_codes)
+            tool_added_count = int(getattr(_agent, "addition_count", 0) or 0)
             status_line = (
-                "0 additions (no eligible candidates or all filtered)"
-                if added_count <= 0
-                else f"{added_count} additions"
+                "0 additions (no inclusion decision or all already present)"
+                if rule_added_count <= 0
+                else f"{rule_added_count} additions ({', '.join(rule_added_codes)})"
             )
             msg = (
                 f"[ResearchAgent Screening] completed\n"
                 f"- tools: {tools_summary}\n"
                 f"- tool_coverage_score: {coverage_score}\n"
-                f"- add_to_watchlist: {status_line}\n\n"
+                f"- add_to_watchlist(tool_calls): {tool_added_count}\n"
+                f"- decision_rule_applied: {status_line}\n\n"
                 f"{summary_text}"
             )
             if not _send(msg):
@@ -1660,7 +1675,14 @@ def run_daily_screening():
                 _save_strategy_note(
                     "watchlist",
                     "ResearchAgent daily screening completed",
-                    f"tools={tools_summary}\ntool_coverage_score={coverage_score}\nadded_count={added_count}\n\n{result_text[:3000]}",
+                    (
+                        f"tools={tools_summary}\n"
+                        f"tool_coverage_score={coverage_score}\n"
+                        f"tool_added_count={tool_added_count}\n"
+                        f"decision_rule_added_count={rule_added_count}\n"
+                        f"decision_rule_added_codes={rule_added_codes}\n\n"
+                        f"{result_text[:3000]}"
+                    ),
                 )
                 _save_agent_action_log(
                     signal_id=0,
@@ -1678,7 +1700,8 @@ def run_daily_screening():
                         index_postmortem_memory as _index_postmortem_memory,
                     )
                     _trace_text = (
-                        f"tools={tools_summary} | add_to_watchlist={added_count} | "
+                        f"tools={tools_summary} | tool_add_calls={tool_added_count} | "
+                        f"decision_rule_added={rule_added_count}({','.join(rule_added_codes) if rule_added_codes else '-'}) | "
                         f"kospi={_kospi:+.2f}% kosdaq={_kosdaq:+.2f}%"
                     )
                     _index_tool_trace_memory(
@@ -1691,7 +1714,7 @@ def run_daily_screening():
                         market_snapshot=f"KOSPI={_kospi:+.2f}% KOSDAQ={_kosdaq:+.2f}% tools={tools_summary}",
                         extra={"mode": "agent"},
                     )
-                    if added_count <= 0:
+                    if rule_added_count <= 0:
                         _index_postmortem_memory(
                             source_key=f"agent_zero_add:{now_kst().strftime('%Y%m%d_%H%M%S')}",
                             title="ResearchAgent zero additions",
