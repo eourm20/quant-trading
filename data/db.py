@@ -627,26 +627,46 @@ def _seed_conditions():
             "SET cooldown_minutes = 60, signal_type = 'entry' "
             "WHERE id = 'new_high_20d'"
         )
+        trend_id = "trend_follow_entry"
+        trend_name = "\ucd94\uc138 \ucd94\uc885 \uc9c4\uc785"
+        trend_msg = (
+            "\ucd94\uc138 \ucd94\uc885 \uc9c4\uc785 "
+            "(RSI {rsi:.1f}, \uac70\ub798\ub7c9 {ratio:.1f}\ubc30, MA5 {ma5:,} > MA20 {ma20:,})"
+        )
+        trend_desc = (
+            "\uac00\uaca9\uc774 MA5/MA20 \uc704\uc774\uace0 \uc0c1\uc2b9 \ucd94\uc138\uba70 RSI 55~75, "
+            "\uac70\ub798\ub7c9 \ubc30\uc728 \ud544\ud130\ub97c \ud1b5\uacfc\ud558\ub294 \uacbd\uc6b0 "
+            "\ucd94\uc138 \ucd94\uc885 \ub9e4\uc218\ub97c \uc2dc\ub3c4."
+        )
         conn.execute(
             """
             INSERT INTO conditions_def
             (id, name, evaluator, param, cooldown_minutes, message, chart_field, sort_order, description, signal_type)
-            SELECT
-                'trend_follow_entry',
-                'ì¶”ì„¸ ì¶”ì¢… ì§„ìž…',
-                'trend_follow_entry',
-                'trend_follow_entry',
-                60,
-                'ì¶”ì„¸ ì¶”ì¢… ì§„ìž… (RSI {rsi:.1f}, ê±°ëž˜ëŸ‰ {ratio:.1f}ë°°, MA5 {ma5:,} > MA20 {ma20:,})',
-                NULL,
-                8,
-                'ê°€ê²©ì´ MA5/MA20 ìœ„ì´ê³  ìƒìŠ¹ ì¶”ì„¸ë©° RSI 55~75, ê±°ëž˜ëŸ‰ ë°°ìœ¨ í•„í„°ë¥¼ í†µê³¼í•˜ëŠ” ê²½ìš° ì¶”ì„¸ ì¶”ì¢… ë§¤ìˆ˜ë¥¼ ì‹œë„.',
-                'entry'
-            WHERE NOT EXISTS (
-                SELECT 1 FROM conditions_def WHERE id = 'trend_follow_entry'
-            )
-            """
+            SELECT ?, ?, 'trend_follow_entry', 'trend_follow_entry', 60, ?, NULL, 8, ?, 'entry'
+            WHERE NOT EXISTS (SELECT 1 FROM conditions_def WHERE id = ?)
+            """,
+            (trend_id, trend_name, trend_msg, trend_desc, trend_id),
         )
+        # Repair legacy mojibake row when previous seed text was stored with broken encoding.
+        trend_row = conn.execute(
+            "SELECT name, message, description FROM conditions_def WHERE id = ?",
+            (trend_id,),
+        ).fetchone()
+        if trend_row:
+            def _has_hangul(text: str | None) -> bool:
+                if not text:
+                    return False
+                return any("\uac00" <= ch <= "\ud7a3" for ch in text)
+            if not (_has_hangul(trend_row["name"]) and _has_hangul(trend_row["message"])):
+                conn.execute(
+                    """
+                    UPDATE conditions_def
+                       SET name = ?, message = ?, description = ?,
+                           cooldown_minutes = 60, signal_type = 'entry'
+                     WHERE id = ?
+                    """,
+                    (trend_name, trend_msg, trend_desc, trend_id),
+                )
         conn.commit()
 
 
