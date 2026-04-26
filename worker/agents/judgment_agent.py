@@ -307,3 +307,7 @@ Fallback chain if primary tool fails: search_agent_memory_context -> search_simi
     def coverage_score(self) -> str:
         return self._agent.coverage_score
 
+    @property
+    def policy_version(self) -> str:
+        return self._policy_version
+

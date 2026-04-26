@@ -275,6 +275,21 @@ def init_db():
             conn.execute("ALTER TABLE signals ADD COLUMN reasoning_chain TEXT DEFAULT NULL")
         except Exception:
             pass
+        # 튜닝/재현성 메타 컬럼
+        for col, typedef in [
+            ("source", "TEXT DEFAULT NULL"),
+            ("model_id", "TEXT DEFAULT NULL"),
+            ("prompt_version", "TEXT DEFAULT NULL"),
+            ("policy_version", "TEXT DEFAULT NULL"),
+            ("horizon", "TEXT DEFAULT NULL"),
+            ("target_price_snapshot", "INTEGER DEFAULT NULL"),
+            ("stop_loss_snapshot", "INTEGER DEFAULT NULL"),
+            ("decision_status", "TEXT DEFAULT NULL"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
         # 스크리닝 AI 판단 이력 (RAG용)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS screening_log (
@@ -1621,6 +1636,11 @@ def save_signal(
     news_summary: str | None = None,
     market_snapshot: str | None = None,
     portfolio_snapshot: str | None = None,
+    source: str | None = None,
+    model_id: str | None = None,
+    prompt_version: str | None = None,
+    policy_version: str | None = None,
+    decision_status: str | None = None,
 ) -> int:
     """신호 저장 후 signal_id 반환. 지표 스냅샷 + verdict 자동 추출."""
     verdict = _extract_verdict(claude_opinion)
@@ -1640,8 +1660,10 @@ def save_signal(
                 (created_at, stock_code, stock_name, current_price,
                  triggered_conditions, rsi, volume_ratio, claude_opinion, in_portfolio, signal_type,
                  verdict, indicator_snapshot, dart_summary, chart_patterns,
-                 news_summary, market_snapshot, portfolio_snapshot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 news_summary, market_snapshot, portfolio_snapshot,
+                 source, model_id, prompt_version, policy_version, horizon,
+                 target_price_snapshot, stop_loss_snapshot, decision_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1661,6 +1683,14 @@ def save_signal(
                 news_summary,
                 market_snapshot,
                 portfolio_snapshot,
+                source,
+                model_id,
+                prompt_version,
+                policy_version,
+                getattr(signal, "horizon", None) or None,
+                getattr(signal, "target_price", None),
+                getattr(signal, "stop_loss_price", None),
+                decision_status,
             ),
         )
         conn.commit()

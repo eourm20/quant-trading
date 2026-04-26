@@ -1,4 +1,4 @@
-"""
+﻿"""
 AI 매매 판단 — Anthropic Claude 또는 OpenAI GPT 사용
 ANTHROPIC_API_KEY가 있으면 Claude, 없으면 OpenAI로 자동 전환
 """
@@ -20,6 +20,14 @@ def get_last_agent_trace() -> dict:
     """마지막 JudgmentAgent 실행의 tool_sequence + reasoning_chain 반환.
     Agent 모드가 아니었거나 실패한 경우 빈 dict 반환."""
     return dict(_last_agent_trace)
+
+
+def get_judgment_runtime_meta() -> dict:
+    """현재 판단 런타임 메타정보 반환 (signals 저장용)."""
+    return {
+        "model_id": MODEL,
+        "prompt_version": PROMPT_VERSION_LEGACY,
+    }
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -272,6 +280,9 @@ elif _OPENAI_KEY:
     _BACKEND = "openai"
 else:
     raise RuntimeError("ANTHROPIC_API_KEY 또는 OPENAI_API_KEY 중 하나를 .env에 설정하세요.")
+
+PROMPT_VERSION_LEGACY = os.getenv("JUDGE_PROMPT_VERSION", "legacy-trade-v1")
+PROMPT_VERSION_AGENT = os.getenv("JUDGE_AGENT_PROMPT_VERSION", "judgment-agent-v1")
 
 
 def _p(value) -> int:
@@ -890,12 +901,31 @@ def get_trade_opinion(
             _last_agent_trace = {
                 "tool_sequence": _agent.used_tools,
                 "reasoning_chain": _agent.reasoning_chain,
+                "model_id": _agent_model,
+                "prompt_version": PROMPT_VERSION_AGENT,
+                "policy_version": getattr(_agent, "policy_version", ""),
+                "decision_status": "normal",
             }
             return _opinion
         except Exception as _e:
             logger.warning(f"[Agent모드] 실패, 레거시로 폴백: {_e}")
+            _last_agent_trace = {
+                "tool_sequence": [],
+                "reasoning_chain": [],
+                "model_id": MODEL,
+                "prompt_version": PROMPT_VERSION_LEGACY,
+                "policy_version": "",
+                "decision_status": "fallback",
+            }
 
-    _last_agent_trace = {}
+    _last_agent_trace = {
+        "tool_sequence": [],
+        "reasoning_chain": [],
+        "model_id": MODEL,
+        "prompt_version": PROMPT_VERSION_LEGACY,
+        "policy_version": "",
+        "decision_status": "normal",
+    }
     return _legacy_get_trade_opinion(signal, holdings, kospi, kosdaq, sector, recent_trades, deposit)
 
 
@@ -1159,6 +1189,7 @@ def _legacy_get_trade_opinion(
 
 ## 공통 판단 원칙
 - 근거 우선순위: 기술적 신호 → 포지션 맥락 → 리스크 관리
+- 전환조건 가점모델: 직전 홀드 전환조건을 이번 신호가 충족하면 우선 점수를 크게 가산해 매수/매도 전환을 적극 검토
 - 뉴스/공시: 실적 쇼크·유상증자·수주·거래정지 등 가격 영향 큰 경우만 상위 반영. 일반 기사는 보조 참고만
 - 섹터 등락률은 참고 정보일 뿐 홀드 주된 근거로 사용 금지
 - [임계값]: 기존 설정 유지가 기본. 구조적 오류일 때만 변경 제안. 기존값 대비 ±3 초과 금지. 허용 필드: rsi_overbought/rsi_oversold_intraday/volume_surge_ratio
@@ -1172,6 +1203,7 @@ def _legacy_get_trade_opinion(
 [주문방식] 시장가 or 지정가 (홀드이면 생략)
 [추천수량] N주 (약 XXX만원) — 실질 매수 여력({buy_budget:,}원) 이내, 총 포트폴리오의 7~15% 목표. 현금 부족 시 절반 이하. 실질 매수 여력 0 이하면 신호 강도로 판단: 복합 신호(3가지 이상) 또는 핵심 지표 극과매도(RSI 30 이하·볼린저 하단 -3% 이상)면 현금의 20~30% 이내 소량 매수 허용, 그 외 단순 신호(1~2가지)면 [홀드] (홀드이면 생략)
 [전환조건] 홀드 시 매수/매도 전환 트리거 수치로 명시 (홀드가 아니면 생략)
+- 홀드 판단 시에는 [전환조건]을 반드시 작성하고, 가능한 한 가격/지표 임계값을 숫자로 제시
 [임계값] 변경 불필요하면 반드시 생략 (홀드 시만, field=value 형식)
 
 마크다운 헤더(#, ##) 사용 금지. 총 250단어 이내."""
@@ -1395,7 +1427,8 @@ def get_dip_buy_opinion(
 [주문시장] KRX (홀드이면 생략, 모의투자는 KRX만 허용)
 [주문방식] 시장가 or 지정가 (홀드이면 생략)
 [추천수량] N주 (약 XXX만원) — 총 포트폴리오의 5~10% 기준, 실질 매수 여력({buy_budget:,}원) 초과 금지 (홀드이면 생략)
-[전환조건] 홀드 시 매수 전환 조건 명시
+[전환조건] 홀드 시 매수 전환 조건 명시 (반드시 작성, 가능하면 가격/지표 숫자 포함)
+- 전환조건 가점모델: 직전 홀드 전환조건 충족 시 우선 점수 크게 가산
 
 마크다운 헤더 사용 금지. 150단어 이내."""
 
@@ -1579,3 +1612,5 @@ JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
     except Exception as e:
         logger.error(f"[{stock_name}] 포지션 AI 판단 실패: {e}")
         return None
+
+

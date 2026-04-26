@@ -53,7 +53,13 @@ if hasattr(time, "tzset"):
 
 from worker.clients.kiwoom_client import KiwoomClient
 from worker.monitor import check_stock, load_conditions
-from worker.claude_judge import get_trade_opinion, judge_position_values, get_dip_buy_opinion, get_last_agent_trace
+from worker.claude_judge import (
+    get_trade_opinion,
+    judge_position_values,
+    get_dip_buy_opinion,
+    get_last_agent_trace,
+    get_judgment_runtime_meta,
+)
 from worker.cooldown import filter_new_conditions, mark_sent
 from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review, reassess_watchlist
 from worker.portfolio_sync import sync_all
@@ -757,13 +763,23 @@ def run_news_monitor():
             opinion = get_trade_opinion(fake_signal, holdings_full, {}, {}, {})
             news_ai_calls += 1
             label = _label_from_opinion(opinion)
+            if isinstance(opinion, str) and opinion.strip().startswith("INCOMPLETE_CONTEXT"):
+                logger.info(f"[news_monitor] INCOMPLETE_CONTEXT skip 저장/알림: {name}")
+                continue
 
             head_title = str(top_items[0].get("title", ""))[:100]
             head_pub = str(top_items[0].get("pub_date", ""))
 
             if label == "critical":
                 _news_alert_cooldown[code] = now
-                signal_id = save_signal(fake_signal, opinion, in_portfolio=True)
+                signal_id = save_signal(
+                    fake_signal,
+                    opinion,
+                    in_portfolio=True,
+                    source="news_monitor",
+                    decision_status="normal",
+                    **get_judgment_runtime_meta(),
+                )
                 _rag_index_signal(fake_signal, signal_id, opinion)
                 send_message(
                     f"?? *AI ?? ??? ??* ({name})\n"
@@ -1255,7 +1271,7 @@ def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
     if not qty:
         return
 
-    from data.db import save_paper_trade, extract_verdict
+    from data.db import save_paper_trade, extract_verdict, update_signal_action
     verdict = extract_verdict(claude_opinion)
     paper_id = save_paper_trade(
         stock_code=signal.stock_code,
@@ -1266,6 +1282,8 @@ def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
         signal_id=signal_id,
         verdict=verdict,
     )
+    if signal_id is not None:
+        update_signal_action(signal_id, side)
     logger.info(f"[모의투자] {signal.stock_name} {side} {qty}주 @ {signal.current_price:,}원 기록 (paper_id={paper_id})")
     send_message(
         f"📝 *모의투자 기록* (실제 주문 없음)\n"
@@ -1800,6 +1818,10 @@ def check_market_dip():
                 total_portfolio=total_portfolio,
                 holdings=holdings,
             )
+            if isinstance(opinion, str) and opinion.strip().startswith("INCOMPLETE_CONTEXT"):
+                logger.info(f"[급락 스캔] INCOMPLETE_CONTEXT skip 저장/실행: {name}")
+                results.append(f"⏭ {name} 컨텍스트 부족")
+                continue
 
             first_line = opinion.strip().splitlines()[0] if opinion.strip() else ""
             logger.info(f"[급락 스캔] {name}: {first_line[:80]}")
@@ -1817,7 +1839,14 @@ def check_market_dip():
                     in_portfolio=False,
                     signal_type="entry",
                 )
-                signal_id = save_signal(fake_signal, opinion, in_portfolio=False)
+                signal_id = save_signal(
+                    fake_signal,
+                    opinion,
+                    in_portfolio=False,
+                    source="dip_buy",
+                    decision_status="normal",
+                    **get_judgment_runtime_meta(),
+                )
                 _rag_index_signal(fake_signal, signal_id, opinion)
                 _auto_execute(
                     fake_signal,
@@ -2103,20 +2132,50 @@ def run_check():
             except Exception:
                 pass
 
+            incomplete_context = bool(
+                isinstance(claude_opinion, str) and claude_opinion.strip().startswith("INCOMPLETE_CONTEXT")
+            )
+            trace = get_last_agent_trace() if claude_opinion else {}
+            tool_sequence = list((trace or {}).get("tool_sequence") or [])
+            reasoning_chain = list((trace or {}).get("reasoning_chain") or [])
+
+            decision_status = str((trace or {}).get("decision_status") or "normal").strip().lower()
+            if incomplete_context:
+                decision_status = "incomplete_context"
+            elif decision_status not in {"normal", "fallback"}:
+                decision_status = "normal"
+
+            runtime_meta = get_judgment_runtime_meta()
+            model_id = str((trace or {}).get("model_id") or runtime_meta.get("model_id") or "")
+            prompt_version = str((trace or {}).get("prompt_version") or runtime_meta.get("prompt_version") or "")
+            policy_version = str((trace or {}).get("policy_version") or "")
+
             mark_sent(signal.stock_code, new_ids)
+            if incomplete_context:
+                logger.info(
+                    f"[{signal.stock_name}] INCOMPLETE_CONTEXT로 저장/실행 차단 "
+                    f"(opinion={claude_opinion[:120]})"
+                )
+                continue
+
             signal_id = save_signal(
-                signal, claude_opinion, in_portfolio=signal.in_portfolio,
-                dart_summary=dart_summary, news_summary=news_summary,
-                market_snapshot=market_snapshot, portfolio_snapshot=portfolio_snapshot,
+                signal,
+                claude_opinion,
+                in_portfolio=signal.in_portfolio,
+                dart_summary=dart_summary,
+                news_summary=news_summary,
+                market_snapshot=market_snapshot,
+                portfolio_snapshot=portfolio_snapshot,
+                source="monitor",
+                model_id=model_id,
+                prompt_version=prompt_version,
+                policy_version=(policy_version or None),
+                decision_status=decision_status,
             )
             # Agent 모드 실행 시 tool_sequence + reasoning_chain 저장 + 텔레그램 흐름 전송
             agent_tools_summary = None
             if claude_opinion:
                 try:
-                    trace = get_last_agent_trace()
-                    tool_sequence = list((trace or {}).get("tool_sequence") or [])
-                    reasoning_chain = list((trace or {}).get("reasoning_chain") or [])
-
                     update_signal_agent_trace(
                         signal_id,
                         tool_sequence,
@@ -2140,16 +2199,6 @@ def run_check():
             send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
             if agent_tools_summary:
                 send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
-
-            incomplete_context = bool(
-                isinstance(claude_opinion, str) and claude_opinion.strip().startswith("INCOMPLETE_CONTEXT")
-            )
-            if incomplete_context:
-                logger.info(
-                    f"[{signal.stock_name}] INCOMPLETE_CONTEXT로 실행 차단 "
-                    f"(signal_id={signal_id}, opinion={claude_opinion[:120]})"
-                )
-                continue
 
             if claude_opinion:
                 _maybe_save_hold_conditions(signal, claude_opinion)
