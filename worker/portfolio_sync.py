@@ -7,6 +7,7 @@
 import logging
 import os
 import sys
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -23,6 +24,24 @@ from data.db import (
 
 logger = logging.getLogger(__name__)
 
+# Empty holdings snapshot must be confirmed this many times before deletions.
+_POS_DELETE_MIN_EMPTY_SYNC = max(1, int(os.getenv("POSITION_DELETE_MIN_EMPTY_SYNC", "2")))
+# Newly created positions are protected from immediate deletion for this many minutes.
+_POS_DELETE_GRACE_MINUTES = max(0, int(os.getenv("POSITION_DELETE_GRACE_MINUTES", "5")))
+_empty_holdings_streak = 0
+
+
+def _parse_db_dt(value: str | None) -> datetime | None:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return None
+
 
 def sync_all(client: KiwoomClient | None = None) -> dict:
     """포트폴리오 + 매매 내역 동기화. 결과 요약 반환."""
@@ -30,6 +49,7 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
         client = KiwoomClient()
 
     result = {"portfolio": 0, "trades": 0, "errors": []}
+    holdings = []
 
     # 포트폴리오
     try:
@@ -81,10 +101,11 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
         result["errors"].append(f"체결 보정: {e}")
         logger.warning(f"체결내역 기반 매매 보정 실패: {e}")
 
-    # ── positions 동기화 ──
+    # positions 동기화
     result["positions_created"] = 0
     result["positions_removed"] = 0
     try:
+        global _empty_holdings_streak
         existing_positions = {p["stock_code"]: p for p in get_positions()}
         current_holdings = {}
 
@@ -95,7 +116,7 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
             current_holdings[code] = h
 
             if code not in existing_positions:
-                # 신규 보유종목 → 포지션 자동 생성
+                # 신규 보유종목 -> 포지션 자동 생성
                 avg_price = abs(int(float(str(h.get("pur_pric", 0)).replace(",", "").strip() or "0")))
                 qty = abs(int(float(str(h.get("rmnd_qty", 0)).replace(",", "").strip() or "0")))
                 created = create_position_from_trade(code, h.get("stk_nm", ""), avg_price, qty)
@@ -103,7 +124,7 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
                     result["positions_created"] += 1
                     logger.info(f"포지션 자동 생성: {h.get('stk_nm', '')} ({code})")
             else:
-                # 기존 포지션 — 평단가/수량 갱신
+                # 기존 포지션 -> 평단가/수량 갱신
                 pos = existing_positions[code]
                 new_avg = abs(int(float(str(h.get("pur_pric", 0)).replace(",", "").strip() or "0")))
                 new_qty = abs(int(float(str(h.get("rmnd_qty", 0)).replace(",", "").strip() or "0")))
@@ -112,11 +133,36 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
                 if pos["quantity"] != new_qty and new_qty > 0:
                     update_position_field(code, "quantity", new_qty)
 
+        if current_holdings:
+            _empty_holdings_streak = 0
+        else:
+            _empty_holdings_streak += 1
+
         # 미보유 종목 포지션 삭제
-        for old_code in set(existing_positions) - set(current_holdings):
-            delete_position(old_code)
-            result["positions_removed"] += 1
-            logger.info(f"포지션 삭제 (미보유): {existing_positions[old_code].get('stock_name', '')} ({old_code})")
+        if (not current_holdings) and existing_positions and _empty_holdings_streak < _POS_DELETE_MIN_EMPTY_SYNC:
+            logger.warning(
+                "[positions] empty holdings streak %s/%s - postpone deletion",
+                _empty_holdings_streak,
+                _POS_DELETE_MIN_EMPTY_SYNC,
+            )
+        else:
+            now = datetime.now()
+            for old_code in set(existing_positions) - set(current_holdings):
+                pos = existing_positions[old_code]
+                created_at = _parse_db_dt(pos.get("created_at"))
+                if created_at and _POS_DELETE_GRACE_MINUTES > 0:
+                    if (now - created_at) < timedelta(minutes=_POS_DELETE_GRACE_MINUTES):
+                        logger.info(
+                            "포지션 삭제 유예(%s분): %s (%s)",
+                            _POS_DELETE_GRACE_MINUTES,
+                            pos.get("stock_name", ""),
+                            old_code,
+                        )
+                        continue
+
+                delete_position(old_code)
+                result["positions_removed"] += 1
+                logger.info(f"포지션 삭제 (미보유): {pos.get('stock_name', '')} ({old_code})")
     except Exception as e:
         result["errors"].append(f"포지션 동기화: {e}")
         logger.error(f"포지션 동기화 실패: {e}")

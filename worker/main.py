@@ -1313,16 +1313,19 @@ def _parse_watchlist_decision(opinion: str) -> str | None:
 
 def _apply_post_sell_watchlist_decision(signal, claude_opinion: str) -> None:
     """전량 매도 후 watchlist 처리.
-    유효한 결정이 없으면 기본 DROP(제거).
+    유효한 결정이 없으면 기본 REASSESS(비활성+재평가 대기).
     """
     try:
         from data.db import delete_stock, update_stock_field, get_watchlist, save_strategy_note
-        decision = _parse_watchlist_decision(claude_opinion) or "drop"
+        default_decision = str(_WORKER_CONFIG.get("post_sell_default_watchlist_decision", "reassess")).strip().lower()
+        if default_decision not in {"keep", "drop", "reassess"}:
+            default_decision = "reassess"
+        decision = _parse_watchlist_decision(claude_opinion) or default_decision
 
         if decision == "drop":
             removed = delete_stock(signal.stock_code)
             logger.info(f"[{signal.stock_name}] post-sell watchlist 결정: drop (removed={removed})")
-            save_strategy_note("watchlist", f"{signal.stock_name} 전량매도 후 watchlist 제거", "decision=drop(default_if_invalid)")
+            save_strategy_note("watchlist", f"{signal.stock_name} 전량매도 후 watchlist 제거", f"decision=drop(default={default_decision})")
             return
 
         if decision == "reassess":
