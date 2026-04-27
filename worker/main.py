@@ -57,6 +57,7 @@ from worker.claude_judge import (
     get_trade_opinion,
     judge_position_values,
     get_dip_buy_opinion,
+    get_news_risk_assessment,
     get_last_agent_trace,
     get_judgment_runtime_meta,
 )
@@ -625,7 +626,7 @@ def run_weekly_self_correction():
         return
 
     try:
-        msg_lines = [f"?? *{summary}*", ""]
+        msg_lines = [f"🧭 *{summary}*", ""]
         msg_lines.extend(verdict_lines[:5])
         if low_perf:
             msg_lines.append("")
@@ -680,7 +681,6 @@ def run_news_monitor():
     from worker.clients.news_client import search_news, NAVER_CLIENT_ID
     from notifications.telegram import send_message
     from worker.monitor import Signal
-    from worker.claude_judge import get_trade_opinion
 
     if not NAVER_CLIENT_ID:
         return
@@ -697,14 +697,6 @@ def run_news_monitor():
     now = _now_kst()
     news_ai_max_calls_per_run = max(0, int(_WORKER_CONFIG.get("news_ai_max_calls_per_run", 2)))
     news_ai_calls = 0
-
-    def _label_from_opinion(opinion_text: str) -> str:
-        first = (opinion_text or "").strip().splitlines()[0].lower()
-        if any(tok in first for tok in ("[??]", "[sell]", "??", "????", "exit")):
-            return "critical"
-        if any(tok in first for tok in ("[??]", "[??]", "[hold]", "watch")):
-            return "warning"
-        return "ignore"
 
     for h in holdings:
         code = str(h.get("stock_code", "")).strip()
@@ -759,13 +751,25 @@ def run_news_monitor():
                 signal_type="exit",
             )
 
-            holdings_full = kiwoom.get_holdings()
-            opinion = get_trade_opinion(fake_signal, holdings_full, {}, {}, {})
+            assess = get_news_risk_assessment(
+                stock_code=code,
+                stock_name=name,
+                current_price=cur_price,
+                news_digest=digest,
+            )
             news_ai_calls += 1
-            label = _label_from_opinion(opinion)
-            if isinstance(opinion, str) and opinion.strip().startswith("INCOMPLETE_CONTEXT"):
-                logger.info(f"[news_monitor] INCOMPLETE_CONTEXT skip 저장/알림: {name}")
+            label = str((assess or {}).get("risk_level") or "ignore").strip().lower()
+            if label == "incomplete_context":
+                logger.info(f"[news_monitor] JSON risk assessment incomplete_context: {name}")
                 continue
+
+            reason = str((assess or {}).get("reason") or "").strip()
+            action = str((assess or {}).get("action") or "").strip()
+            confidence = int((assess or {}).get("confidence") or 0)
+            if label == "critical":
+                opinion = f"[매도]\n• 근거1: {reason or '중대한 뉴스 리스크 감지'}\n• 근거2: 조치 제안 - {action or '즉시 점검'}"
+            elif label == "warning":
+                opinion = f"[홀드]\n• 근거1: {reason or '주의 뉴스 감지'}\n• 근거2: 조치 제안 - {action or '관찰/모니터링'}"
 
             head_title = str(top_items[0].get("title", ""))[:100]
             head_pub = str(top_items[0].get("pub_date", ""))
@@ -782,19 +786,23 @@ def run_news_monitor():
                 )
                 _rag_index_signal(fake_signal, signal_id, opinion)
                 send_message(
-                    f"?? *AI ?? ??? ??* ({name})\n"
+                    f"🚨 *AI 뉴스 리스크 경보* ({name})\n"
                     f"{head_title}\n_{head_pub}_\n\n"
-                    f"??: *??/?? ??*\n"
-                    f"AI: {(opinion.splitlines()[0] if opinion else '?? ??')}"
+                    f"판정: *즉시 점검/대응 필요*\n"
+                    f"신뢰도: *{confidence}%*\n"
+                    f"사유: {reason or '-'}\n"
+                    f"조치: {action or '-'}"
                 )
                 logger.warning(f"[news_monitor] CRITICAL {name}: {head_title}")
             elif label == "warning":
                 _news_alert_cooldown[code] = now
                 send_message(
-                    f"?? *AI ?? ??* ({name})\n"
+                    f"⚠️ *AI 뉴스 주의 알림* ({name})\n"
                     f"{head_title}\n_{head_pub}_\n\n"
-                    f"??: *??/??*\n"
-                    f"AI: {(opinion.splitlines()[0] if opinion else '?? ??')}"
+                    f"판정: *관찰/모니터링*\n"
+                    f"신뢰도: *{confidence}%*\n"
+                    f"사유: {reason or '-'}\n"
+                    f"조치: {action or '-'}"
                 )
                 logger.info(f"[news_monitor] WARNING {name}: {head_title}")
             else:
@@ -1482,7 +1490,7 @@ def _auto_execute(
                 0,
             )
             if qty > 0:
-                logger.info(f"[{signal.stock_name}] ?? ?? ??(??): ???? {qty}? ??")
+                logger.info(f"[{signal.stock_name}] 추천수량 누락(보완): 보유 전량 {qty}주 적용")
         elif order_type == "1" and signal.current_price > 0:
             budget = buy_budget if buy_budget > 0 else deposit
             alloc = int(budget * fallback_buy_ratio)
@@ -1491,12 +1499,12 @@ def _auto_execute(
                 qty = 1
             if qty > 0:
                 logger.info(
-                    f"[{signal.stock_name}] ?? ?? ??(??): {qty}? "
+                    f"[{signal.stock_name}] 추천수량 누락(보완): {qty}주 "
                     f"(budget={budget:,}, ratio={fallback_buy_ratio:.2f})"
                 )
 
     if not qty:
-        logger.info(f"[{signal.stock_name}] ?? ??: ???? ?? ? ??")
+        logger.info(f"[{signal.stock_name}] 수량 없음: 주문 실행을 건너뜁니다")
         return
 
     if order_type == "1":
@@ -1963,7 +1971,7 @@ def run_check():
 
     # Run check only in regular session (both real/mock).
     if session != "main":
-        logger.info(f"??? ? ??({session}) - run_check ??")
+        logger.info(f"정규장 외 시간({session}) - run_check 스킵")
         return
 
     # DB에서 최신 종목/조건 로드 (MCP로 변경 시 즉시 반영)

@@ -52,7 +52,7 @@ class ResearchAgent:
 
     def __init__(
         self,
-        max_steps: int = 10,
+        max_steps: int = 30,
         max_tokens: int = 1200,
         target_unique_tools: int = 4,
         model: str | None = None,

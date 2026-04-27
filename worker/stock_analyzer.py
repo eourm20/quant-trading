@@ -172,6 +172,13 @@ def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
 
     if not out:
         snippet = re.sub(r"\s+", " ", text)[:900]
+        lower = snippet.lower()
+        if "max_steps" in lower and ("초과" in snippet or "exceeded" in lower):
+            return (
+                "- Summary fallback: max_steps 초과로 종목별 최종 결론을 생성하지 못했습니다. "
+                "research_agent_max_steps를 늘리거나 후보/툴 범위를 줄여주세요.\n"
+                f"- Raw: {snippet}"
+            )
         return f"- Summary fallback: {snippet}"
     return "\n".join(out)
 
@@ -1606,7 +1613,7 @@ def run_daily_screening():
             _agent_api_key = str(_worker_cfg.get("research_agent_api_key") or os.getenv("OPENAI_API_KEY", "")).strip()
             _agent_base_url = str(_worker_cfg.get("research_agent_base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
             _agent = ResearchAgent(
-                max_steps=int(_worker_cfg.get("research_agent_max_steps", 10)),
+                max_steps=int(_worker_cfg.get("research_agent_max_steps", 30)),
                 max_tokens=int(_worker_cfg.get("research_agent_max_tokens", 1200)),
                 target_unique_tools=int(_worker_cfg.get("research_agent_target_unique_tools", 4)),
                 model=_agent_model,

@@ -1471,6 +1471,129 @@ def get_dip_buy_opinion(
         return response.choices[0].message.content
 
 
+def get_news_risk_assessment(
+    stock_code: str,
+    stock_name: str,
+    current_price: int,
+    news_digest: str,
+) -> dict:
+    """뉴스 이벤트 기반 리스크를 JSON 스키마로 강제 평가.
+
+    반환 예시:
+    {
+      "risk_level": "critical|warning|ignore|incomplete_context",
+      "reason": "...",
+      "action": "...",
+      "confidence": 0~100,
+      "raw_text": "원문"
+    }
+    """
+    import json as _json
+    import re as _re
+
+    system_prompt = """너는 보유 종목 뉴스 리스크 판정기다.
+반드시 JSON 객체 1개만 출력한다. 설명/코드블록/추가 텍스트 금지.
+
+스키마:
+{
+  "risk_level": "critical" | "warning" | "ignore",
+  "reason": "한 문장",
+  "action": "한 문장",
+  "confidence": 0-100 정수
+}
+
+판정 기준:
+- critical: 즉시 매도/비중축소/손절 점검이 필요한 명확한 악재(대규모 손실, 거래정지/상폐 이슈, 중대한 규제/소송, 유동성 위기 등)
+- warning: 단기 변동성 확대 가능성은 있으나 즉시 청산까지는 아님(관찰/모니터링)
+- ignore: 투자판단 영향이 작거나 중립/잡음 뉴스"""
+
+    user_prompt = f"""종목: {stock_name} ({stock_code})
+현재가: {current_price:,}원
+
+뉴스 요약:
+{news_digest}
+
+위 뉴스만 기준으로 risk_level을 판정하라."""
+
+    text = ""
+    try:
+        if _BACKEND == "anthropic":
+            response = _client.messages.create(
+                model=MODEL_MINI,
+                max_tokens=220,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            text = response.content[0].text
+        else:
+            response = _client.chat.completions.create(
+                model=MODEL_MINI,
+                max_tokens=220,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            text = response.choices[0].message.content or ""
+    except Exception as e:
+        return {
+            "risk_level": "incomplete_context",
+            "reason": f"news model call failed: {e}",
+            "action": "skip",
+            "confidence": 0,
+            "raw_text": "",
+        }
+
+    text_clean = _re.sub(r"```(?:json)?\s*", "", str(text or ""), flags=_re.IGNORECASE).replace("```", "").strip()
+    text_clean = _re.sub(r'(\d),(\d)', r'\1\2', text_clean)
+
+    parsed = None
+    json_match = _re.search(r"\{[\s\S]*\}", text_clean)
+    if json_match:
+        candidate = json_match.group(0)
+        try:
+            parsed = _json.loads(candidate)
+        except _json.JSONDecodeError:
+            try:
+                candidate2 = _re.sub(r",\s*([}\]])", r"\1", candidate)
+                parsed = _json.loads(candidate2)
+            except Exception:
+                parsed = None
+
+    if not isinstance(parsed, dict):
+        low = text_clean.lower()
+        if any(k in low for k in ("critical", "sell", "exit", "매도", "손절")):
+            level = "critical"
+        elif any(k in low for k in ("warning", "hold", "watch", "주의", "관망", "홀드")):
+            level = "warning"
+        else:
+            level = "ignore"
+        return {
+            "risk_level": level,
+            "reason": "json_parse_fallback",
+            "action": "monitor" if level != "critical" else "review_now",
+            "confidence": 40,
+            "raw_text": text_clean[:400],
+        }
+
+    level = str(parsed.get("risk_level", "")).strip().lower()
+    if level not in {"critical", "warning", "ignore"}:
+        level = "ignore"
+    try:
+        conf = int(float(parsed.get("confidence", 0)))
+    except Exception:
+        conf = 0
+    conf = max(0, min(100, conf))
+
+    return {
+        "risk_level": level,
+        "reason": str(parsed.get("reason", "")).strip()[:300],
+        "action": str(parsed.get("action", "")).strip()[:300],
+        "confidence": conf,
+        "raw_text": text_clean[:600],
+    }
+
+
 def judge_position_values(
     stock_code: str,
     stock_name: str,
