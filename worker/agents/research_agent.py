@@ -199,7 +199,6 @@ class ResearchAgent:
             "existing_exposure_check",
             "basic_disclosure_context",
             "screening_performance",
-            "recent_review_note",
             "policy_snapshot",
             "adaptive_policy",
         ]
@@ -247,6 +246,7 @@ class ResearchAgent:
             limit=30,
             only_with_results=True,
         )
+        has_recent_review_note = False
         try:
             from data.db import get_recent_daily_reviews
             reviews = get_recent_daily_reviews(limit=1) or []
@@ -257,10 +257,13 @@ class ResearchAgent:
                     "summary": r0.get("summary", ""),
                     "detail": r0.get("detail", ""),
                 }
+                has_recent_review_note = True
             else:
                 ctx["recent_review_note"] = {"error": "missing_recent_daily_review"}
         except Exception as e:
             ctx["recent_review_note"] = {"error": str(e)}
+        if has_recent_review_note:
+            required.append("recent_review_note")
 
         proxy_code = ""
         if holdings_codes:
