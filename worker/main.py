@@ -6,6 +6,7 @@
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
@@ -68,7 +69,7 @@ from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
                      update_signal_result, update_signal_agent_trace, save_agent_action_log, purge_agent_action_logs,
-                     update_stock_field, save_strategy_note,
+                     update_stock_field, save_strategy_note, save_market_report, get_latest_market_report,
                      get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
                      get_positions, get_position, update_position_field, create_position_from_trade,
                      save_realized_pnl_snapshot)
@@ -142,6 +143,361 @@ def _safe_int_price(value) -> int:
         return abs(int(str(value or "0").replace(",", "").strip()))
     except Exception:
         return 0
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(str(value or "").replace(",", "").strip())
+    except Exception:
+        return 0.0
+
+
+def _extract_change_pct(payload: dict | None) -> float:
+    if not payload:
+        return 0.0
+    for key in ("prdy_ctrt", "flu_rt", "change_rate", "chg_rt"):
+        if key in payload:
+            v = _safe_float(payload.get(key))
+            if v != 0.0:
+                return v
+    return 0.0
+
+
+def _extract_trade_value(payload: dict | None) -> float:
+    if not payload:
+        return 0.0
+    for key in ("acml_tr_pbmn", "acc_trdval", "tot_tr_amt"):
+        if key in payload:
+            v = _safe_float(payload.get(key))
+            if v > 0:
+                return v
+    return 0.0
+
+
+def _extract_first_number(payload: dict | None, keys: tuple[str, ...]) -> float:
+    if not payload:
+        return 0.0
+    for key in keys:
+        if key in payload:
+            v = _safe_float(payload.get(key))
+            if v != 0.0:
+                return v
+    return 0.0
+
+
+def _extract_decision_confidence(
+    claude_opinion: str | None,
+    trace: dict | None = None,
+) -> int | None:
+    """Extract confidence(0~100) from trace or opinion text."""
+    try:
+        tv = (trace or {}).get("confidence")
+        if tv is not None:
+            c = int(float(tv))
+            return max(0, min(100, c))
+    except Exception:
+        pass
+
+    if not claude_opinion:
+        return None
+    try:
+        import re
+        for line in str(claude_opinion).splitlines():
+            if "신뢰도" in line or "confidence" in line.lower():
+                m = re.search(r"(\d{1,3})\s*%?", line)
+                if m:
+                    c = int(m.group(1))
+                    return max(0, min(100, c))
+    except Exception:
+        pass
+    return None
+
+
+def _build_stock_feature_snapshot(
+    signal,
+    stock_meta: dict | None,
+    price_payload: dict | None,
+) -> str:
+    chart = getattr(signal, "chart", None)
+    snapshot = {
+        "captured_at": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "stock_code": getattr(signal, "stock_code", None),
+        "stock_name": getattr(signal, "stock_name", None),
+        "current_price": getattr(signal, "current_price", None),
+        "change_pct": _extract_change_pct(price_payload),
+        "trade_value": _extract_trade_value(price_payload),
+        "trade_volume": _extract_first_number(price_payload, ("acml_vol", "acc_trdvol", "tot_tr_qty")),
+        "open_price": _extract_first_number(price_payload, ("open_pric", "stck_oprc", "opn_pric")),
+        "high_price": _extract_first_number(price_payload, ("high_pric", "stck_hgpr")),
+        "low_price": _extract_first_number(price_payload, ("lwst_pric", "low_pric", "stck_lwpr")),
+        "rsi": getattr(signal, "rsi", None),
+        "volume_ratio": getattr(signal, "volume_ratio", None),
+        "ma5": getattr(chart, "ma5", None) if chart else None,
+        "ma20": getattr(chart, "ma20", None) if chart else None,
+        "macd_line": getattr(chart, "macd_line", None) if chart else None,
+        "macd_signal": getattr(chart, "macd_signal", None) if chart else None,
+        "sector_code": (stock_meta or {}).get("sector_code"),
+        "signal_type": getattr(signal, "signal_type", None),
+        "triggered_conditions": list(getattr(signal, "triggered_conditions", []) or []),
+        "raw_price_payload": price_payload or {},
+    }
+    cleaned = {k: v for k, v in snapshot.items() if v not in (None, "", [])}
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def _label_market_regime(avg_change_pct: float) -> str:
+    if avg_change_pct >= 0.8:
+        return "risk_on"
+    if avg_change_pct <= -0.8:
+        return "risk_off"
+    return "neutral"
+
+
+def _label_trend(avg_change_pct: float) -> str:
+    if avg_change_pct >= 0.4:
+        return "bullish"
+    if avg_change_pct <= -0.4:
+        return "bearish"
+    return "sideways"
+
+
+def _label_volatility(abs_moves: list[float]) -> str:
+    if not abs_moves:
+        return "medium"
+    m = sum(abs_moves) / len(abs_moves)
+    if m >= 1.5:
+        return "high"
+    if m <= 0.5:
+        return "low"
+    return "medium"
+
+
+def _label_aggressiveness(market_regime: str, volatility: str) -> str:
+    if market_regime == "risk_on" and volatility != "high":
+        return "high"
+    if market_regime == "risk_off" or volatility == "high":
+        return "low"
+    return "medium"
+
+
+def _parse_hhmm(value: str, default_h: int, default_m: int) -> tuple[int, int]:
+    s = str(value or "").strip()
+    if ":" not in s:
+        return default_h, default_m
+    hh, mm = s.split(":", 1)
+    try:
+        return max(0, min(23, int(hh))), max(0, min(59, int(mm)))
+    except Exception:
+        return default_h, default_m
+
+
+def _fetch_yahoo_quote(symbol: str) -> dict:
+    try:
+        import httpx
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        resp = httpx.get(
+            url,
+            params={"symbols": symbol, "fields": "regularMarketPrice,regularMarketChangePercent"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        rows = ((resp.json() or {}).get("quoteResponse") or {}).get("result") or []
+        if not rows:
+            return {}
+        row = rows[0]
+        return {
+            "price": _safe_float(row.get("regularMarketPrice")),
+            "change_pct": _safe_float(row.get("regularMarketChangePercent")),
+        }
+    except Exception:
+        return {}
+
+
+def run_premarket_report():
+    """Generate premarket report (based on overnight/global context) and save structured labels."""
+    today = _now_kst().strftime("%Y-%m-%d")
+    try:
+        from worker.clients.global_market import get_global_indices
+        from worker.clients.news_client import get_macro_news_for_ai
+
+        global_idx = get_global_indices() or {}
+        nasdaq = global_idx.get("나스닥", {})
+        spx = global_idx.get("S&P500", {})
+        usdkrw = global_idx.get("달러/원", {})
+
+        nq_fut = _fetch_yahoo_quote("NQ=F")
+        es_fut = _fetch_yahoo_quote("ES=F")
+        us10y = _fetch_yahoo_quote("^TNX")
+        wti = _fetch_yahoo_quote("CL=F")
+        gold = _fetch_yahoo_quote("GC=F")
+        macro_news = get_macro_news_for_ai(max_per_keyword=2, max_total=6) or "수집된 거시 뉴스 없음"
+
+        base_moves = [
+            _safe_float(nasdaq.get("change_pct")),
+            _safe_float(spx.get("change_pct")),
+            _safe_float(nq_fut.get("change_pct")),
+            _safe_float(es_fut.get("change_pct")),
+        ]
+        base_moves = [v for v in base_moves if abs(v) > 0]
+        avg_move = (sum(base_moves) / len(base_moves)) if base_moves else 0.0
+
+        market_regime = _label_market_regime(avg_move)
+        trend = _label_trend(avg_move)
+        volatility = _label_volatility([abs(v) for v in base_moves])
+        recommended_aggr = _label_aggressiveness(market_regime, volatility)
+
+        aggressive_entry = recommended_aggr == "high"
+        increase_cash = market_regime == "risk_off" or volatility == "high"
+        avoid_targets = "갭 과열 추격 매수, 저유동성 급등주"
+
+        summary = (
+            f"장전 브리프 {today} | regime={market_regime}, vol={volatility}, "
+            f"trend={trend}, aggr={recommended_aggr}"
+        )
+        detail_lines = [
+            f"[전일 미국장/글로벌] 나스닥 {nasdaq.get('change_pct', 0):+.2f}% / S&P500 {spx.get('change_pct', 0):+.2f}%",
+            f"[선물] NQ {nq_fut.get('change_pct', 0):+.2f}% / ES {es_fut.get('change_pct', 0):+.2f}%",
+            f"[환율] USD/KRW {usdkrw.get('price', 0):,.0f} ({usdkrw.get('change_pct', 0):+.2f}%)",
+            f"[금리] 미국 10년물 {us10y.get('price', 0):.2f} ({us10y.get('change_pct', 0):+.2f}%)",
+            f"[원자재] WTI {wti.get('price', 0):.2f} ({wti.get('change_pct', 0):+.2f}%), Gold {gold.get('price', 0):.2f} ({gold.get('change_pct', 0):+.2f}%)",
+            f"[주요 뉴스/이벤트]\n{macro_news}",
+            f"[시장 분위기] {market_regime}",
+            f"[오늘의 매매 강도] {recommended_aggr}",
+            "",
+            f"오늘 agent는 공격적으로 진입해도 되는가? {'예' if aggressive_entry else '아니오'}",
+            f"어떤 섹터/종목은 피해야 하는가? {avoid_targets}",
+            f"현금 비중을 높여야 하는가? {'예' if increase_cash else '아니오'}",
+        ]
+        detail = "\n".join(detail_lines)
+
+        save_market_report(
+            report_date=today,
+            report_type="premarket",
+            summary=summary,
+            detail=detail,
+            market_regime=market_regime,
+            volatility=volatility,
+            trend=trend,
+            recommended_aggressiveness=recommended_aggr,
+            aggressive_entry=aggressive_entry,
+            avoid_targets=avoid_targets,
+            increase_cash=increase_cash,
+            meta={
+                "global_indices": global_idx,
+                "futures": {"nq": nq_fut, "es": es_fut},
+                "rates": {"us10y": us10y},
+                "commodities": {"wti": wti, "gold": gold},
+            },
+        )
+        send_message(f"📘 *장 시작 전 리포트*\n\n{detail}")
+        logger.info(f"[market_report] premarket saved: {summary}")
+    except Exception as e:
+        logger.warning(f"[market_report] premarket failed: {e}", exc_info=True)
+
+
+def run_opening_report():
+    """Generate opening report (actual market check after open) and save structured labels."""
+    today = _now_kst().strftime("%Y-%m-%d")
+    try:
+        kospi = kiwoom.get_market_index("kospi") or {}
+        time.sleep(0.5)
+        kosdaq = kiwoom.get_market_index("kosdaq") or {}
+        k_moves = [_extract_change_pct(kospi), _extract_change_pct(kosdaq)]
+        k_moves_nz = [v for v in k_moves if abs(v) > 0]
+        avg_move = (sum(k_moves_nz) / len(k_moves_nz)) if k_moves_nz else 0.0
+        market_regime = _label_market_regime(avg_move)
+        trend = _label_trend(avg_move)
+        volatility = _label_volatility([abs(v) for v in k_moves_nz])
+        recommended_aggr = _label_aggressiveness(market_regime, volatility)
+
+        enabled = [s for s in get_watchlist() if s.get("enabled")]
+        movers = []
+        total_turnover = 0.0
+        for stock in enabled[:30]:
+            code = str(stock.get("code", ""))
+            name = str(stock.get("name", code))
+            if not code:
+                continue
+            pd = kiwoom.get_current_price(code) or {}
+            pct = _extract_change_pct(pd)
+            turnover = _extract_trade_value(pd)
+            total_turnover += turnover
+            movers.append({
+                "code": code,
+                "name": name,
+                "pct": pct,
+                "sector_code": stock.get("sector_code"),
+            })
+            time.sleep(0.1)
+
+        top_up = sorted(movers, key=lambda x: x["pct"], reverse=True)[:3]
+        top_dn = sorted(movers, key=lambda x: x["pct"])[:3]
+        gap_up = [m for m in movers if m["pct"] >= 2.0]
+        gap_dn = [m for m in movers if m["pct"] <= -2.0]
+
+        sector_score: dict[str, int] = {}
+        for m in top_up:
+            key = str(m.get("sector_code") or "unknown")
+            sector_score[key] = sector_score.get(key, 0) + 1
+        lead_sector = max(sector_score.items(), key=lambda x: x[1])[0] if sector_score else "unknown"
+
+        pre = get_latest_market_report(report_type="premarket", report_date=today) or {}
+        expected = str(pre.get("market_regime") or "")
+        diff_text = "예상과 유사"
+        if expected and expected != market_regime:
+            diff_text = f"예상({expected}) 대비 실제({market_regime})로 차이 발생"
+
+        aggressive_entry = recommended_aggr == "high"
+        avoid_targets = ", ".join(m["name"] for m in top_dn) or "급락/저유동성 종목"
+        increase_cash = market_regime == "risk_off" or volatility == "high"
+
+        up_txt = ", ".join(f"{m['name']} {m['pct']:+.2f}%" for m in top_up) or "없음"
+        dn_txt = ", ".join(f"{m['name']} {m['pct']:+.2f}%" for m in top_dn) or "없음"
+        detail_lines = [
+            f"[갭] 상승 {len(gap_up)}개 / 하락 {len(gap_dn)}개 (표본 {len(movers)}개)",
+            f"[지수 초반 방향] KOSPI {_extract_change_pct(kospi):+.2f}% / KOSDAQ {_extract_change_pct(kosdaq):+.2f}%",
+            f"[거래대금(표본)] {total_turnover:,.0f}",
+            f"[주도 섹터] {lead_sector}",
+            f"[급등 종목] {up_txt}",
+            f"[급락 종목] {dn_txt}",
+            f"[예상과 실제] {diff_text}",
+            f"[전략 업데이트] regime={market_regime}, volatility={volatility}, aggressiveness={recommended_aggr}",
+            "",
+            f"오늘 agent는 공격적으로 진입해도 되는가? {'예' if aggressive_entry else '아니오'}",
+            f"어떤 섹터/종목은 피해야 하는가? {avoid_targets}",
+            f"현금 비중을 높여야 하는가? {'예' if increase_cash else '아니오'}",
+        ]
+        detail = "\n".join(detail_lines)
+        summary = (
+            f"장초 체크 {today} | regime={market_regime}, vol={volatility}, "
+            f"trend={trend}, aggr={recommended_aggr}"
+        )
+
+        save_market_report(
+            report_date=today,
+            report_type="open",
+            summary=summary,
+            detail=detail,
+            market_regime=market_regime,
+            volatility=volatility,
+            trend=trend,
+            recommended_aggressiveness=recommended_aggr,
+            aggressive_entry=aggressive_entry,
+            avoid_targets=avoid_targets,
+            increase_cash=increase_cash,
+            meta={
+                "kospi": kospi,
+                "kosdaq": kosdaq,
+                "movers_top_up": top_up,
+                "movers_top_down": top_dn,
+                "premarket_expected_regime": expected,
+            },
+        )
+        send_message(f"📗 *장 시작 직후 리포트*\n\n{detail}")
+        logger.info(f"[market_report] open saved: {summary}")
+    except Exception as e:
+        logger.warning(f"[market_report] open failed: {e}", exc_info=True)
 
 
 def _build_ai_cache_key(signal) -> str:
@@ -2160,6 +2516,14 @@ def run_check():
             model_id = str((trace or {}).get("model_id") or runtime_meta.get("model_id") or "")
             prompt_version = str((trace or {}).get("prompt_version") or runtime_meta.get("prompt_version") or "")
             policy_version = str((trace or {}).get("policy_version") or "")
+            decision_confidence = _extract_decision_confidence(claude_opinion, trace)
+
+            stock_feature_snapshot = None
+            try:
+                price_payload = kiwoom.get_current_price(signal.stock_code) or {}
+                stock_feature_snapshot = _build_stock_feature_snapshot(signal, stock, price_payload)
+            except Exception as _snap_e:
+                logger.debug(f"[{signal.stock_name}] stock snapshot 생성 실패: {_snap_e}")
 
             mark_sent(signal.stock_code, new_ids)
             if incomplete_context:
@@ -2182,6 +2546,8 @@ def run_check():
                 prompt_version=prompt_version,
                 policy_version=(policy_version or None),
                 decision_status=decision_status,
+                decision_confidence=decision_confidence,
+                stock_feature_snapshot=stock_feature_snapshot,
             )
             # Agent 모드 실행 시 tool_sequence + reasoning_chain 저장 + 텔레그램 흐름 전송
             agent_tools_summary = None
@@ -2270,6 +2636,14 @@ def main():
     scheduler.add_job(auto_sync, "cron", hour=8, minute=30, id="sync_premarket")
     scheduler.add_job(auto_sync, "cron", hour=9, minute=1, id="sync_open")
     scheduler.add_job(auto_sync, "cron", hour=18, minute=5, id="sync_close")
+    pre_hh, pre_mm = _parse_hhmm(_WORKER_CONFIG.get("premarket_report_time", "08:50"), 8, 50)
+    open_hh, open_mm = _parse_hhmm(_WORKER_CONFIG.get("opening_report_time", "09:05"), 9, 5)
+    scheduler.add_job(run_premarket_report, "cron",
+                      day_of_week="mon-fri", hour=pre_hh, minute=pre_mm,
+                      id="premarket_report")
+    scheduler.add_job(run_opening_report, "cron",
+                      day_of_week="mon-fri", hour=open_hh, minute=open_mm,
+                      id="opening_report")
     scheduler.add_job(auto_sync, "cron",
                       day_of_week="mon-fri", hour="8-18", minute=f"*/{sync_realtime_minutes}",
                       id="sync_realtime")

@@ -285,6 +285,8 @@ def init_db():
             ("target_price_snapshot", "INTEGER DEFAULT NULL"),
             ("stop_loss_snapshot", "INTEGER DEFAULT NULL"),
             ("decision_status", "TEXT DEFAULT NULL"),
+            ("decision_confidence", "INTEGER DEFAULT NULL"),
+            ("stock_feature_snapshot", "TEXT DEFAULT NULL"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {typedef}")
@@ -416,6 +418,26 @@ def init_db():
                 detail     TEXT NOT NULL DEFAULT ''
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_reports (
+                id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at                 TEXT NOT NULL,
+                report_date                TEXT NOT NULL,
+                report_type                TEXT NOT NULL,   -- premarket | open
+                summary                    TEXT NOT NULL,
+                detail                     TEXT NOT NULL DEFAULT '',
+                market_regime              TEXT DEFAULT NULL,  -- risk_on | neutral | risk_off
+                volatility                 TEXT DEFAULT NULL,  -- low | medium | high
+                trend                      TEXT DEFAULT NULL,  -- bullish | sideways | bearish
+                recommended_aggressiveness TEXT DEFAULT NULL,  -- low | medium | high
+                aggressive_entry           INTEGER DEFAULT NULL, -- 1 yes / 0 no
+                avoid_targets              TEXT DEFAULT NULL,
+                increase_cash              INTEGER DEFAULT NULL, -- 1 yes / 0 no
+                meta_json                  TEXT DEFAULT NULL,
+                UNIQUE(report_date, report_type)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_market_reports_date ON market_reports (report_date, report_type)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS strategy_reflection_logs (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1427,6 +1449,97 @@ def delete_all_strategy_notes() -> int:
         return cur.rowcount
 
 
+def save_market_report(
+    report_date: str,
+    report_type: str,
+    summary: str,
+    detail: str = "",
+    market_regime: str | None = None,
+    volatility: str | None = None,
+    trend: str | None = None,
+    recommended_aggressiveness: str | None = None,
+    aggressive_entry: bool | None = None,
+    avoid_targets: str | None = None,
+    increase_cash: bool | None = None,
+    meta: dict | None = None,
+) -> int:
+    """Save or overwrite structured market report by (report_date, report_type)."""
+    created_at = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO market_reports
+                (created_at, report_date, report_type, summary, detail,
+                 market_regime, volatility, trend, recommended_aggressiveness,
+                 aggressive_entry, avoid_targets, increase_cash, meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(report_date, report_type) DO UPDATE SET
+                created_at = excluded.created_at,
+                summary = excluded.summary,
+                detail = excluded.detail,
+                market_regime = excluded.market_regime,
+                volatility = excluded.volatility,
+                trend = excluded.trend,
+                recommended_aggressiveness = excluded.recommended_aggressiveness,
+                aggressive_entry = excluded.aggressive_entry,
+                avoid_targets = excluded.avoid_targets,
+                increase_cash = excluded.increase_cash,
+                meta_json = excluded.meta_json
+            """,
+            (
+                created_at,
+                report_date,
+                report_type,
+                summary,
+                detail,
+                market_regime,
+                volatility,
+                trend,
+                recommended_aggressiveness,
+                None if aggressive_entry is None else int(bool(aggressive_entry)),
+                avoid_targets,
+                None if increase_cash is None else int(bool(increase_cash)),
+                json.dumps(meta, ensure_ascii=False) if meta is not None else None,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def get_latest_market_report(report_type: str = "", report_date: str = "") -> dict | None:
+    with get_conn() as conn:
+        where = []
+        params: list = []
+        if report_type:
+            where.append("report_type = ?")
+            params.append(report_type)
+        if report_date:
+            where.append("report_date = ?")
+            params.append(report_date)
+
+        sql = "SELECT * FROM market_reports"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY report_date DESC, created_at DESC LIMIT 1"
+        row = conn.execute(sql, params).fetchone()
+    return dict(row) if row else None
+
+
+def get_market_reports(limit: int = 20, report_type: str = "") -> list[dict]:
+    with get_conn() as conn:
+        if report_type:
+            rows = conn.execute(
+                "SELECT * FROM market_reports WHERE report_type = ? ORDER BY report_date DESC, created_at DESC LIMIT ?",
+                (report_type, max(1, int(limit))),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM market_reports ORDER BY report_date DESC, created_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_cooldown(key: str) -> datetime | None:
     with get_conn() as conn:
         row = conn.execute(
@@ -1641,6 +1754,8 @@ def save_signal(
     prompt_version: str | None = None,
     policy_version: str | None = None,
     decision_status: str | None = None,
+    decision_confidence: int | None = None,
+    stock_feature_snapshot: str | None = None,
 ) -> int:
     """신호 저장 후 signal_id 반환. 지표 스냅샷 + verdict 자동 추출."""
     verdict = _extract_verdict(claude_opinion)
@@ -1662,8 +1777,9 @@ def save_signal(
                  verdict, indicator_snapshot, dart_summary, chart_patterns,
                  news_summary, market_snapshot, portfolio_snapshot,
                  source, model_id, prompt_version, policy_version, horizon,
-                 target_price_snapshot, stop_loss_snapshot, decision_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 target_price_snapshot, stop_loss_snapshot, decision_status,
+                 decision_confidence, stock_feature_snapshot)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1691,6 +1807,8 @@ def save_signal(
                 getattr(signal, "target_price", None),
                 getattr(signal, "stop_loss_price", None),
                 decision_status,
+                decision_confidence,
+                stock_feature_snapshot,
             ),
         )
         conn.commit()
