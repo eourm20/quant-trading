@@ -1,403 +1,528 @@
-# Quant Trading System
+﻿# Quant Trading (Agent + RAG)
 
-AI(Claude)를 활용한 개인용 퀀트 트레이딩 시스템.
-수동 모드(Claude Desktop + MCP)와 자동 모드(백그라운드 워커)로 운영.
+키움 REST API 기반 **Agent + RAG 자동 트레이딩 시스템**입니다.  
+이 문서는 단순 실행법이 아니라, **현재 코드의 프레임워크/아키텍처/데이터 흐름/저장 구조/운영 로직**을 기준으로 프로젝트 전체를 설명합니다.
 
-> 프로세스 상세 가이드: [자동 모드](img/5_auto_mode.html) · [수동 모드](img/6_manual_mode.html)
+## 1. 기술 스택과 프레임워크
 
----
+### 런타임
+- Python
+- APScheduler (잡 스케줄링)
+- SQLite (`data/db.py`)
 
-## 수동 모드 vs 자동 모드
+### 외부 API/서비스
+- 키움 REST API: 시세/지수/계좌/주문
+- OpenAI/Anthropic: 매매 판단, 리서치, 뉴스 리스크 분류
+- DART OpenAPI: 공시/재무 컨텍스트
+- 네이버 뉴스 API + RSS: 종목/거시 뉴스 컨텍스트
+- Telegram Bot API: 알림/승인/수동 명령
 
-두 모드는 독립 실행 가능하며, 같은 DB를 공유. 동시 실행도 가능.
+### AI 계층
+- `worker/claude_judge.py`: 판단 엔진(하네스 + Agent + 레거시 폴백)
+- `worker/agents/`: tool-calling 기반 judgment/research agent
+- `worker/agents/tools/rag_tools.py`: FAISS + SQLite 하이브리드 검색/인덱싱
 
-| 기능 | 수동 (Claude Desktop) | 자동 (Worker) |
-|------|---------------------|---------------|
-| **종목 추천** | MCP로 분석 → 추천만 (사용자가 판단) | 장중 스캔 + 장 마감 AI 분석 → watchlist **자동 추가** |
-| **초기 임계치** | 자동 제안 → 사용자 확인 후 등록 | AI가 자동 설정 |
-| **신호 대응** | 텔레그램 알림 → **사용자 승인** | AI 판단 → **자동 매매** (`AUTO_TRADE=true`) |
-| **포트폴리오 동기화** | MCP auto_sync (10분) | 워커 스케줄러 (2분) |
-
----
-
-## 최종 버전 핵심 업데이트 (Agent + 파싱 안정화)
-
-### 1) Agent 구조 정리 (프롬프트/도구 역할 분리)
-- Judgment/Research Agent 프롬프트를 `목표 + 절대 원칙 + 출력 형식` 중심으로 축소
-- 도구 선택 기준(언제/왜 쓰는지)은 각 tool description으로 이관
-- `BaseAgent`가 도구 카탈로그 요약을 system prompt에 자동 주입하여 자율 도구 선택 보조
-
-관련 코드:
-- `worker/agents/judgment_agent.py`
-- `worker/agents/research_agent.py`
-- `worker/agents/base_agent.py`
-- `worker/agents/tools/*.py`
-
-### 2) 안전한 결과 포맷 보장
-- `max_steps` 초과 시에도 다운스트림 파서가 처리 가능한 표준 verdict 포맷(`[홀드]`)으로 반환
-- 신호 이력 파싱에서 `[추가매수(매수)]`, `[물타기(매수)]`도 verdict로 인식하도록 확장
-
-관련 코드:
-- `worker/agents/base_agent.py`
-- `worker/claude_judge.py`
-
-### 3) ResearchAgent 등록 상한 강제
-- `max_candidates`를 프롬프트 지시가 아닌 실행 제약으로 연결
-- `add_to_watchlist` 도구에 런타임 카운터(`max_additions`, `addition_count`)를 적용해 과등록 방지
-
-관련 코드:
-- `worker/agents/research_agent.py`
-- `worker/agents/tools/db_tools.py`
-
-### 4) 텔레그램 Markdown 파싱 실패 폴백
-- Markdown entity 파싱 실패 시 plain text로 자동 재전송
-- 일반 알림/인라인 버튼/임계값 제안/봇 응답 모두 동일 폴백 적용
-- `callback_data`를 짧은 포맷(`code/signal_id` 중심)으로 정리하고, 봇은 신규/레거시 포맷을 모두 파싱하도록 개선
-
-관련 코드:
-- `notifications/telegram.py`
-- `notifications/telegram_bot.py`
-
-### 5) RAG 검색 커버리지 확장
-- `search_similar_signals`가 0건일 때 단계별 폴백(엄격→완화→광범위)으로 재검색
-- RSI/거래량 유사도 허용 오차를 파라미터화해 검색 범위를 런타임에서 조정 가능
-- Research Agent 도구셋에 `search_text_context`, `search_similar_signals`를 추가해
-  스크리닝 이력뿐 아니라 신호 이력 기반 참고도 가능
-
-관련 코드:
-- `data/db.py`
-- `worker/agents/tools/db_tools.py`
-- `worker/agents/tools/registry.py`
-- `worker/agents/research_agent.py`
-
-### 6) 성과 반영/로그 품질 강화 (2026-04 최종)
-- 실거래/모의 성과(1d/3d/5d), 스크리닝 성과(7d/30d) 계산 시 기준가를 통일:
-  - 평가일이 오늘이고 장중(main)이면 현재가
-  - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
-- 스크리닝 결과 업데이트는 좁은 윈도우(7~8일, 30~31일) 방식 대신
-  미채움(NULL) 과거 행을 재평가해 누락 복구 가능하게 변경.
-- `rr_ratio` 저장 파싱 강화:
-  - `"1.6:1" -> 1.6`, `"N/A"/빈값 -> NULL`, `0 -> 0.0`
-- 자동 스크리닝 모드에서 `user_action`이 비지 않도록 기록:
-  - 자동 등록: `auto_accepted`
-  - 자동 미등록(보류/부적합/분석실패): `auto_rejected`
-- Agent 도구 확장:
-  - `get_screening_history` (screening_log + result_7d/30d)
-  - `get_trade_performance` (trades + result_1d/3d/5d)
-- 종목 추천 Agent는 하이브리드 모드:
-  - 도구 선택/검증 순서는 자율
-  - 최근 30일 성과 요약은 고정 규칙으로 프롬프트에 강제 반영
+> 참고: 하네스와 서브에이전트는 신호 처리 결과에 직접 영향을 주는 핵심 경로입니다.  
+> 문서에는 운영/개발에 필요한 수준으로만 간결하게 포함했습니다.
 
 ---
 
-## 거래 세션
+## 2. 시스템 아키텍처
 
-| 세션 | 시간 | 매매구분(trde_tp) | 조건 필터 |
-|------|------|-----------------|----------|
-| 프리장 (장전 시간외) | 08:30~09:00 | 61 (전일 종가) | exit/add/both만 |
-| 정규장 | 09:00~15:30 | 0 (시장가) / 3 (지정가) | 전체 |
-| 애프터장 (장후 시간외) | 15:40~16:00 | 81 (당일 종가) | exit/add/both만 |
-| 시간외 단일가 | 16:00~18:00 | 62 (지정가 필수) | exit/add/both만 |
-
----
-
-## 워커 스케줄러 (자동 모드)
-
-| 작업 | 주기 | 시간대 | 설명 |
-|------|------|--------|------|
-| **run_check** | 매 1분 | 08:00~18:59 | 핵심: 종목별 조건 체크 → AI 판단 → 알림/자동매매 |
-| reset_all_cooldowns | 1일 1회 | 09:00 | 장 시작 시 전 종목 쿨다운 초기화 |
-| sync (4개) | 2분~개별 | 08:30~18:05 | 포트폴리오 실시간 동기화 |
-| update_signal_results | 매 30분 | 09:00~18:00 | 신호 후 1/3/5/10일 수익률 자동 계산 |
-| check_trailing_stops | 매 30분 | 09:00~15:00 | 수익 구간 손절가 자동 상향 (positions 테이블) |
-| check_inactive_stocks | 1일 1회 | 08:30 | 30일 미발동 종목 경고 |
-| check_removal_candidates | 매 30분 | 09:00~15:00 | 미보유 90일 미발동 자동 삭제 |
-| **run_intraday_scan** | 1일 2회 | 10:00, 13:00 | 장중 거래량 급증 경량 스캔 → 텔레그램 알림 |
-| **run_daily_screening** | 1일 1회 | 15:40 | 장 마감 AI 풀 분석 → watchlist 자동 추가 |
-| **run_daily_review** | 1일 1회 | 16:10 | AI 일일 복기 → 전략노트 저장 + 텔레그램 + 학습 피드백 |
-
----
-
-## 신호 발생 흐름
-
-```
-워커 1분 체크 (평일 08:00~18:59)
-     │
-     ├─ 세션 확인 → 장외 시간이면 return
-     ├─ DB에서 watchlist + conditions_def 로드 (실시간 반영)
-     │
-     ├─ 종목별:
-     │   ├─ 현재가 (ka10001) + 90일 일봉 (ka10081)
-     │   ├─ 기술적 지표 40+ 계산
-     │   │   RSI / MA / MACD / 볼린저 / 스토캐스틱 / CCI / 일목균형표
-     │   │   OBV / 캔들 패턴 / 차트 패턴 / 다이버전스 / 피보나치
-     │   │
-     │   ├─ 조건 평가 (29개 조건)
-     │   │   ├─ signal_type 필터 (미보유: entry/both, 보유: exit/add/both)
-     │   │   └─ 쿨다운 필터
-     │   │
-     │   ├─ AI 판단 (Claude API)
-     │   │   Input: 차트 + DART 공시/재무 + 뉴스 + 포트폴리오 + 시장지수
-     │   │   Output: [매수/매도/홀드] + 추천수량 + 근거
-     │   │
-     │   ├─ 텔레그램 알림 (인라인 버튼: 시장가/지정가/홀드/무시)
-     │   │
-     │   └─ AUTO_TRADE=true 시 → 자동 주문 실행
-     │
-     └─ 신호 DB 저장 (지표 스냅샷 + DART + 차트 패턴 포함)
+```text
+[Scheduler: worker/main.py]
+        |
+        |--- run_check() ------------------------------+
+        |                                             |
+        |                                      [worker/monitor.py]
+        |                                      신호 감지(check_stock)
+        |                                             |
+        |                                             v
+        |                                   [worker/claude_judge.py]
+        |                             AI 판단(get_trade_opinion 등)
+        |                                             |
+        |                                             v
+        |                              [data/db.py] signals 저장
+        |                                             |
+        |                                             +--> Telegram 알림
+        |                                             |
+        |                                             +--> AUTO_TRADE면 주문 실행
+        |
+        |--- sync_all() / 성과 업데이트 / 스크리닝 / 리뷰 / 뉴스모니터링 / 리플렉션
 ```
 
----
-
-## 종목 스크리닝
-
-### 장중 경량 스캔 (10:00, 13:00)
-- 거래량 급증 종목만 조회 (API 1회, AI 없음)
-- 텔레그램 알림만 발송 (watchlist 추가 안 함)
-- 관심 있으면 Claude Desktop에서 상세 분석 요청
-
-### 장 마감 풀 스크리닝 (15:40)
-- 후보 수집: 거래량 급증(ka10023) + 눌림목(ka10027) + 외인 순매수(ka10035)
-- 기존 watchlist 종목 제외 → 최대 30개 후보
-- 후보별 AI 분석: 차트 + DART + 뉴스 + 포트폴리오 + 시장환경
-- 편입 조건 5가지 중 2개 이상 충족 평가: 눌림목 / 저평가 / 테마미반영 / 실적개선 / 잠재성장
-- 자동 모드: watchlist 자동 추가 (RSI/horizon AI 설정 + 각 근거. 목표가/손절가는 매수 후 positions에서 관리)
-- 수동 모드: 텔레그램 알림 + [✅ 관심종목 등록] [❌ 패스] 버튼
-
-### Claude Desktop 종목 추천 (수동)
-- "이 종목 어때?" → MCP로 차트+공시+뉴스 직접 분석 → 관심종목 등록 제안
-- "종목 추천해줘" → 포트폴리오 확인 후 키움 API로 후보 탐색 → 분석 → 제안
-- 등록 시 AI 제안 임계값 + 각 설정 근거 포함
+핵심 포인트:
+- **스케줄러 중심 오케스트레이션**: `worker/main.py`가 모든 유스케이스를 조정
+- **도메인 분리**:
+  - 신호탐지: `monitor.py`
+  - 판단: `claude_judge.py`
+  - 실행/리스크가드: `main.py` 내부 `_auto_execute`
+  - 저장/분석: `data/db.py`
+- **실행 모드 분리**:
+  - `AUTO_TRADE=false`: 알림/모의 기록
+  - `AUTO_TRADE=true`: 자동 주문
 
 ---
 
-## AI 학습 피드백 루프
+## 3. 디렉터리 구조(현재 코드 기준)
 
-### 일일 자동 복기 (16:10)
-- 장 마감 후 AI가 오늘 신호·매매·포트폴리오·적중률·스크리닝 성과 분석
-- 전략노트 (`daily_review`) 저장 + 텔레그램 발송
-
-### 판단 AI 자기 보정
-- 매 신호 판정 시 프롬프트에 **14일 적중률 통계** + **최근 복기 인사이트** 주입
-- "매수 12건 적중58%, 홀드가 나은 결과" → AI가 보수적으로 보정
-
-### 스크리닝 AI 자기 보정
-- 매 스크리닝 시 프롬프트에 **30일 추천 적중률** (7d/30d) + **복기 스크리닝 평가** 주입
-- "7일 적중률 45%" → 종목 선별 기준 강화
-
----
-
-## 텔레그램 봇
-
-```
-신호 알림 인라인 버튼:
-  [📊 시장가] [💰 지정가] [🚪 홀드] [❌ 무시]
-
-임계값 변경 제안 버튼 (AI 홀드 시):
-  [✅ 적용] [✏️ 수정] [❌ 거절]
-
-스크리닝 결과 버튼 (수동 모드):
-  [✅ 관심종목 등록] [❌ 패스]
-
-직접 명령:
-  /buy 종목명 [수량]    매수 주문
-  /sell 종목명 [수량]   매도 주문
-  /price 종목명         현재가 조회
-  /balance              보유 종목 조회
-```
-
----
-
-## Claude Desktop (MCP 도구)
-
-### Quant MCP (17개)
-| 도구 | 설명 |
-|------|------|
-| `quant_report` | 신호/포트폴리오/매매/전략 조회 |
-| `quant_strategy_log` | 전략 노트 기록 + 텔레그램 발송 |
-| `quant_portfolio_sync` | 포트폴리오 + positions 동기화 |
-| `quant_watchlist_read/add/update/delete` | 관심종목 CRUD (신호 감지 조건) |
-| `quant_positions_read` | 보유 종목 포지션 관리 조회 (목표가/손절가 등) |
-| `quant_position_update` | 포지션 필드 수정 |
-| `quant_conditions_list/add/update/remove` | 조건 정의 관리 |
-| `quant_signal_log_delete` | 신호 로그 삭제 |
-| `quant_strategy_note_update/delete` | 전략 노트 편집 |
-| `quant_cooldown_reset` | 쿨다운 초기화 |
-
-### DART MCP (6개)
-`dart_disclosures` · `dart_company_info` · `dart_financial` · `dart_shareholders` · `dart_periodic_report` · `dart_major_event`
-
-### Kiwoom MCP (직접 API)
-`ka10001` 현재가 · `ka10081` 일봉 · `kt00018` 잔고 · `kt00007` 체결 · 주문 실행 등
-
----
-
-## 프로젝트 구조
-
-```
+```text
 quant_trading/
-├── kiwoom_mcp/                  # MCP 서버 (Claude Desktop 연동)
-│   └── kiwoom_mcp/
-│       ├── server.py            # kiwoom-mcp: 키움 API 도구
-│       ├── quant_server.py      # quant-mcp: 리포트/watchlist/조건 관리
-│       └── dart_client.py       # DART 공시 클라이언트 (풀)
-│
-├── worker/                      # 백그라운드 워커
-│   ├── main.py                  # 진입점, APScheduler (13개 작업)
-│   ├── monitor.py               # 조건 평가 엔진 (29개 조건)
-│   ├── indicators.py            # 기술적 지표 40+ (RSI/MA/MACD/볼린저/스토캐스틱/CCI/일목균형표 등)
-│   ├── claude_judge.py          # AI 매매 판단 (프롬프트 캐싱 + RAG 자기보정)
-│   ├── stock_analyzer.py        # 자동 스크리닝 + 일일 복기 (학습 피드백)
-│   ├── cooldown.py              # 신호 쿨다운
-│   ├── portfolio_sync.py        # 포트폴리오/매매내역 동기화
-│   ├── report.py                # 현황 조회
-│   └── clients/                 # 외부 API 경량 클라이언트
-│       ├── kiwoom_client.py     # 키움 REST API
-│       ├── dart_client.py       # DART 공시 API
-│       └── news_client.py       # 네이버 뉴스 API
-│
-├── notifications/
-│   ├── telegram.py              # 텔레그램 알림 (인라인 버튼)
-│   └── telegram_bot.py          # 텔레그램 봇 (주문/임계값 버튼)
-│
-├── data/
-│   ├── db.py                    # SQLite CRUD (전 데이터 통합)
-│   └── trading.db               # DB 파일 (자동 생성)
-│
-├── config/
-│   ├── worker.yaml              # 워커 설정
-│   └── conditions.yaml          # 조건 정의 백업
-│
-├── img/                         # 프로세스 가이드 (HTML)
-│   ├── 5_auto_mode.html         # 자동 모드 프로세스
-│   └── 6_manual_mode.html       # 수동 모드 프로세스
-│
-├── logs/worker.log
-├── .env
-├── CLAUDE.md                    # Claude Desktop 행동 지침
-└── requirements.txt
+  config/
+    worker.yaml                # 워커 주기/AI/리스크 설정
+    conditions.yaml            # 조건 백업/초기값
+  data/
+    db.py                      # 스키마/마이그레이션/CRUD/분석 쿼리
+    trading.db                 # 실운영 DB (환경변수로 변경 가능)
+    trading_tuning.db
+  notifications/
+    telegram.py                # 알림 전송
+    telegram_bot.py            # 텔레그램 명령/콜백 처리
+  worker/
+    main.py                    # 엔트리포인트 + 스케줄러 + 런루프
+    monitor.py                 # 종목 조건 평가, Signal 생성
+    claude_judge.py            # AI 판단 엔진
+    stock_analyzer.py          # 장중/종가 스크리닝 + 리뷰
+    portfolio_sync.py          # 계좌/체결 동기화
+    indicators.py              # 기술지표/패턴 계산
+    adaptive_policy.py         # 과거 성과 기반 진입 강도 조정
+    strategy_reflection.py     # 리플렉션/정책 업데이트 루프
+    agents/
+      base_agent.py
+      judgment_agent.py
+      research_agent.py
+      tools/
+  kiwoom_mcp/
+  logs/
+  .env.example
+  requirements.txt
+  README.md
 ```
 
 ---
 
-## SQLite DB 테이블
+## 4. 실행 프로세스 상세
 
-| 테이블 | 용도 |
-|---|---|
-| `watchlist` | 모니터링 종목 + 신호 감지 조건 (JSON) + horizon — 매수 전/후 공통 |
-| `positions` | 보유 종목 포지션 관리 (목표가/손절가/추가매수가 등) — 매수 후 자동 생성, 매도 후 자동 삭제 |
-| `conditions_def` | 시그널 조건 타입 29개 (평가 방식, 쿨다운, signal_type) |
-| `portfolio` | 보유 종목 현황 캐시 |
-| `trades` | 매매 내역 (30일) |
-| `signals` | 발생 신호 로그 (지표 스냅샷, DART, 차트 패턴, 1~10일 수익률) |
-| `cooldowns` | 조건별 마지막 알림 시각 (09:00 전체 리셋) |
-| `strategy_notes` | 전략 메모 (trade/watchlist/general/daily_review) |
+## 4.1 프로세스 시작 (`worker/main.py`)
 
----
+1. `.env` 로드 및 타임존 설정
+2. DB 초기화 (`init_db`)
+3. 포트폴리오 초기 동기화 (`sync_all`)
+4. 텔레그램 봇 스레드 시작 (`start_bot_thread`)
+5. APScheduler 잡 등록
+6. `run_check()` 1회 즉시 실행 후 루프 진입
 
-## 시그널 조건 (29개)
+## 4.2 메인 감시 루프 (`run_check`)
 
-| 조건 | signal_type | 쿨다운 | 비고 |
-|---|---|---|---|
-| RSI 과매도 | entry | 120분 | horizon별 RSI 기간 차등 (7/14/21일) |
-| RSI 과매수 | exit | 120분 | |
-| RSI 과매도 (5분봉) | entry | 30분 | horizon=단기만 |
-| RSI 극단 과매도 | both | 5분 | 긴급 반복 알림 |
-| 골든크로스 (MA) | entry | 1440분 | 전환형 |
-| 데드크로스 (MA) | exit | 1440분 | 전환형 |
-| MACD 골든/데드크로스 | entry/exit | 1440분 | 전환형 |
-| 볼린저 하단 이탈/상단 돌파 | entry/both | 360분/60분 | 전환형 |
-| 볼린저 Critical (3%+) | both | 5분 | 긴급 |
-| 거래량 급증 | both | 60분 | |
-| 목표가/손절가 도달 | exit | 360분/60분 | |
-| MA5/MA20 이탈/돌파 | exit/entry/both | 60분/1440분 | 전환형 |
-| 20일 신고가 | both | 1440분 | |
-| 스토캐스틱 골든/데드크로스 | entry/exit | - | 전환형 |
-| CCI 과매도/과매수 | entry/exit | - | ±100 기준 |
-| 일목 전환선 크로스 | entry/exit | - | 전환형 |
-| 일목 구름대 돌파/이탈 | entry/exit | - | 전환형 |
-| RSI/볼린저 물타기 | add | 240분 | 보유 종목 전용 |
+1. 세션 확인 (`get_current_session`)  
+   - main(정규장) 외에는 스킵
+2. watchlist + conditions 로드
+3. (선택) R/R 기준 종목 우선순위 정렬
+4. 예수금/실질 매수여력 계산
+5. 종목별 `check_stock` 수행
+6. 쿨다운 필터 (`filter_new_conditions`) 적용
+7. AI 판단 호출
+   - 하네스: `SKIP` / `DIRECT_SELL` / `AMBIGUOUS`
+   - ambiguous면 모델 판단
+8. 신호 저장 (`save_signal`), trace 저장, RAG 인덱싱 큐 등록
+9. 텔레그램 알림
+10. 자동모드면 `_auto_execute`, 수동모드면 `_paper_execute`
 
 ---
 
-## 환경 설정
+## 5. 신호 생성 로직 (`worker/monitor.py`)
 
-### 1. 가상환경 및 패키지 설치
+### 5.1 `check_stock` 처리
+- 시세/일봉 조회
+- RSI/거래량배율/차트요약 계산
+- `conditions_def`의 evaluator 규칙으로 조건 평가
+- 보유/미보유에 따라 평가 가능한 signal_type 제한
+  - 미보유: `entry`, `both`
+  - 보유: `exit`, `add`, `both`
+
+### 5.2 add 신호 분류
+- `_classify_add_signal`로 `momentum_add` / `averaging_down` 분기
+- 평단 조건 불일치 시 add 신호 스킵
+  - `ma5_recovery_add`: 현재가 > 평단 필요
+  - `rsi_oversold_add`, `bollinger_lower_break_add`: 현재가 < 평단 필요
+
+---
+
+## 6. AI 판단 아키텍처 (`worker/claude_judge.py`)
+
+### 6.1 백엔드 선택
+- `ANTHROPIC_API_KEY` 있으면 Anthropic
+- 없고 `OPENAI_API_KEY` 있으면 OpenAI
+
+### 6.2 판단 경로
+1. 하네스 검사 (`harness_check`)
+2. Agent 모드 판단 (tool-calling)
+3. 실패/제한 시 레거시 프롬프트 경로 폴백
+
+### 6.3 컨텍스트 구성
+- 신호/차트/지수/섹터
+- 포트폴리오/현금/최근 매매이력
+- DART 요약, 종목뉴스/거시뉴스
+- 최근 유사 신호 성과(RAG/DB)
+- 최근 AI 판단 성과 인사이트
+
+### 6.4 출력/추적
+- verdict 텍스트(`[매수]`, `[매도]`, `[홀드]` 등)
+- 추천수량/주문시장/전환조건
+- tool_sequence, reasoning_chain trace 저장
+
+---
+
+## 7. 주문 실행과 리스크 가드 (`_auto_execute`)
+
+주요 가드:
+- 의도 판별 실패(매수/매도 모호) 시 주문 스킵
+- 추천수량 누락 시 fallback 정책 적용 가능
+- 최근 매수 재진입 차단 (`buy_reentry_block_minutes`)
+- 보유 종목에서 `signal_type != add` 매수 차단
+- adaptive policy로 수량 multiplier 조정
+- 매수 하드캡: 현금/증거금 주문가능수량 상한
+- 매도 하드캡: 보유수량 초과 방지
+- weak exit는 부분매도로 제한 + 확인 지연
+
+주문 후 후처리:
+- trade/notes/cooldown 반영
+- 포트폴리오 재동기화
+- 매수 시 포지션 생성 및 AI 포지션 값(목표/손절/추매가) 설정
+- 전량매도 시 watchlist 결정(keep/drop/reassess)
+
+---
+
+## 8. 스케줄러 잡 구성 (핵심)
+
+`main()`에서 등록되는 대표 잡:
+- `run_check`: 장중 주기 감시
+- `auto_sync`: 포트폴리오 동기화
+- `run_premarket_report`, `run_opening_report`
+- `update_signal_results`, `update_trade_results`, `update_paper_results`, `update_screening_results`
+- `check_trailing_stops`, `check_inactive_stocks`, `check_removal_candidates`
+- `check_market_dip`
+- `run_intraday_scan`, `run_daily_screening`, `run_daily_review`
+- `run_weekly_performance_report`, `run_weekly_self_correction`
+- `run_reflection_policy_cycle`
+- `run_news_monitor`
+- `run_rag_batch_index`
+
+세부 시간/주기는 `config/worker.yaml`이 소스 오브 트루스입니다.
+
+---
+
+## 9. 데이터 저장 구조 (DB 스키마)
+
+`data/db.py:init_db()` 기준. 마이그레이션은 `ALTER TABLE` 방식으로 누적 적용됩니다.
+
+### 9.1 핵심 테이블
+
+1. `watchlist`
+- 종목 마스터 + 조건 필드 + 전략 메모
+- 주요 컬럼: `code`, `name`, `enabled`, `horizon`, `strategy_note`, 개별 조건 컬럼들, `sector_code`
+
+2. `conditions_def`
+- 조건 정의 테이블
+- 주요 컬럼: `id`, `name`, `evaluator`, `param`, `cooldown_minutes`, `message`, `signal_type`
+
+3. `signals`
+- 감시 루프에서 확정된 신호/판단 이력
+- 주요 컬럼:
+  - 기본: `created_at`, `stock_code`, `current_price`, `triggered_conditions`, `signal_type`, `in_portfolio`
+  - 판단: `claude_opinion`, `verdict`, `action`, `decision_status`, `decision_confidence`
+  - 컨텍스트: `indicator_snapshot`, `dart_summary`, `news_summary`, `market_snapshot`, `portfolio_snapshot`, `stock_feature_snapshot`
+  - 실험추적: `model_id`, `prompt_version`, `policy_version`, `source`, `tool_sequence`, `reasoning_chain`
+  - 성과: `result_1d`, `result_pct(3d)`, `result_5d`, `result_10d`
+
+4. `portfolio`
+- 계좌 보유 스냅샷
+- `stock_code`, `quantity`, `avg_price`, `current_price`, `profit_rate`, `updated_at`
+
+5. `positions`
+- 포지션 관리값
+- `avg_price`, `target_price`, `stop_loss_price`, `add_buy_price`, `quantity`, `updated_at`
+
+6. `trades`
+- 실거래 이력
+- `trade_id`, `executed_at`, `side`, `quantity`, `price`, `amount`, `fee`, `tax`, `result_1d/3d/5d`
+
+7. `paper_trades`
+- 모의 체결 이력
+- `order_type`, `quantity`, `price`, `signal_id`, `verdict`, `result_1d/3d/5d`
+
+8. `screening_log`
+- 장중/종가 스크리닝 결과 저장
+- `source`, `recommendation`, `reason`, `met_conditions`, `rr_ratio`, `indicator_snapshot`, `ai_response`, `user_action`, `result_7d/30d`
+
+9. `cooldowns`
+- 신호/종목별 발동 제어
+- `key`, `last_sent_at`, `next_allowed_at`
+
+10. `strategy_notes`
+- 전략 메모/리포트 본문 저장
+
+11. `market_reports`
+- premarket/open 리포트 구조화 저장
+
+12. `agent_action_logs`
+- agent 의사결정 trace 장기 저장
+
+13. `strategy_reflection_logs`, `strategy_policy_state`, `strategy_policy_update_queue`
+- 리플렉션과 정책 자동 갱신 파이프라인 상태 저장
+
+14. `realized_pnl_snapshots`
+- 실현손익 스냅샷(당일/기간)
+
+### 9.2 인덱스/분석 지원
+- `signals`, `screening_log`, `agent_action_logs`에 조회 인덱스 구성
+- `get_verdict_accuracy`, `get_condition_accuracy`, `get_weekly_performance_report` 등 분석 함수 제공
+
+---
+
+## 10. Agent + RAG 계층
+
+### 10.1 Agent Tool Registry
+- `worker/agents/tools/registry.py`
+- judgment/research 별 toolset 로딩
+
+### 10.2 Tool 분류
+- `market_tools.py`: 시세/차트/지수/랭킹
+- `portfolio_tools.py`: 보유/예수금/주문상태/손익
+- `db_tools.py`: 이력/정책/성과/watchlist 조작
+- `info_tools.py`: 뉴스/DART/거시정보
+- `order_tools.py`: 주문 실행(모드별 승인 플로우)
+- `rag_tools.py`: 임베딩 인덱싱/유사 검색
+
+### 10.3 RAG 저장소
+- 신호/스크리닝/에이전트 메모리를 문서화
+- FAISS 인덱스 + SQLite 메타 테이블 혼합
+- 실시간 인덱싱 또는 배치 인덱싱 모드 지원
+
+---
+
+## 11. 텔레그램 인터페이스
+
+`notifications/telegram.py`, `notifications/telegram_bot.py`
+
+역할:
+- 신호 알림
+- 임계값 제안/승인
+- 주문 승인/거부 플로우
+- 수동 커맨드 처리(`/buy`, `/sell`, `/balance` 등)
+- Markdown 파싱 실패 시 plain text 재전송 폴백
+
+---
+
+## 12. 설정 파일 가이드
+
+## 12.1 `.env`
+핵심 변수:
+- 키움: `KIWOOM_APP_KEY`, `KIWOOM_APP_SECRET`, `KIWOOM_ACCOUNT_NO`, `KIWOOM_BASE_URL`
+- 실행모드: `AUTO_TRADE`, `KIWOOM_ALLOW_TRADE_EXECUTION`
+- AI: `OPENAI_API_KEY` 또는 `ANTHROPIC_API_KEY`
+- 알림: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- 데이터: `DB_PATH`, `LOG_PREFIX`
+
+## 12.2 `config/worker.yaml`
+핵심 그룹:
+- 워커 주기: `interval_seconds`, `sync_realtime_minutes`
+- Agent 파라미터: `agent_max_steps`, `*_model`, `*_max_tokens`
+- 리스크: `buy_reentry_block_minutes`, `weak_exit_*`, `missing_qty_policy`
+- 스캔/스크리닝: `research_max_candidates`, `prefilter.*`
+- RAG: `rag_realtime_index`, `rag_batch_*`
+
+---
+
+## 13. 실행 방법
 
 ```bash
 python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt
-```
+.venv\Scripts\pip install -r requirements.txt
 
-### 2. `.env` 파일 설정
+# 기본 실행
+.venv\Scripts\python worker\main.py
 
-```env
-# 키움증권
-KIWOOM_APP_KEY=...
-KIWOOM_APP_SECRET=...
-KIWOOM_ACCOUNT_NO=...
-KIWOOM_BASE_URL=https://api.kiwoom.com
-KIWOOM_IS_MOCK=false
-KIWOOM_BLOCK_AFTER_HOURS_IN_MOCK=true
-KIWOOM_ALLOW_TRADE_EXECUTION=false
+# 테스트 모드 (장시간 체크 무시)
+.venv\Scripts\python worker\main.py --test
 
-# AI (둘 중 하나 필수)
-ANTHROPIC_API_KEY=...
-OPENAI_API_KEY=...
-
-# 텔레그램
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-
-# DART 공시
-DART_API_KEY=...
-
-# 네이버 뉴스
-NAVER_CLIENT_ID=...
-NAVER_CLIENT_SECRET=...
-
-# 자동매매 모드
-AUTO_TRADE=false
-```
-
-### 3. Claude Desktop MCP 설정
-
-`claude_desktop_config.json`에 kiwoom-mcp와 quant-mcp 서버 등록.
-
-### 4. 실행
-
-```bash
-# 자동 모드 (워커)
-.venv/Scripts/python worker/main.py
-
-# 테스트 (장 시간 무관 즉시 실행)
-.venv/Scripts/python worker/main.py --test
-
-# 수동 모드 (Claude Desktop에서 MCP로 대화)
+# 다른 env 파일 사용
+.venv\Scripts\python worker\main.py --env .env.real
 ```
 
 ---
 
-## 기술 스택
+## 14. 운영/정리 시 체크리스트
 
-| 구분 | 기술 |
-|---|---|
-| AI 판단 | Claude Sonnet (Anthropic API, 프롬프트 캐싱) / GPT 대체 가능 |
-| 주식 API | 키움증권 REST API |
-| 공시 | DART OpenAPI |
-| 뉴스 | 네이버 뉴스 검색 API |
-| MCP | kiwoom-mcp + quant-mcp (FastMCP) |
-| 스케줄러 | APScheduler |
-| 알림/주문 | 텔레그램 Bot API (인라인 버튼 + 양방향 명령) |
-| DB | SQLite |
-| 지표 | 40+ 기술적 지표 자체 구현 |
+1. 실제 주문 안전장치 확인
+- `AUTO_TRADE`와 `KIWOOM_ALLOW_TRADE_EXECUTION` 값 재확인
+
+2. 데이터 정합성
+- `portfolio` vs `positions` vs `trades` 동기화 상태
+- 성과 컬럼(`result_*`) 업데이트 주기 확인
+
+3. 레이트리밋 대응
+- `429` 빈도 높으면 주기/후보수/재시도 파라미터 조정
+
+4. 로그 모니터링
+- `logs/worker.log`에서 `WARNING` 패턴 추적
+- Markdown 파싱 실패, 토큰 만료, API 재시도 빈도 점검
+
+5. 문서/코드 동기화
+- 조건/스케줄/테이블 변경 시 `README`와 `worker.yaml` 동시 갱신
 
 ---
 
-## 주의사항
+## 15. 관련 파일 맵
 
-- `.env` 파일은 절대 git에 커밋하지 말 것
-- `KIWOOM_ALLOW_TRADE_EXECUTION=true` 설정 시 실제 주문 실행됨
-- `AUTO_TRADE=true` 설정 시 AI 판단 기반 자동 매매 실행됨
-- `trading.db`는 자동 생성되며 최초 실행 시 마이그레이션 자동 수행
-- MCP 서버 변경 후 Claude Desktop 재시작 필요
+- 워커 엔트리: `worker/main.py`
+- 신호 엔진: `worker/monitor.py`
+- AI 판단: `worker/claude_judge.py`
+- 스크리닝: `worker/stock_analyzer.py`
+- DB 계층: `data/db.py`
+- 알림/봇: `notifications/telegram.py`, `notifications/telegram_bot.py`
+- MCP 확장: `kiwoom_mcp/README.md`
+
+---
+
+## 16. Data Dictionary (컬럼 사전)
+
+아래는 `data/db.py:init_db()` 기준의 실무 핵심 컬럼 사전입니다.
+
+### 16.1 `watchlist`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `code` | TEXT PK | 종목코드 | `000270` |
+| `name` | TEXT | 종목명 | `기아` |
+| `enabled` | INTEGER | 감시 여부(1/0) | `1` |
+| `horizon` | TEXT | 매매 기간(단기/중기/장기) | `중기` |
+| `strategy_note` | TEXT | 전략 메모/표식 | `[REASSESS_REQUIRED] ...` |
+| `sector_code` | TEXT | 업종 코드 | `G25` |
+| `target_price` | INTEGER/NULL | (레거시/보조) 목표가 | `165000` |
+| `stop_loss_price` | INTEGER/NULL | (레거시/보조) 손절가 | `152000` |
+| `add_buy_price` | INTEGER/NULL | (레거시/보조) 추매가 | `150000` |
+| `rsi_oversold` 등 조건 컬럼 | INTEGER/REAL/NULL | 조건별 threshold/flag | `35`, `1.8`, `1` |
+
+### 16.2 `conditions_def`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `id` | TEXT PK | 조건 ID | `rsi_oversold` |
+| `name` | TEXT | 조건명 | `RSI 과매도` |
+| `evaluator` | TEXT | 평가 함수 키 | `rsi_lte` |
+| `param` | TEXT | watchlist 컬럼명 | `rsi_oversold` |
+| `cooldown_minutes` | INTEGER | 재발동 쿨다운 | `120` |
+| `message` | TEXT | 트리거 메시지 템플릿 | `RSI {rsi:.1f} <= {threshold}` |
+| `signal_type` | TEXT | `entry/exit/add/both` | `entry` |
+| `sort_order` | INTEGER | 정렬 우선순위 | `10` |
+| `description` | TEXT | 설명 | `단기 과매도 진입` |
+
+### 16.3 `signals`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `id` | INTEGER PK | 신호 ID | `1024` |
+| `created_at` | TEXT | 생성시각(KST) | `2026-04-28 10:20:47` |
+| `stock_code`/`stock_name` | TEXT | 종목 식별 | `000270` / `기아` |
+| `current_price` | INTEGER | 신호 시점 가격 | `157900` |
+| `triggered_conditions` | TEXT | 발동 조건 목록 문자열 | `RSI..., MA5...` |
+| `signal_type` | TEXT | 신호 타입 | `entry` |
+| `in_portfolio` | INTEGER | 보유 여부(1/0) | `1` |
+| `claude_opinion` | TEXT | AI 원문 판단 | `[매수] ...` |
+| `verdict` | TEXT | 요약 판정 | `매수` |
+| `action` | TEXT | 실제 실행 액션 | `매수` |
+| `decision_status` | TEXT | `normal/fallback/incomplete_context` | `normal` |
+| `decision_confidence` | INTEGER | 신뢰도(0~100) | `78` |
+| `indicator_snapshot` | TEXT(JSON) | 기술지표 스냅샷 | `{...}` |
+| `stock_feature_snapshot` | TEXT(JSON) | 가격/체결/지표 확장 스냅샷 | `{...}` |
+| `dart_summary`/`news_summary` | TEXT | 공시/뉴스 요약 | `...` |
+| `market_snapshot`/`portfolio_snapshot` | TEXT | 시장/포트폴리오 요약 | `KOSPI ...` |
+| `tool_sequence` | TEXT(JSON) | 에이전트 툴 호출 순서 | `["get_price", ...]` |
+| `reasoning_chain` | TEXT(JSON) | 에이전트 추론 요약 | `["조건확인", ...]` |
+| `model_id`/`prompt_version`/`policy_version` | TEXT | 재현성 메타 | `gpt-4.1` |
+| `source` | TEXT | 신호 소스 | `monitor`, `dip_buy`, `news_monitor` |
+| `result_1d`/`result_pct`/`result_5d`/`result_10d` | REAL | 사후 성과 | `1.24`, `2.91` |
+
+### 16.4 `positions`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `stock_code` | TEXT PK | 종목코드 | `000270` |
+| `stock_name` | TEXT | 종목명 | `기아` |
+| `avg_price` | INTEGER | 평단 | `157900` |
+| `quantity` | INTEGER | 보유수량 | `17` |
+| `target_price` | INTEGER | 목표가 | `165000` |
+| `stop_loss_price` | INTEGER | 손절가 | `152000` |
+| `add_buy_price` | INTEGER | 추가매수가 | `150000` |
+| `updated_at` | TEXT | 수정시각 | `2026-04-28 12:00:00` |
+
+### 16.5 `portfolio`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `stock_code` | TEXT PK | 종목코드 | `000270` |
+| `stock_name` | TEXT | 종목명 | `기아` |
+| `quantity` | INTEGER | 수량 | `17` |
+| `avg_price` | INTEGER | 평단 | `157900` |
+| `current_price` | INTEGER | 현재가 | `159000` |
+| `eval_amount` | INTEGER | 평가금액 | `2703000` |
+| `profit_loss` | INTEGER | 평가손익 | `18700` |
+| `profit_rate` | REAL | 수익률 | `0.70` |
+| `updated_at` | TEXT | 동기화 시각 | `...` |
+
+### 16.6 `trades`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `trade_id` | TEXT PK | 거래 고유 ID(주문/체결) | `0075632` |
+| `executed_at` | TEXT | 체결 시각/일자 | `2026-04-28` |
+| `stock_code`/`stock_name` | TEXT | 종목 식별 | `000270` / `기아` |
+| `side` | TEXT | `매수/매도` | `매수` |
+| `quantity` | INTEGER | 체결 수량 | `17` |
+| `price` | INTEGER | 체결가 | `157900` |
+| `amount` | INTEGER | 체결대금 | `2684300` |
+| `fee`/`tax` | INTEGER | 비용 | `0`, `0` |
+| `result_1d`/`result_3d`/`result_5d` | REAL | 사후성과 | `0.91` |
+
+### 16.7 `paper_trades`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `id` | INTEGER PK | 모의거래 ID | `55` |
+| `created_at` | TEXT | 기록시각 | `...` |
+| `stock_code`/`stock_name` | TEXT | 종목 식별 | `...` |
+| `order_type` | TEXT | `buy/sell` | `buy` |
+| `quantity`/`price` | INTEGER | 수량/가격 | `10` / `25000` |
+| `signal_id` | INTEGER/NULL | 연결된 신호 ID | `1024` |
+| `verdict` | TEXT | 판단 | `매수` |
+| `result_1d`/`result_3d`/`result_5d` | REAL | 사후성과 | `...` |
+
+### 16.8 `screening_log`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `id` | INTEGER PK | 스크리닝 로그 ID | `320` |
+| `created_at` | TEXT | 생성시각 | `...` |
+| `stock_code`/`stock_name` | TEXT | 종목 식별 | `...` |
+| `source` | TEXT | 후보 출처 | `intraday`, `daily` |
+| `recommendation` | TEXT | AI 결론 | `관심종목 등록` |
+| `reason` | TEXT | 근거 요약 | `...` |
+| `met_conditions` | TEXT | 충족 조건 | `...` |
+| `rr_ratio` | REAL | 손익비 | `1.8` |
+| `current_price` | INTEGER | 평가 기준가 | `...` |
+| `indicator_snapshot` | TEXT(JSON) | 지표 스냅샷 | `{...}` |
+| `ai_response` | TEXT | AI 원문 | `...` |
+| `user_action` | TEXT | 사용자/자동 액션 | `auto_accepted` |
+| `result_7d`/`result_30d` | REAL | 사후성과 | `...` |
+
+### 16.9 `cooldowns`
+| 컬럼 | 타입 | 설명 | 예시 |
+|---|---|---|---|
+| `key` | TEXT PK | 쿨다운 키 | `000270:rsi_oversold` |
+| `last_sent_at` | TEXT | 마지막 발동 시각 | `...` |
+| `next_allowed_at` | TEXT | 재허용 시각 | `...` |
+
+### 16.10 리포트/전략/추적 테이블
+| 테이블 | 핵심 컬럼 | 설명 |
+|---|---|---|
+| `strategy_notes` | `category`, `summary`, `detail` | 전략 기록/회고 본문 |
+| `market_reports` | `report_date`, `report_type`, `market_regime`, `volatility`, `trend` | 장전/장초 리포트 |
+| `agent_action_logs` | `signal_id`, `tool_sequence`, `reasoning_chain`, `final_opinion` | Agent trace 장기 저장 |
+| `strategy_reflection_logs` | `agent_type`, `status`, `praise_tags`, `fix_tags` | 리플렉션 로그 |
+| `strategy_policy_state` | `agent_type`, `policy_version`, `policy_json` | 현재 정책 스냅샷 |
+| `strategy_policy_update_queue` | `status`, `proposed_policy_json` | 정책 업데이트 큐 |
+| `realized_pnl_snapshots` | `scope`, `realized_pnl`, `fee`, `tax` | 실현손익 스냅샷 |
+
