@@ -733,15 +733,32 @@ def _fmt_recent_insights() -> str:
         review_line = ""
         if reviews:
             detail = reviews[0].get("detail", "")
-            # [개선제안]과 [적중률분석] 줄만 추출
-            for line in detail.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("[적중률분석]") or stripped.startswith("[개선제안]"):
-                    review_line += stripped + "\n"
-            if not review_line:
-                # 없으면 첫 2줄
-                lines = [l.strip() for l in detail.splitlines() if l.strip()]
-                review_line = "\n".join(lines[:2])
+            lines = [l.strip() for l in detail.splitlines() if l.strip()]
+
+            # 신규 포맷 우선: [Agent Guidance] 섹션 bullet 추출
+            agent_guidance: list[str] = []
+            in_guidance = False
+            for line in lines:
+                if line == "[Agent Guidance]":
+                    in_guidance = True
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    in_guidance = False
+                    continue
+                if in_guidance and line.startswith("-"):
+                    item = line[1:].strip()
+                    if item and item != "없음":
+                        agent_guidance.append(item)
+            if agent_guidance:
+                review_line = "Agent Guidance: " + " / ".join(agent_guidance[:3])
+            else:
+                # 구 포맷 fallback: [적중률분석]/[개선제안]
+                for line in lines:
+                    if line.startswith("[적중률분석]") or line.startswith("[개선제안]"):
+                        review_line += line + "\n"
+                if not review_line:
+                    # 최후 fallback: 첫 2줄
+                    review_line = "\n".join(lines[:2])
 
         # 최근 14일 적중률 요약 — 1줄
         accuracy = get_verdict_accuracy(days=14)

@@ -887,6 +887,13 @@ class TelegramBot:
                 )
         elif cmd in ("/balance", "/잔고"):
             self._cmd_balance()
+        elif cmd == "/issues":
+            self._cmd_issues(parts[1:] if len(parts) > 1 else [])
+        elif cmd == "/issue_done":
+            if len(parts) >= 2:
+                self._cmd_issue_done(parts[1], " ".join(parts[2:]) if len(parts) > 2 else "")
+            else:
+                self._send("사용법: `/issue_done 3` 또는 `/issue_done 3 완료메모`")
         elif text.startswith("/"):
             self._send("❓ 알 수 없는 명령어입니다.\n/help 로 사용법을 확인하세요.")
         else:
@@ -903,9 +910,48 @@ class TelegramBot:
             "`/cancel` — 대기 중인 주문 취소\n"
             "`/price 종목명or코드` — 현재가 조회\n"
             "`/balance` — 잔고 및 보유 종목 조회\n\n"
+            "`/issues` — 운영 이슈(open) 조회\n"
+            "`/issues all` — 전체 이슈 조회\n"
+            "`/issue_done ID [메모]` — 이슈 완료 처리\n\n"
             "💡 종목명 전체 검색 가능 (부분 일치 지원)\n"
             "🔒 매매 실행: " + ("*활성화*" if ALLOW_TRADE else "*비활성화* (KIWOOM\\_ALLOW\\_TRADE\\_EXECUTION=true 필요)")
         )
+
+    def _cmd_issues(self, args: list[str]) -> None:
+        try:
+            from data.db import get_improvement_issues
+            mode = (args[0].strip().lower() if args else "open")
+            status = "all" if mode in ("all", "전체") else "open"
+            rows = get_improvement_issues(status=status, limit=15)
+            if not rows:
+                self._send("📭 조회된 이슈가 없습니다.")
+                return
+            lines = [f"🛠 *Improvement Issues* ({status})", ""]
+            for r in rows:
+                iid = r.get("id")
+                pri = r.get("priority", "P2")
+                st = r.get("status", "open")
+                title = str(r.get("title", "")).strip()
+                lines.append(f"`#{iid}` [{pri}/{st}] {title}")
+            self._send("\n".join(lines))
+        except Exception as e:
+            self._send(f"❌ 이슈 조회 실패: `{e}`")
+
+    def _cmd_issue_done(self, issue_id_text: str, note: str = "") -> None:
+        try:
+            issue_id = int(str(issue_id_text).strip())
+        except Exception:
+            self._send("❌ 이슈 ID는 숫자로 입력해 주세요. 예: `/issue_done 3`")
+            return
+        try:
+            from data.db import update_improvement_issue_status
+            ok = update_improvement_issue_status(issue_id, "done", resolved_note=(note or "telegram_done"))
+            if not ok:
+                self._send(f"⚠️ 이슈 `#{issue_id}` 상태 변경 실패 (ID 확인 필요)")
+                return
+            self._send(f"✅ 이슈 `#{issue_id}` 완료 처리했습니다.")
+        except Exception as e:
+            self._send(f"❌ 이슈 완료 처리 실패: `{e}`")
 
     def _cmd_status(self) -> None:
         with self._lock:

@@ -419,6 +419,25 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS improvement_issues (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                source_note_id INTEGER DEFAULT NULL,
+                issue_date TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'general',
+                priority TEXT NOT NULL DEFAULT 'P2',
+                status TEXT NOT NULL DEFAULT 'open',
+                owner TEXT DEFAULT '',
+                due_date TEXT DEFAULT '',
+                resolution_note TEXT DEFAULT '',
+                resolved_at TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_improvement_issues_status ON improvement_issues (status, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_improvement_issues_date ON improvement_issues (issue_date, created_at)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS market_reports (
                 id                         INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at                 TEXT NOT NULL,
@@ -1352,7 +1371,7 @@ def get_recent_realized_pnl_snapshots(limit: int = 20, scope: str = "") -> list[
 
 # ── 전략 노트 ──────────────────────────────────────────────────────────────
 
-def save_strategy_note(category: str, summary: str, detail: str = ""):
+def save_strategy_note(category: str, summary: str, detail: str = "") -> int:
     """전략 결정 기록 저장
     category: 'trade' | 'watchlist' | 'general'
     """
@@ -1368,11 +1387,12 @@ def save_strategy_note(category: str, summary: str, detail: str = ""):
             )
             """
         )
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO strategy_notes (created_at, category, summary, detail) VALUES (?, ?, ?, ?)",
             (_now_kst().strftime("%Y-%m-%d %H:%M:%S"), category, summary, detail),
         )
         conn.commit()
+        return int(cur.lastrowid)
 
 
 def get_strategy_notes(limit: int = 20) -> list[dict]:
@@ -2099,6 +2119,156 @@ def get_recent_daily_reviews(limit: int = 3) -> list[dict]:
             return [dict(r) for r in rows]
         except Exception:
             return []
+
+
+def save_improvement_issue(
+    issue_date: str,
+    title: str,
+    description: str = "",
+    category: str = "general",
+    priority: str = "P2",
+    source_note_id: int | None = None,
+    owner: str = "",
+    due_date: str = "",
+) -> int:
+    """운영자가 직접 처리해야 하는 시스템 개선 이슈 저장."""
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO improvement_issues
+               (created_at, source_note_id, issue_date, title, description, category, priority, status, owner, due_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+            (
+                now,
+                source_note_id,
+                issue_date,
+                title,
+                description or "",
+                category or "general",
+                priority or "P2",
+                owner or "",
+                due_date or "",
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def get_improvement_issues(status: str = "open", limit: int = 20) -> list[dict]:
+    """개선 이슈 목록 조회."""
+    with get_conn() as conn:
+        if status == "all":
+            rows = conn.execute(
+                "SELECT * FROM improvement_issues ORDER BY id DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM improvement_issues WHERE status=? ORDER BY id DESC LIMIT ?",
+                (status, max(1, int(limit))),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_improvement_issue_status(issue_id: int, status: str, resolved_note: str = "") -> bool:
+    """개선 이슈 상태 변경."""
+    st = str(status or "").strip().lower()
+    if st not in {"open", "in_progress", "done", "wontfix"}:
+        return False
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE improvement_issues "
+            "SET status=?, resolved_at=(CASE WHEN ?='done' THEN ? ELSE resolved_at END), "
+            "resolved_note=(CASE WHEN ?='done' THEN ? ELSE resolved_note END) "
+            "WHERE id=?",
+            (st, st, _now_kst().strftime("%Y-%m-%d %H:%M:%S"), st, resolved_note or "", int(issue_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def backfill_improvement_issues_from_daily_reviews(limit: int = 120) -> int:
+    """과거 daily_review 텍스트에서 수동 개선 이슈를 추출해 improvement_issues에 적재.
+
+    중복 방지: (source_note_id, title) 동일 항목이 이미 있으면 건너뜀.
+    """
+    import re
+
+    def _extract_items(detail: str) -> list[str]:
+        lines = [ln.strip() for ln in str(detail or "").splitlines() if ln.strip()]
+        items: list[str] = []
+
+        # 신규 포맷: [System Issues] 섹션
+        in_sys = False
+        for ln in lines:
+            if ln == "[System Issues]":
+                in_sys = True
+                continue
+            if ln.startswith("[") and ln.endswith("]"):
+                in_sys = False
+                continue
+            if in_sys and ln.startswith("-"):
+                txt = ln[1:].strip()
+                if txt and txt != "없음" and txt.strip("- ").strip():
+                    items.append(txt)
+
+        if items:
+            return items
+
+        # 구 포맷 fallback: [Action Items Tomorrow] 섹션
+        in_action = False
+        for ln in lines:
+            if ln == "[Action Items Tomorrow]":
+                in_action = True
+                continue
+            if ln.startswith("[") and ln.endswith("]"):
+                in_action = False
+                continue
+            if in_action and ln.startswith("-"):
+                txt = ln[1:].strip()
+                if txt and txt != "없음" and txt.strip("- ").strip():
+                    items.append(txt)
+        return items
+
+    with get_conn() as conn:
+        reviews = conn.execute(
+            "SELECT id, created_at, detail FROM strategy_notes "
+            "WHERE category='daily_review' ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        inserted = 0
+        for r in reviews:
+            note_id = int(r["id"])
+            issue_date = str(r["created_at"])[:10]
+            for raw in _extract_items(r["detail"]):
+                title = re.sub(r"\s+", " ", raw).strip()[:120]
+                if not title:
+                    continue
+                dup = conn.execute(
+                    "SELECT 1 FROM improvement_issues WHERE source_note_id=? AND title=? LIMIT 1",
+                    (note_id, title),
+                ).fetchone()
+                if dup:
+                    continue
+                category = "general"
+                priority = "P2"
+                if any(k in raw for k in ("데이터", "집계", "DB", "스키마")):
+                    category = "data_quality"
+                elif any(k in raw for k in ("필터", "조건", "튜닝", "파라미터")):
+                    category = "signal_logic"
+                elif any(k in raw for k in ("API", "429", "토큰", "에러", "장애")):
+                    category = "infra"
+                if any(k in raw for k in ("즉시", "긴급", "치명", "오류")):
+                    priority = "P1"
+                conn.execute(
+                    """INSERT INTO improvement_issues
+                       (created_at, source_note_id, issue_date, title, description, category, priority, status, owner, due_date)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', '', '')""",
+                    (_now_kst().strftime("%Y-%m-%d %H:%M:%S"), note_id, issue_date, title, raw, category, priority),
+                )
+                inserted += 1
+        conn.commit()
+        return inserted
 
 
 def get_screening_accuracy(days: int = 30) -> dict:

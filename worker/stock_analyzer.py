@@ -119,6 +119,7 @@ def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
 
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     picks: list[str] = []
+    pick_status_pairs: list[tuple[str, str]] = []
     watchlist_status: list[str] = []
 
     for ln in lines:
@@ -133,17 +134,26 @@ def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
 
         # Example: "1. 남해화학(025860): 편입 적합"
         if re.match(r"^\d+\.\s+", norm):
-            picks.append(re.sub(r"\s+", " ", norm)[:140])
+            clean = re.sub(r"\s+", " ", norm)[:140]
+            picks.append(clean)
+            m = re.match(r"^\d+\.\s*([^:]+):\s*(.+)$", clean)
+            if m:
+                pick_status_pairs.append((m.group(1).strip(), m.group(2).strip()))
             continue
 
         # Example (non-numbered): "남해화학(025860): 편입 적합"
         if re.search(r"\([0-9]{6}\)\s*:", norm):
-            picks.append(re.sub(r"\s+", " ", norm)[:140])
+            clean = re.sub(r"\s+", " ", norm)[:140]
+            picks.append(clean)
+            m = re.match(r"^([^:]+):\s*(.+)$", clean)
+            if m:
+                pick_status_pairs.append((m.group(1).strip(), m.group(2).strip()))
             continue
 
         # Capture registration/watchlist status lines.
+        # 종목 식별자가 없는 generic 문구는 혼동을 유발하므로 수집하지 않는다.
         lower = norm.lower()
-        if ("watchlist" in lower) or ("등록" in norm) or ("미등록" in norm):
+        if (("watchlist" in lower) or ("등록" in norm) or ("미등록" in norm)) and re.search(r"\([0-9]{6}\)", norm):
             watchlist_status.append(re.sub(r"\s+", " ", norm)[:140])
 
     # De-duplicate while preserving order.
@@ -159,6 +169,21 @@ def _build_agent_telegram_summary(result_text: str, max_items: int = 6) -> str:
 
     picks = _uniq(picks)[:max_items]
     watchlist_status = _uniq(watchlist_status)[:max_items]
+
+    # picks가 있으면 종목-상태를 일관되게 재구성해 watchlist_status를 대체한다.
+    derived_status: list[str] = []
+    for stock_label, decision_text in pick_status_pairs:
+        d = decision_text.lower()
+        if "편입" in decision_text:
+            derived_status.append(f"watchlist: done ({stock_label})")
+        elif "보류" in decision_text:
+            derived_status.append(f"watchlist: not added ({stock_label}, 보류)")
+        elif "부적합" in decision_text:
+            derived_status.append(f"watchlist: not added ({stock_label}, 부적합)")
+        elif "not added" in d:
+            derived_status.append(f"watchlist: not added ({stock_label})")
+    if derived_status:
+        watchlist_status = _uniq(derived_status)[:max_items]
 
     out: list[str] = []
     if picks:
@@ -1659,7 +1684,6 @@ def run_daily_screening():
             }
             rule_added_codes = sorted([c for c in (_watchlist_after - _watchlist_before) if c])
             rule_added_count = len(rule_added_codes)
-            tool_added_count = int(getattr(_agent, "addition_count", 0) or 0)
             status_line = (
                 "0 additions (no inclusion decision or all already present)"
                 if rule_added_count <= 0
@@ -1669,7 +1693,6 @@ def run_daily_screening():
                 f"[ResearchAgent Screening] completed\n"
                 f"- tools: {tools_summary}\n"
                 f"- tool_coverage_score: {coverage_score}\n"
-                f"- add_to_watchlist(tool_calls): {tool_added_count}\n"
                 f"- decision_rule_applied: {status_line}\n\n"
                 f"{summary_text}"
             )
@@ -2006,6 +2029,7 @@ def run_daily_review():
     from data.db import (
         get_today_signals, get_portfolio, get_trades,
         get_verdict_accuracy, save_strategy_note, get_screening_accuracy,
+        get_recent_daily_reviews, save_improvement_issue,
     )
     from notifications.telegram import send_message
 
@@ -2023,6 +2047,30 @@ def run_daily_review():
     portfolio = get_portfolio()
     accuracy_14d = get_verdict_accuracy(days=14)
     screening_acc = get_screening_accuracy(days=30)
+    recent_reviews = get_recent_daily_reviews(limit=2)
+
+    def _extract_bullets_by_header(text: str, header: str) -> list[str]:
+        out: list[str] = []
+        current = None
+        for ln in str(text or "").replace("\r", "").split("\n"):
+            s = ln.strip()
+            if s == f"[{header}]":
+                current = header
+                continue
+            if s.startswith("[") and s.endswith("]"):
+                current = None
+                continue
+            if current == header and s.startswith("-"):
+                item = s[1:].strip()
+                if item and item != "없음":
+                    out.append(item)
+        return out
+
+    prev_guidance: list[str] = []
+    prev_review_date = ""
+    if recent_reviews:
+        prev_review_date = str(recent_reviews[0].get("created_at", ""))[:10]
+        prev_guidance = _extract_bullets_by_header(recent_reviews[0].get("detail", ""), "Agent Guidance")
 
     # 신호 요약 (최대 15건, 핵심만)
     signal_lines = []
@@ -2084,28 +2132,37 @@ def run_daily_review():
 ### 최근 30일 스크리닝 성과
 {scr_text or "데이터 부족"}
 
+### 전일 Agent Guidance ({prev_review_date or "N/A"})
+{chr(10).join(f"- {g}" for g in prev_guidance[:8]) if prev_guidance else "- 없음"}
+
 위 데이터를 분석하여 아래 형식으로 하루 복기를 작성하세요.
 
 ## 출력 형식 (엄격히 준수)
-[시장총평] 1~2문장
-[신호분석] 오늘 주요 신호와 AI 판정 평가 (2~3문장)
-[매매평가] 오늘 매매 실행 평가, 없으면 "매매 없음" (1~2문장)
-[적중률분석] 최근 판정별 적중률 분석, 오판 패턴이 있으면 지적 (2~3문장)
-[스크리닝평가] 종목 추천 성과 분석, 없으면 생략 (1~2문장)
-[내일주의] 내일 주의사항/확인할 포인트 (2~3개 bullet)
-[개선제안] AI 판단 개선을 위한 구체적 제안 (1~2개, 없으면 생략)
+[Executive Summary]
+[What Worked]
+[What Failed]
+[Carry-over Check]
+- 전일 Agent Guidance 항목별 준수 여부를 평가(준수/미준수/부분준수 + 간단 근거)
+[System Issues]
+- 운영자가 직접 수정해야 하는 시스템/데이터/필터/집계 이슈만 bullet로 작성
+- 항목 없으면 "- 없음"
+[Agent Guidance]
+- 다음날 AI 판단 흐름에 자동 반영할 지침 bullet로 작성
+- 항목 없으면 "- 없음"
 
-총 300자 이내. 마크다운 헤더(#) 금지."""
+마크다운 헤더(#) 금지."""
 
     user_prompt += """
 
 Additional output rules (must follow):
-- First part must be human-readable (max 18 lines).
+- First part must be human-readable (max 22 lines).
 - Use these exact section headers in order:
   [Executive Summary]
   [What Worked]
   [What Failed]
-  [Action Items Tomorrow]
+  [Carry-over Check]
+  [System Issues]
+  [Agent Guidance]
 - Keep each section concise; avoid long background explanation.
 """
 
@@ -2138,6 +2195,34 @@ Additional output rules (must follow):
     except Exception as e:
         logger.error(f"[일일복기] AI 호출 실패: {e}")
         return
+
+    def _extract_section_blocks(text: str) -> dict[str, list[str]]:
+        sections = {
+            "Carry-over Check": [],
+            "System Issues": [],
+            "Agent Guidance": [],
+        }
+        current = None
+        for ln in (text or "").replace("\r", "").split("\n"):
+            s = ln.strip()
+            if s == "[Carry-over Check]":
+                current = "Carry-over Check"
+                continue
+            if s == "[System Issues]":
+                current = "System Issues"
+                continue
+            if s == "[Agent Guidance]":
+                current = "Agent Guidance"
+                continue
+            if s.startswith("[") and s.endswith("]"):
+                current = None
+                continue
+            if current in sections:
+                if s.startswith("-"):
+                    item = s[1:].strip()
+                    if item and item != "없음":
+                        sections[current].append(item)
+        return sections
 
     # ── 전략노트 저장 ──
     # Build structured payload for RAG-friendly indexing.
@@ -2185,8 +2270,27 @@ Additional output rules (must follow):
     }
     rag_json = json.dumps(review_payload, ensure_ascii=False, indent=2)
     review_text_human = (review_text or "").strip()
+    lines = review_text_human.replace("\r", "").split("\n")
+    filtered_lines: list[str] = []
+    skip_sys = False
+    for raw_ln in lines:
+        s = raw_ln.strip()
+        if s == "[System Issues]":
+            skip_sys = True
+            continue
+        if skip_sys and s.startswith("[") and s.endswith("]"):
+            skip_sys = False
+        if not skip_sys:
+            filtered_lines.append(raw_ln)
+    review_text_human_for_note = "\n".join(filtered_lines).strip()
+    if review_text_human_for_note != review_text_human:
+        review_text_human_for_note += (
+            "\n\n[System Issues]\n"
+            "- 운영 이슈는 strategy_note 반영 대상이 아니며 improvement_issues 테이블에서 별도 추적"
+        )
+
     review_text_full = (
-        f"{review_text_human}\n\n"
+        f"{review_text_human_for_note}\n\n"
         f"---\n"
         f"[RAG_CONTEXT_JSON]\n"
         f"```json\n{rag_json}\n```"
@@ -2194,8 +2298,38 @@ Additional output rules (must follow):
 
     # ── 전략노트 저장 (human + structured) ──
     summary = f"{today_str} 자동 복기"
-    save_strategy_note("daily_review", summary, review_text_full)
+    note_id = save_strategy_note("daily_review", summary, review_text_full)
     logger.info(f"[일일복기] 전략노트 저장 완료")
+
+    # ── System Issues를 별도 이슈 테이블에 저장 ──
+    try:
+        blocks = _extract_section_blocks(review_text_human)
+        issue_count = 0
+        for item in blocks.get("System Issues", []):
+            txt = item.strip()
+            category = "general"
+            priority = "P2"
+            if any(k in txt for k in ("데이터", "집계", "DB", "스키마")):
+                category = "data_quality"
+            elif any(k in txt for k in ("필터", "조건", "튜닝", "파라미터")):
+                category = "signal_logic"
+            elif any(k in txt for k in ("API", "429", "토큰", "에러", "장애")):
+                category = "infra"
+            if any(k in txt for k in ("즉시", "긴급", "치명", "오류")):
+                priority = "P1"
+            save_improvement_issue(
+                issue_date=today_str,
+                title=(txt[:120] if txt else "daily_review issue"),
+                description=txt,
+                category=category,
+                priority=priority,
+                source_note_id=note_id,
+            )
+            issue_count += 1
+        if issue_count:
+            logger.info(f"[일일복기] 개선 이슈 자동 등록: {issue_count}건")
+    except Exception as _issue_e:
+        logger.warning(f"[일일복기] 개선 이슈 저장 실패: {_issue_e}")
 
     # ── 텔레그램 발송 (human-readable only) ──
     tg_text = f"📊 *{today_str} 일일 복기*\n\n{review_text_human}"
