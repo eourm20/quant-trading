@@ -11,7 +11,7 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-AUTO_TRADE = os.getenv("KIWOOM_ALLOW_TRADE_EXECUTION", "false").lower() == "true"
+AUTO_TRADE = os.getenv("AUTO_TRADE", "false").lower() == "true"
 
 # 승인 이벤트 저장소: {stock_code: threading.Event}
 _pending_approvals: dict[str, dict] = {}

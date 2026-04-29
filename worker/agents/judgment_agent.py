@@ -128,7 +128,6 @@ class JudgmentAgent:
             days=60,
             limit=20,
         )
-        has_recent_review_note = False
         try:
             from data.db import get_recent_daily_reviews
             reviews = get_recent_daily_reviews(limit=1) or []
@@ -138,14 +137,20 @@ class JudgmentAgent:
                     "created_at": r0.get("created_at", ""),
                     "summary": r0.get("summary", ""),
                     "detail": r0.get("detail", ""),
+                    "source": "daily_review",
                 }
-                has_recent_review_note = True
             else:
-                ctx["recent_review_note"] = {"error": "missing_recent_daily_review"}
+                # Optional context: do not fail preflight when daily review is not ready yet.
+                ctx["recent_review_note"] = {
+                    "optional_missing": True,
+                    "reason": "missing_recent_daily_review",
+                }
         except Exception as e:
-            ctx["recent_review_note"] = {"error": str(e)}
-        if has_recent_review_note:
-            required.append("recent_review_note")
+            # Keep as optional hint; never escalate to preflight error.
+            ctx["recent_review_note"] = {
+                "optional_missing": True,
+                "reason": f"daily_review_fetch_error:{e}",
+            }
         ctx["market_brief"] = _call("market_news_brief", max_items=5)
         ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=5)
         ctx["macro_brief"] = _call("rss_macro_brief", max_total=6)

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = str(os.getenv("TELEGRAM_CHAT_ID", "")).strip()
-ALLOW_TRADE = os.getenv("KIWOOM_ALLOW_TRADE_EXECUTION", "false").lower() == "true"
+ALLOW_TRADE = True  # manual Telegram orders are always allowed (with confirm)
 
 CONFIRM_TIMEOUT_SEC = 60  # 확인 대기 시간
 
@@ -990,7 +990,7 @@ class TelegramBot:
         if not ALLOW_TRADE:
             self._send(
                 "🔒 매매 실행이 비활성화되어 있습니다.\n"
-                "`.env` 에 `KIWOOM_ALLOW_TRADE_EXECUTION=true` 설정 후 워커를 재시작하세요."
+                "`.env` 에 `AUTO_TRADE=true` 설정 후 워커를 재시작하세요."
             )
             return
 

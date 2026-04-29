@@ -1702,7 +1702,7 @@ def run_daily_screening():
             # Agent mode does not write per-candidate screening_log by default; keep a trace in strategy_notes.
             try:
                 from data.db import save_strategy_note as _save_strategy_note, save_agent_action_log as _save_agent_action_log
-                _save_strategy_note(
+                _note_id = _save_strategy_note(
                     "watchlist",
                     "ResearchAgent daily screening completed",
                     (
@@ -1713,6 +1713,18 @@ def run_daily_screening():
                         f"decision_rule_added_codes={rule_added_codes}\n\n"
                         f"{result_text[:3000]}"
                     ),
+                    meta={
+                        "type": "research_screening_summary",
+                        "mode": "agent",
+                        "tool_coverage_score": coverage_score,
+                        "tool_added_count": tool_added_count,
+                        "decision_rule_added_count": rule_added_count,
+                        "decision_rule_added_codes": rule_added_codes,
+                        "market_context": {
+                            "kospi_change_pct": _kospi,
+                            "kosdaq_change_pct": _kosdaq,
+                        },
+                    },
                 )
                 _save_agent_action_log(
                     signal_id=0,
@@ -1737,11 +1749,15 @@ def run_daily_screening():
                     _index_tool_trace_memory(
                         source_key=f"agent_screening_trace:{now_kst().strftime('%Y%m%d_%H%M%S')}",
                         tool_trace=_trace_text,
+                        ref_table="strategy_notes",
+                        ref_id=_note_id,
                         extra={"mode": "agent", "status": "success"},
                     )
                     _index_market_regime_memory(
                         source_key=f"agent_market:{now_kst().strftime('%Y%m%d_%H%M%S')}",
                         market_snapshot=f"KOSPI={_kospi:+.2f}% KOSDAQ={_kosdaq:+.2f}% tools={tools_summary}",
+                        ref_table="strategy_notes",
+                        ref_id=_note_id,
                         extra={"mode": "agent"},
                     )
                     if rule_added_count <= 0:
@@ -1749,6 +1765,8 @@ def run_daily_screening():
                             source_key=f"agent_zero_add:{now_kst().strftime('%Y%m%d_%H%M%S')}",
                             title="ResearchAgent zero additions",
                             content=f"{_trace_text}\n{result_text[:2000]}",
+                            ref_table="strategy_notes",
+                            ref_id=_note_id,
                             extra={"mode": "agent", "type": "zero_add"},
                         )
                 except Exception as _rag_e:

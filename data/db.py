@@ -27,6 +27,111 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _resolve_strategy_note_text(conn: sqlite3.Connection, note_id, fallback: str = "") -> str:
+    try:
+        if not note_id:
+            return fallback or ""
+        row = conn.execute("SELECT detail FROM strategy_notes WHERE id = ?", (int(note_id),)).fetchone()
+        if row and row["detail"]:
+            return str(row["detail"])
+    except Exception:
+        pass
+    return fallback or ""
+
+
+def _link_strategy_note(
+    conn: sqlite3.Connection,
+    owner: str,
+    owner_id: str,
+    strategy_note_id,
+    reason: str = "",
+    linked_at: str | None = None,
+) -> None:
+    """Append/activate strategy-note link history for watchlist/positions."""
+    if not owner_id:
+        return
+    note_id = None
+    try:
+        if strategy_note_id not in (None, ""):
+            note_id = int(strategy_note_id)
+    except Exception:
+        note_id = None
+    if note_id is None:
+        return
+    ts = linked_at or _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    if owner == "watchlist":
+        conn.execute(
+            "UPDATE watchlist_strategy_note_links SET is_active = 0 WHERE stock_code = ?",
+            (owner_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO watchlist_strategy_note_links
+            (stock_code, strategy_note_id, linked_at, reason, is_active)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (owner_id, note_id, ts, reason or ""),
+        )
+    elif owner == "position":
+        conn.execute(
+            "UPDATE position_strategy_note_links SET is_active = 0 WHERE stock_code = ?",
+            (owner_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_strategy_note_links
+            (stock_code, strategy_note_id, linked_at, reason, is_active)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (owner_id, note_id, ts, reason or ""),
+        )
+
+
+def _backfill_strategy_note_links(conn: sqlite3.Connection) -> None:
+    """Ensure current strategy_note_id state has at least one active link row."""
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    for row in conn.execute(
+        "SELECT code, strategy_note_id FROM watchlist WHERE strategy_note_id IS NOT NULL"
+    ).fetchall():
+        existing = conn.execute(
+            """
+            SELECT 1 FROM watchlist_strategy_note_links
+            WHERE stock_code = ? AND strategy_note_id = ? AND is_active = 1
+            LIMIT 1
+            """,
+            (row["code"], row["strategy_note_id"]),
+        ).fetchone()
+        if not existing:
+            _link_strategy_note(
+                conn,
+                "watchlist",
+                row["code"],
+                row["strategy_note_id"],
+                reason="backfill_current_state",
+                linked_at=now,
+            )
+    for row in conn.execute(
+        "SELECT stock_code, strategy_note_id FROM positions WHERE strategy_note_id IS NOT NULL"
+    ).fetchall():
+        existing = conn.execute(
+            """
+            SELECT 1 FROM position_strategy_note_links
+            WHERE stock_code = ? AND strategy_note_id = ? AND is_active = 1
+            LIMIT 1
+            """,
+            (row["stock_code"], row["strategy_note_id"]),
+        ).fetchone()
+        if not existing:
+            _link_strategy_note(
+                conn,
+                "position",
+                row["stock_code"],
+                row["strategy_note_id"],
+                reason="backfill_current_state",
+                linked_at=now,
+            )
+
+
 def _p(value) -> int:
     """문자열 숫자 파싱 (부호/소수점/콤마 처리)"""
     if not value:
@@ -91,10 +196,11 @@ def _repair_legacy_watchlist_conditions(conn: sqlite3.Connection, stock_code: st
         if any(row[f] is not None for f in _WL_SIGNAL_FIELDS):
             continue
         note_row = conn.execute(
-            "SELECT strategy_note FROM watchlist WHERE code = ?",
+            "SELECT name, strategy_note_id FROM watchlist WHERE code = ?",
             (row["code"],),
         ).fetchone()
-        old_note = (note_row["strategy_note"] if note_row and note_row["strategy_note"] else "").strip()
+        stock_name = (note_row["name"] if note_row and note_row["name"] else row["code"])
+        old_note = _resolve_strategy_note_text(conn, (note_row["strategy_note_id"] if note_row else None), "").strip()
         marker = "[REASSESS_REQUIRED]"
         if marker in old_note:
             new_note = old_note
@@ -102,9 +208,14 @@ def _repair_legacy_watchlist_conditions(conn: sqlite3.Connection, stock_code: st
             ts = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
             extra = f"{marker} {ts} legacy watchlist row had no monitoring conditions."
             new_note = f"{old_note}\n{extra}".strip() if old_note else extra
+        cur = conn.execute(
+            "INSERT INTO strategy_notes (created_at, category, summary, detail, meta_json) VALUES (?, ?, ?, ?, ?)",
+            (_now_kst().strftime("%Y-%m-%d %H:%M:%S"), "watchlist", f"{stock_name} 재평가 필요", new_note, None),
+        )
+        note_id = int(cur.lastrowid or 0)
         conn.execute(
-            "UPDATE watchlist SET enabled = 0, strategy_note = ? WHERE code = ?",
-            (new_note, row["code"]),
+            "UPDATE watchlist SET enabled = 0, strategy_note_id = ? WHERE code = ?",
+            (note_id if note_id else None, row["code"]),
         )
         repaired += 1
     return repaired
@@ -179,7 +290,7 @@ def init_db():
             ("ichimoku_cloud_breakout", "INTEGER DEFAULT NULL"),
             ("ichimoku_cloud_breakdown", "INTEGER DEFAULT NULL"),
             # metadata
-            ("strategy_note", "TEXT DEFAULT ''"),
+            ("strategy_note_id", "INTEGER DEFAULT NULL"),
         ]
         for col, typedef in _WL_COLUMNS:
             try:
@@ -528,30 +639,56 @@ def init_db():
                 rsi_oversold_add    INTEGER DEFAULT NULL,
                 bollinger_lower_break_add INTEGER DEFAULT NULL,
                 ma5_recovery_add    INTEGER DEFAULT NULL,
-                strategy_note       TEXT DEFAULT '',
+                strategy_note_id    INTEGER DEFAULT NULL,
                 created_at          TEXT NOT NULL DEFAULT '',
                 updated_at          TEXT NOT NULL DEFAULT ''
             )
         """)
+        try:
+            conn.execute("ALTER TABLE positions ADD COLUMN strategy_note_id INTEGER DEFAULT NULL")
+        except Exception:
+            pass
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist_strategy_note_links (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code        TEXT NOT NULL,
+                strategy_note_id  INTEGER NOT NULL,
+                linked_at         TEXT NOT NULL,
+                reason            TEXT DEFAULT '',
+                is_active         INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_strategy_note_links (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_code        TEXT NOT NULL,
+                strategy_note_id  INTEGER NOT NULL,
+                linked_at         TEXT NOT NULL,
+                reason            TEXT DEFAULT '',
+                is_active         INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wsnl_stock_linked ON watchlist_strategy_note_links (stock_code, linked_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wsnl_active ON watchlist_strategy_note_links (stock_code, is_active)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_psnl_stock_linked ON position_strategy_note_links (stock_code, linked_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_psnl_active ON position_strategy_note_links (stock_code, is_active)"
+        )
         # positions 마이그레이션: 기존 보유종목 자동 생성
         _migrate_positions(conn)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS paper_trades (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at  TEXT NOT NULL,
-                stock_code  TEXT NOT NULL,
-                stock_name  TEXT NOT NULL,
-                order_type  TEXT NOT NULL,
-                quantity    INTEGER NOT NULL,
-                price       INTEGER NOT NULL,
-                signal_id   INTEGER,
-                verdict     TEXT,
-                result_1d   REAL DEFAULT NULL,
-                result_3d   REAL DEFAULT NULL,
-                result_5d   REAL DEFAULT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_stock ON paper_trades (stock_code, created_at)")
+        _backfill_strategy_note_links(conn)
+        # paper_trades removed
+        conn.execute("DROP TABLE IF EXISTS paper_trades")
         conn.commit()
     _seed_conditions()
 
@@ -579,7 +716,7 @@ def _migrate_watchlist_columns(conn):
                     "stochastic_golden_cross", "stochastic_death_cross",
                     "ichimoku_golden_cross", "ichimoku_death_cross",
                     "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown"}
-    _ALL_FIELDS = _VALUE_FIELDS | _FLAG_FIELDS | {"strategy_note"}
+    _ALL_FIELDS = _VALUE_FIELDS | _FLAG_FIELDS 
 
     for row in rows:
         cond = json.loads(row["conditions"])
@@ -591,8 +728,6 @@ def _migrate_watchlist_columns(conn):
                 continue
             if field in _FLAG_FIELDS:
                 val = 1 if val else 0
-            elif field == "strategy_note":
-                val = str(val)
             sets.append(f"{field} = ?")
             vals.append(val)
         if sets:
@@ -613,8 +748,8 @@ def _migrate_positions(conn):
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     holdings = conn.execute("SELECT * FROM portfolio").fetchall()
     watchlist_map = {}
-    for row in conn.execute("SELECT code, strategy_note FROM watchlist").fetchall():
-        watchlist_map[row["code"]] = row["strategy_note"] or ""
+    for row in conn.execute("SELECT code, strategy_note_id FROM watchlist").fetchall():
+        watchlist_map[row["code"]] = row["strategy_note_id"]
 
     for h in holdings:
         code = h["stock_code"]
@@ -627,13 +762,13 @@ def _migrate_positions(conn):
             """INSERT OR IGNORE INTO positions
                 (stock_code, stock_name, avg_price, quantity,
                  target_price, stop_loss_price, add_buy_price,
-                 strategy_note, created_at, updated_at)
+                 strategy_note_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 code, h["stock_name"], avg_price, h["quantity"],
                 target_price, stop_loss_price,
                 int(avg_price * 0.92) if avg_price else 0,
-                watchlist_map.get(code, ""),
+                watchlist_map.get(code),
                 now, now,
             ),
         )
@@ -741,7 +876,6 @@ _WL_CONDITION_FIELDS = {
     "stochastic_golden_cross", "stochastic_death_cross",
     "ichimoku_golden_cross", "ichimoku_death_cross",
     "ichimoku_cloud_breakout", "ichimoku_cloud_breakdown",
-    "strategy_note",
 }
 _WL_FLAG_FIELDS = {
     "golden_cross", "death_cross", "ma20_support_break", "ma5_support_break",
@@ -764,18 +898,17 @@ def repair_watchlist_conditions(stock_code: str | None = None) -> int:
 def get_watchlist() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM watchlist ORDER BY rowid").fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["enabled"] = bool(d["enabled"])
-        # flag 필드: 0/1 → bool 변환
-        for f in _WL_FLAG_FIELDS:
-            if f in d and d[f] is not None:
-                d[f] = bool(d[f])
-        # conditions 컬럼은 하위호환용 — 비어있으면 제거
-        d.pop("conditions", None)
-        result.append(d)
-    return result
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["enabled"] = bool(d["enabled"])
+            d["strategy_note"] = _resolve_strategy_note_text(conn, d.get("strategy_note_id"), "")
+            for f in _WL_FLAG_FIELDS:
+                if f in d and d[f] is not None:
+                    d[f] = bool(d[f])
+            d.pop("conditions", None)
+            result.append(d)
+        return result
 
 
 def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
@@ -789,24 +922,64 @@ def upsert_stock(code: str, name: str, enabled: bool, conditions: dict):
             (code, name, int(enabled), now)
         )
         # 개별 컬럼 업데이트
-        _updatable = _WL_CONDITION_FIELDS | {"horizon"}
+        _updatable = _WL_CONDITION_FIELDS | {"horizon", "sector_code", "strategy_note_id"}
         for field, value in conditions.items():
             if field not in _updatable:
                 continue
             if field in _WL_FLAG_FIELDS:
                 value = 1 if value else 0
             conn.execute(f"UPDATE watchlist SET {field} = ? WHERE code = ?", (value, code))
+            # Keep positions note id aligned with watchlist updates.
+            if field == "strategy_note_id":
+                conn.execute(
+                    "UPDATE positions SET strategy_note_id = ?, updated_at = ? WHERE stock_code = ?",
+                    (value, now, code),
+                )
+                _link_strategy_note(conn, "watchlist", code, value, reason="upsert_stock")
+                _link_strategy_note(conn, "position", code, value, reason="sync_from_watchlist")
         conn.commit()
 
 
 def update_stock_field(code: str, field: str, value) -> bool:
-    """종목 필드 수정 — 모든 필드가 개별 컬럼."""
-    _all_fields = {"name", "enabled", "horizon"} | _WL_CONDITION_FIELDS
+    """?? ?? ??. strategy_note? strategy_notes + strategy_note_id? ??."""
+    _all_fields = {"name", "enabled", "horizon", "sector_code", "strategy_note_id", "strategy_note"} | _WL_CONDITION_FIELDS
     if field not in _all_fields:
         return False
     if field in _WL_FLAG_FIELDS:
         value = 1 if value else 0
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
+        if field == "strategy_note":
+            row = conn.execute("SELECT name FROM watchlist WHERE code = ?", (code,)).fetchone()
+            stock_name = row["name"] if row and row["name"] else code
+            note_cur = conn.execute(
+                "INSERT INTO strategy_notes (created_at, category, summary, detail, meta_json) VALUES (?, ?, ?, ?, ?)",
+                (now, "watchlist", f"{stock_name} ???? ?? ??", str(value or ""), None),
+            )
+            note_id = int(note_cur.lastrowid or 0)
+            if note_id:
+                conn.execute("UPDATE watchlist SET strategy_note_id = ? WHERE code = ?", (note_id, code))
+                conn.execute(
+                    "UPDATE positions SET strategy_note_id = ?, updated_at = ? WHERE stock_code = ?",
+                    (note_id, now, code),
+                )
+                _link_strategy_note(conn, "watchlist", code, note_id, reason="update_stock_field:strategy_note")
+                _link_strategy_note(conn, "position", code, note_id, reason="sync_from_watchlist")
+            conn.commit()
+            return True
+
+        if field == "strategy_note_id":
+            value = int(value) if value not in (None, "") else None
+            cur = conn.execute("UPDATE watchlist SET strategy_note_id = ? WHERE code = ?", (value, code))
+            conn.execute(
+                "UPDATE positions SET strategy_note_id = ?, updated_at = ? WHERE stock_code = ?",
+                (value, now, code),
+            )
+            _link_strategy_note(conn, "watchlist", code, value, reason="update_stock_field:strategy_note_id")
+            _link_strategy_note(conn, "position", code, value, reason="sync_from_watchlist")
+            conn.commit()
+            return cur.rowcount > 0
+
         cur = conn.execute(f"UPDATE watchlist SET {field} = ? WHERE code = ?", (value, code))
         conn.commit()
     return cur.rowcount > 0
@@ -824,13 +997,22 @@ def delete_stock(code: str) -> bool:
 def get_positions() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM positions ORDER BY rowid").fetchall()
-    return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["strategy_note"] = _resolve_strategy_note_text(conn, d.get("strategy_note_id"), "")
+            result.append(d)
+        return result
 
 
 def get_position(stock_code: str) -> dict | None:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM positions WHERE stock_code = ?", (stock_code,)).fetchone()
-    return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        d["strategy_note"] = _resolve_strategy_note_text(conn, d.get("strategy_note_id"), "")
+        return d
 
 
 def upsert_position(
@@ -842,12 +1024,18 @@ def upsert_position(
     """포지션 생성/갱신. kwargs로 rsi_oversold_add, bollinger_lower_break_add, ma5_recovery_add, strategy_note 전달 가능."""
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
+        note_id = kwargs.get("strategy_note_id")
+        try:
+            if note_id not in (None, ""):
+                note_id = int(note_id)
+        except Exception:
+            note_id = None
         conn.execute(
             """INSERT INTO positions
                 (stock_code, stock_name, avg_price, quantity,
                  target_price, stop_loss_price, add_buy_price, mid_sell_price,
                  rsi_oversold_add, bollinger_lower_break_add, ma5_recovery_add,
-                 strategy_note, created_at, updated_at)
+                 strategy_note_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(stock_code) DO UPDATE SET
                 stock_name=excluded.stock_name, avg_price=excluded.avg_price,
@@ -857,7 +1045,7 @@ def upsert_position(
                 rsi_oversold_add=excluded.rsi_oversold_add,
                 bollinger_lower_break_add=excluded.bollinger_lower_break_add,
                 ma5_recovery_add=excluded.ma5_recovery_add,
-                strategy_note=excluded.strategy_note,
+                strategy_note_id=excluded.strategy_note_id,
                 updated_at=excluded.updated_at
             """,
             (
@@ -866,10 +1054,11 @@ def upsert_position(
                 kwargs.get("rsi_oversold_add"),
                 kwargs.get("bollinger_lower_break_add"),
                 kwargs.get("ma5_recovery_add"),
-                kwargs.get("strategy_note", ""),
+                note_id,
                 now, now,
             ),
         )
+        _link_strategy_note(conn, "position", stock_code, note_id, reason="upsert_position")
         conn.commit()
 
 
@@ -878,16 +1067,26 @@ def update_position_field(stock_code: str, field: str, value) -> bool:
     allowed = {
         "target_price", "stop_loss_price", "add_buy_price", "mid_sell_price",
         "rsi_oversold_add", "bollinger_lower_break_add", "ma5_recovery_add",
-        "strategy_note", "avg_price", "quantity",
+        "strategy_note_id", "avg_price", "quantity",
     }
     if field not in allowed:
         return False
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
     with get_conn() as conn:
+        if field == "strategy_note_id":
+            try:
+                if value not in (None, ""):
+                    value = int(value)
+                else:
+                    value = None
+            except Exception:
+                value = None
         cur = conn.execute(
             f"UPDATE positions SET {field} = ?, updated_at = ? WHERE stock_code = ?",
             (value, now, stock_code),
         )
+        if field == "strategy_note_id":
+            _link_strategy_note(conn, "position", stock_code, value, reason="update_position_field")
         conn.commit()
     return cur.rowcount > 0
 
@@ -907,8 +1106,8 @@ def create_position_from_trade(stock_code: str, stock_name: str, avg_price: int,
             return False  # 이미 존재
 
         # watchlist에서 strategy_note 복사
-        wl_row = conn.execute("SELECT strategy_note FROM watchlist WHERE code = ?", (stock_code,)).fetchone()
-        note = wl_row["strategy_note"] if wl_row and wl_row["strategy_note"] else ""
+        wl_row = conn.execute("SELECT strategy_note_id FROM watchlist WHERE code = ?", (stock_code,)).fetchone()
+        note_id = wl_row["strategy_note_id"] if wl_row else None
 
         # 평단가 기준 기본값 계산
         target_price = int(avg_price * 1.15) if avg_price else 0
@@ -919,7 +1118,7 @@ def create_position_from_trade(stock_code: str, stock_name: str, avg_price: int,
         stock_code, stock_name, avg_price, quantity,
         target_price=target_price, stop_loss_price=stop_loss_price,
         add_buy_price=add_buy_price,
-        strategy_note=note,
+        strategy_note_id=note_id,
     )
     return True
 
@@ -1432,6 +1631,38 @@ def get_strategy_note(note_id: int) -> dict | None:
             return dict(row) if row else None
         except Exception:
             return None
+
+
+def get_watchlist_strategy_note_history(stock_code: str, limit: int = 50) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT l.*, n.category, n.summary, n.detail, n.meta_json
+            FROM watchlist_strategy_note_links l
+            LEFT JOIN strategy_notes n ON n.id = l.strategy_note_id
+            WHERE l.stock_code = ?
+            ORDER BY l.linked_at DESC, l.id DESC
+            LIMIT ?
+            """,
+            (stock_code, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_position_strategy_note_history(stock_code: str, limit: int = 50) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT l.*, n.category, n.summary, n.detail, n.meta_json
+            FROM position_strategy_note_links l
+            LEFT JOIN strategy_notes n ON n.id = l.strategy_note_id
+            WHERE l.stock_code = ?
+            ORDER BY l.linked_at DESC, l.id DESC
+            LIMIT ?
+            """,
+            (stock_code, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def update_strategy_note(note_id: int, summary: str = "", detail: str = "", category: str = "") -> bool:
@@ -2627,22 +2858,6 @@ def get_weekly_performance_report(days: int = 7) -> dict:
     watchlist_block = _calc_block([r for r in rows if int(r.get("in_portfolio") or 0) == 0])
 
     paper_summary = None
-    try:
-        with get_conn() as conn:
-            p_rows = conn.execute(
-                """SELECT order_type, verdict, result_3d
-                   FROM paper_trades WHERE created_at >= ? AND result_3d IS NOT NULL""",
-                (since,),
-            ).fetchall()
-        if p_rows:
-            p_buy = [r["result_3d"] for r in p_rows if r["order_type"] == "BUY" and r["result_3d"] is not None]
-            paper_summary = {
-                "count": len(p_buy),
-                "avg_return": round(sum(p_buy) / len(p_buy), 2) if p_buy else None,
-                "win_rate": round(sum(1 for r in p_buy if r > 0) / len(p_buy) * 100, 1) if p_buy else None,
-            }
-    except Exception:
-        pass
 
     return {
         "period_days": days,

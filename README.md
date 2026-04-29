@@ -217,7 +217,7 @@ quant_trading/
 - `run_check`: 장중 주기 감시
 - `auto_sync`: 포트폴리오 동기화
 - `run_premarket_report`, `run_opening_report`
-- `update_signal_results`, `update_trade_results`, `update_paper_results`, `update_screening_results`
+- `update_signal_results`, `update_trade_results`, `update_screening_results`
 - `check_trailing_stops`, `check_inactive_stocks`, `check_removal_candidates`
 - `check_market_dip`
 - `run_intraday_scan`, `run_daily_screening`, `run_daily_review`
@@ -238,7 +238,7 @@ quant_trading/
 
 1. `watchlist`
 - 종목 마스터 + 조건 필드 + 전략 메모
-- 주요 컬럼: `code`, `name`, `enabled`, `horizon`, `strategy_note`, 개별 조건 컬럼들, `sector_code`
+- 주요 컬럼: `code`, `name`, `enabled`, `horizon`, `strategy_note_id`, 개별 조건 컬럼들, `sector_code`
 
 2. `conditions_def`
 - 조건 정의 테이블
@@ -265,15 +265,11 @@ quant_trading/
 - 실거래 이력
 - `trade_id`, `executed_at`, `side`, `quantity`, `price`, `amount`, `fee`, `tax`, `result_1d/3d/5d`
 
-7. `paper_trades`
-- 모의 체결 이력
-- `order_type`, `quantity`, `price`, `signal_id`, `verdict`, `result_1d/3d/5d`
-
-8. `screening_log`
+7. `screening_log`
 - 장중/종가 스크리닝 결과 저장
 - `source`, `recommendation`, `reason`, `met_conditions`, `rr_ratio`, `indicator_snapshot`, `ai_response`, `user_action`, `result_7d/30d`
 
-9. `cooldowns`
+8. `cooldowns`
 - 신호/종목별 발동 제어
 - `key`, `last_sent_at`, `next_allowed_at`
 
@@ -347,7 +343,7 @@ quant_trading/
 ## 12.1 `.env`
 핵심 변수:
 - 키움: `KIWOOM_APP_KEY`, `KIWOOM_APP_SECRET`, `KIWOOM_ACCOUNT_NO`, `KIWOOM_BASE_URL`
-- 실행모드: `AUTO_TRADE`, `KIWOOM_ALLOW_TRADE_EXECUTION`
+- 실행모드: `AUTO_TRADE`
 - AI: `OPENAI_API_KEY` 또는 `ANTHROPIC_API_KEY`
 - 알림: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 - 데이터: `DB_PATH`, `LOG_PREFIX`
@@ -383,7 +379,7 @@ python -m venv .venv
 ## 14. 운영/정리 시 체크리스트
 
 1. 실제 주문 안전장치 확인
-- `AUTO_TRADE`와 `KIWOOM_ALLOW_TRADE_EXECUTION` 값 재확인
+- `AUTO_TRADE` 값 재확인
 
 2. 데이터 정합성
 - `portfolio` vs `positions` vs `trades` 동기화 상태
@@ -424,7 +420,7 @@ python -m venv .venv
 | `name` | TEXT | 종목명 | `기아` |
 | `enabled` | INTEGER | 감시 여부(1/0) | `1` |
 | `horizon` | TEXT | 매매 기간(단기/중기/장기) | `중기` |
-| `strategy_note` | TEXT | 전략 메모/표식 | `[REASSESS_REQUIRED] ...` |
+| `strategy_note_id` | INTEGER/NULL | `strategy_notes.id` ?? (???? ??) | `18` |
 | `sector_code` | TEXT | 업종 코드 | `G25` |
 | `target_price` | INTEGER/NULL | (레거시/보조) 목표가 | `165000` |
 | `stop_loss_price` | INTEGER/NULL | (레거시/보조) 손절가 | `152000` |
@@ -507,19 +503,7 @@ python -m venv .venv
 | `fee`/`tax` | INTEGER | 비용 | `0`, `0` |
 | `result_1d`/`result_3d`/`result_5d` | REAL | 사후성과 | `0.91` |
 
-### 16.7 `paper_trades`
-| 컬럼 | 타입 | 설명 | 예시 |
-|---|---|---|---|
-| `id` | INTEGER PK | 모의거래 ID | `55` |
-| `created_at` | TEXT | 기록시각 | `...` |
-| `stock_code`/`stock_name` | TEXT | 종목 식별 | `...` |
-| `order_type` | TEXT | `buy/sell` | `buy` |
-| `quantity`/`price` | INTEGER | 수량/가격 | `10` / `25000` |
-| `signal_id` | INTEGER/NULL | 연결된 신호 ID | `1024` |
-| `verdict` | TEXT | 판단 | `매수` |
-| `result_1d`/`result_3d`/`result_5d` | REAL | 사후성과 | `...` |
-
-### 16.8 `screening_log`
+### 16.7 `screening_log`
 | 컬럼 | 타입 | 설명 | 예시 |
 |---|---|---|---|
 | `id` | INTEGER PK | 스크리닝 로그 ID | `320` |
@@ -536,7 +520,7 @@ python -m venv .venv
 | `user_action` | TEXT | 사용자/자동 액션 | `auto_accepted` |
 | `result_7d`/`result_30d` | REAL | 사후성과 | `...` |
 
-### 16.9 `cooldowns`
+### 16.8 `cooldowns`
 | 컬럼 | 타입 | 설명 | 예시 |
 |---|---|---|---|
 | `key` | TEXT PK | 쿨다운 키 | `000270:rsi_oversold` |
@@ -546,7 +530,7 @@ python -m venv .venv
 ### 16.10 리포트/전략/추적 테이블
 | 테이블 | 핵심 컬럼 | 설명 |
 |---|---|---|
-| `strategy_notes` | `category`, `summary`, `detail` | 전략 기록/회고 본문 |
+| `strategy_notes` | `id`, `category`, `summary`, `detail`, `meta_json` | ?? ??/?? ?? (id? watchlist/positions ??) |
 | `market_reports` | `report_date`, `report_type`, `market_regime`, `volatility`, `trend` | 장전/장초 리포트 |
 | `agent_action_logs` | `signal_id`, `tool_sequence`, `reasoning_chain`, `final_opinion` | Agent trace 장기 저장 |
 | `strategy_reflection_logs` | `agent_type`, `status`, `praise_tags`, `fix_tags` | 리플렉션 로그 |

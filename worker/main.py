@@ -1334,47 +1334,8 @@ def update_signal_results():
 
 
 def update_paper_results():
-    """모의투자 1일/3일/5일 수익률 업데이트.
-    기준가:
-    - 평가일이 오늘이고 장중(main)이면 현재가
-    - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
-    """
-    from datetime import timedelta
-    from data.db import get_conn, update_paper_result
-
-    periods = [("1d", 1, "result_1d"), ("3d", 3, "result_3d"), ("5d", 5, "result_5d")]
-    now_kst = _now_kst()
-    today_kst = now_kst.date()
-
-    for period_name, days_after, col_name in periods:
-        eligible_to = (today_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, price, created_at FROM paper_trades "
-                f"WHERE {col_name} IS NULL AND substr(created_at, 1, 10) <= ?",
-                (eligible_to,),
-            ).fetchall()
-
-        for row in rows:
-            try:
-                base = int(row["price"] or 0)
-                if base <= 0:
-                    continue
-                created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
-                if _business_days_elapsed(created_dt, today_kst) < days_after:
-                    continue
-                target_dt = created_dt + _td(days=days_after)
-
-                eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
-                if eval_price <= 0:
-                    continue
-
-                pct = (eval_price - base) / base * 100
-                update_paper_result(row["id"], round(pct, 2), period=period_name)
-                logger.debug(f"[모의투자 결과 {period_name}] {row['stock_name']}: {pct:+.2f}% ({price_src})")
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"[모의투자 결과 실패] {row['stock_name']}: {e}")
+    """Deprecated: paper_trades removed."""
+    return
 
 
 def update_trade_results():
@@ -1713,45 +1674,17 @@ def check_removal_candidates():
 
 
 def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
-    """AUTO_TRADE=false 시 AI 판단을 모의투자 기록으로 저장 (실제 주문 없음)."""
-    import re
+    """AUTO_TRADE=false path: no mock table write; only signal action update."""
     first_line = claude_opinion.strip().splitlines()[0] if claude_opinion.strip() else ""
+    side = None
     if "[매수]" in first_line or "[추가매수" in first_line or "[물타기" in first_line:
-        order_type, side = "buy", "매수"
+        side = "매수"
     elif "[매도]" in first_line:
-        order_type, side = "sell", "매도"
-    else:
-        return
-
-    qty = None
-    for line in claude_opinion.splitlines():
-        if line.strip().startswith("[추천수량]"):
-            m = re.search(r"(\d+)\s*주", line)
-            if m:
-                qty = int(m.group(1))
-                break
-    if not qty:
-        return
-
-    from data.db import save_paper_trade, extract_verdict, update_signal_action
-    verdict = extract_verdict(claude_opinion)
-    paper_id = save_paper_trade(
-        stock_code=signal.stock_code,
-        stock_name=signal.stock_name,
-        order_type=order_type,
-        quantity=qty,
-        price=signal.current_price,
-        signal_id=signal_id,
-        verdict=verdict,
-    )
-    if signal_id is not None:
+        side = "매도"
+    if side and signal_id is not None:
+        from data.db import update_signal_action
         update_signal_action(signal_id, side)
-    logger.info(f"[모의투자] {signal.stock_name} {side} {qty}주 @ {signal.current_price:,}원 기록 (paper_id={paper_id})")
-    send_message(
-        f"📝 *모의투자 기록* (실제 주문 없음)\n"
-        f"종목: *{signal.stock_name}* | {side} {qty:,}주\n"
-        f"AI 판단: {first_line[:60]}"
-    )
+    logger.info(f"[수동모드] {signal.stock_name} 판단 기록만 반영 (실주문/모의체결 없음)")
 
 
 def _parse_watchlist_decision(opinion: str) -> str | None:
@@ -2122,7 +2055,21 @@ def _auto_execute(
             create_position_from_trade(signal.stock_code, signal.stock_name, signal.current_price, qty)
         if signal_id is not None:
             update_signal_action(signal_id, side)
-        save_strategy_note("trade", f"{signal.stock_name} {qty}주 {side} (자동 매매)")
+        save_strategy_note(
+            "trade",
+            f"{signal.stock_name} {qty}주 {side} (자동 매매)",
+            meta={
+                "type": "auto_trade_execution",
+                "signal_id": signal_id,
+                "stock_code": signal.stock_code,
+                "stock_name": signal.stock_name,
+                "side": side,
+                "order_type": order_type,
+                "quantity": qty,
+                "price_hint": signal.current_price or order_price,
+                "source": getattr(signal, "source", None),
+            },
+        )
         from worker.portfolio_sync import sync_all as _sync
         _sync(kiwoom)
 
@@ -2802,9 +2749,6 @@ def main():
     scheduler.add_job(run_agent_action_log_refresh, "cron",
                       day_of_week="mon", hour=9, minute=10,
                       id="weekly_agent_action_log_refresh")
-    scheduler.add_job(update_paper_results, "cron",
-                      day_of_week="mon-fri", hour="9-18", minute="*/30",
-                      id="paper_result_update")
     scheduler.add_job(update_trade_results, "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="trade_result_update")
