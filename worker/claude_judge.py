@@ -1350,6 +1350,17 @@ def _legacy_get_trade_opinion(
         logger.debug(f"[판단 프롬프트] 빈 섹션 제거: {', '.join(_skipped)}")
 
     _global_line = f"\n글로벌: {global_indices_text}" if global_indices_text else ""
+    _transition_hint = getattr(signal, "transition_hint", None) or {}
+    _transition_section = ""
+    if isinstance(_transition_hint, dict) and _transition_hint:
+        _transition_section = (
+            "\n## 전환조건 트리거 (재판단 요청)\n"
+            f"- 목표 전환: {_transition_hint.get('target', '-')}\n"
+            f"- 충족 규칙: {_transition_hint.get('rule_info', '-')}\n"
+            f"- 전환조건 원문: {_transition_hint.get('condition_text', '-')}\n"
+            "- 지시: 위 전환조건이 충족된 상태를 반영해 verdict와 [추천수량]을 다시 계산하세요.\n"
+            "- 단, 리스크가 높으면 홀드를 유지할 수 있으며 그 근거를 명확히 작성하세요."
+        )
 
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
@@ -1366,6 +1377,7 @@ def _legacy_get_trade_opinion(
 ## 직전 AI 판단 (오늘)
 - {last_ai_text}
 {hold_condition_text}
+{_transition_section}
 
 ## 과거 AI 판단 이력 — {signal.signal_type} 신호 기준 (최근 5건)
 {history_text}

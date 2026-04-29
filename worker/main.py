@@ -890,12 +890,12 @@ def _extract_last_hold_transition_condition(stock_code: str) -> str:
         return ""
 
 
-def _evaluate_transition_condition(signal, condition_text: str) -> tuple[bool, str]:
-    """가격/RSI 기반 단순 전환조건 충족 판정."""
+def _evaluate_transition_condition(signal, condition_text: str) -> tuple[bool, str, int]:
+    """가격/RSI 기반 전환조건 충족 판정. (ok, rule_info, parsed_rule_count)"""
     import re
 
     if not condition_text:
-        return False, "empty"
+        return False, "empty", 0
     cond = str(condition_text)
     low = cond.lower()
 
@@ -921,65 +921,65 @@ def _evaluate_transition_condition(signal, condition_text: str) -> tuple[bool, s
             checks.append((float(rsi) <= rv, f"rsi<={rv}"))
 
     if not checks:
-        return False, "no_parsable_rule"
+        return False, "no_parsable_rule", 0
     ok = all(flag for flag, _ in checks)
-    return ok, ",".join(rule for _, rule in checks)
+    return ok, ",".join(rule for _, rule in checks), len(checks)
 
 
-def _apply_semiforce_transition_if_needed(signal, claude_opinion: str | None) -> str | None:
-    """준강제 전환: 홀드 + 전환조건 충족 시 매수/매도로 전환 (critical risk는 예외)."""
+def _check_semiforce_transition(signal, claude_opinion: str | None) -> dict | None:
+    """준강제 전환 후보를 평가하고, 재판단 힌트(dict)를 반환."""
     if not isinstance(claude_opinion, str) or not claude_opinion.strip():
-        return claude_opinion
+        return None
     first = claude_opinion.strip().splitlines()[0].strip().lower()
     if "홀드" not in first and "hold" not in first:
-        return claude_opinion
+        return None
 
     condition_text = _extract_last_hold_transition_condition(getattr(signal, "stock_code", ""))
     if not condition_text:
-        return claude_opinion
+        return None
 
-    ok, rule_info = _evaluate_transition_condition(signal, condition_text)
+    # AUTO_TRADE에서는 명시적으로 켜지지 않으면 준강제 자동 전환 비활성(안전 기본값).
+    semi_force_cfg = bool(_WORKER_CONFIG.get("semi_force_transition_auto_trade", False))
+    if AUTO_TRADE and not semi_force_cfg:
+        logger.info(f"[{signal.stock_name}] 준강제 전환 스킵: AUTO_TRADE 안전 기본값(off)")
+        return None
+
+    cond_low = condition_text.lower()
+    # 명시적 지시가 없으면 전환 금지 (예: "[매수 전환]" 또는 "매수 전환")
+    if "매수 전환" in cond_low:
+        target = "매수"
+    elif "매도 전환" in cond_low:
+        target = "매도"
+    else:
+        return None
+
+    ok, rule_info, parsed_count = _evaluate_transition_condition(signal, condition_text)
     if not ok:
-        return claude_opinion
+        return None
+    # 부분 파싱 오동작 방지: 최소 2개 규칙 이상 파싱되어야 전환 허용
+    if parsed_count < 2:
+        logger.info(
+            f"[{signal.stock_name}] 준강제 전환 스킵: 파싱 규칙 부족(parsed={parsed_count})"
+        )
+        return None
 
     trigger_ids = set(getattr(signal, "triggered_ids", []) or [])
     critical_ids = {"stop_loss_price", "rsi_critical", "bollinger_critical_below"}
     has_critical_risk = bool(trigger_ids & critical_ids)
 
-    cond_low = condition_text.lower()
-    if "매도" in cond_low:
-        target = "매도"
-    elif "매수" in cond_low:
-        target = "매수"
-    else:
-        sig_type = str(getattr(signal, "signal_type", "") or "")
-        target = "매도" if sig_type == "exit" else "매수"
-
     if has_critical_risk and target == "매수":
         logger.info(f"[{signal.stock_name}] 준강제 전환 차단(critical risk): {condition_text}")
-        return claude_opinion
+        return None
     if target == "매도" and not bool(getattr(signal, "in_portfolio", False)):
-        return claude_opinion
+        return None
 
-    if target == "매수":
-        overridden = (
-            "[매수]\n"
-            f"• 근거1: 이전 홀드 전환조건 충족으로 준강제 전환 ({rule_info})\n"
-            f"• 근거2: 전환조건: {condition_text}\n"
-            "[주문시장] KRX\n"
-            "[주문방식] 시장가\n"
-            "[추천수량] 1주 (약 0만원)"
-        )
-    else:
-        overridden = (
-            "[매도]\n"
-            f"• 근거1: 이전 홀드 전환조건 충족으로 준강제 전환 ({rule_info})\n"
-            f"• 근거2: 전환조건: {condition_text}\n"
-            "[주문시장] KRX\n"
-            "[주문방식] 시장가"
-        )
-    logger.info(f"[{signal.stock_name}] 준강제 전환 적용: hold -> {target} ({condition_text})")
-    return overridden
+    logger.info(f"[{signal.stock_name}] 준강제 재판단 트리거: hold -> {target} ({condition_text})")
+    return {
+        "target": target,
+        "condition_text": condition_text,
+        "rule_info": rule_info,
+        "parsed_count": parsed_count,
+    }
 
 
 def run_weekly_performance_report():
@@ -1984,8 +1984,6 @@ def _auto_execute(
 
     # 매도인데 추천수량 없으면 보유 전량으로 처리
     missing_qty_policy = str(_WORKER_CONFIG.get("missing_qty_policy", "fallback")).strip().lower()
-    fallback_buy_ratio = float(_WORKER_CONFIG.get("fallback_buy_ratio", 0.1))
-    fallback_buy_ratio = min(1.0, max(0.01, fallback_buy_ratio))
 
     if not qty and missing_qty_policy == "fallback":
         if order_type == "2":
@@ -1997,20 +1995,9 @@ def _auto_execute(
             )
             if qty > 0:
                 logger.info(f"[{signal.stock_name}] 추천수량 누락(보완): 보유 전량 {qty}주 적용")
-        elif order_type == "1" and signal.current_price > 0:
-            budget = buy_budget if buy_budget > 0 else deposit
-            alloc = int(budget * fallback_buy_ratio)
-            qty = alloc // signal.current_price
-            if qty <= 0 and budget >= signal.current_price:
-                qty = 1
-            if qty > 0:
-                logger.info(
-                    f"[{signal.stock_name}] 추천수량 누락(보완): {qty}주 "
-                    f"(budget={budget:,}, ratio={fallback_buy_ratio:.2f})"
-                )
 
     if not qty:
-        logger.info(f"[{signal.stock_name}] 수량 없음: 주문 실행을 건너뜁니다")
+        logger.info(f"[{signal.stock_name}] 수량 없음(추천수량 미기재): 주문 실행을 건너뜁니다")
         return
 
     if order_type == "1":
@@ -2638,8 +2625,25 @@ def run_check():
                                 _set_cached_ai_opinion(signal, claude_opinion)
                             logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
 
-                    # 준강제: 홀드 + 전환조건 충족 시 기본 전환 (critical risk는 예외)
-                    claude_opinion = _apply_semiforce_transition_if_needed(signal, claude_opinion)
+                    # 준강제: 홀드 + 전환조건 충족 시 "강제 주문" 대신 재판단(근거/수량 재계산)
+                    semi_force_hint = _check_semiforce_transition(signal, claude_opinion)
+                    if semi_force_hint:
+                        try:
+                            setattr(signal, "transition_hint", semi_force_hint)
+                            sector = kiwoom.get_sector_index(signal.sector_code) if signal.sector_code else {}
+                            claude_opinion = get_trade_opinion(
+                                signal, holdings, kospi, kosdaq, sector, signal.recent_trades, deposit=deposit
+                            )
+                            ai_calls += 1
+                            logger.info(
+                                f"[{signal.stock_name}] 전환조건 기반 재판단 완료 "
+                                f"(target={semi_force_hint.get('target')}, parsed={semi_force_hint.get('parsed_count')})"
+                            )
+                        finally:
+                            try:
+                                delattr(signal, "transition_hint")
+                            except Exception:
+                                pass
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
