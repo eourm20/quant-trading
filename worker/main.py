@@ -863,6 +863,125 @@ def _maybe_save_hold_conditions(signal, opinion: str):
         logger.info(f"[{signal.stock_name}] 임계값 변경 제안 발송: {threshold_changes}")
 
 
+def _extract_last_hold_transition_condition(stock_code: str) -> str:
+    """최근 7일 내 동일 종목 홀드 의견의 [전환조건] 텍스트를 1건 조회."""
+    try:
+        from data.db import get_conn
+        from datetime import date, timedelta
+
+        cutoff = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT claude_opinion FROM signals "
+                "WHERE stock_code = ? AND created_at >= ? "
+                "AND claude_opinion IS NOT NULL AND claude_opinion LIKE '%[홀드]%' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (stock_code, cutoff),
+            ).fetchone()
+        if not row:
+            return ""
+        opinion = str(row["claude_opinion"] or "")
+        for line in opinion.splitlines():
+            txt = line.strip()
+            if txt.startswith("[전환조건]"):
+                return txt[len("[전환조건]"):].strip()
+        return ""
+    except Exception:
+        return ""
+
+
+def _evaluate_transition_condition(signal, condition_text: str) -> tuple[bool, str]:
+    """가격/RSI 기반 단순 전환조건 충족 판정."""
+    import re
+
+    if not condition_text:
+        return False, "empty"
+    cond = str(condition_text)
+    low = cond.lower()
+
+    price = int(getattr(signal, "current_price", 0) or 0)
+    rsi = getattr(signal, "rsi", None)
+
+    checks: list[tuple[bool, str]] = []
+
+    price_match = re.search(r"([0-9][0-9,]{2,})\s*원", cond)
+    if price_match and price > 0:
+        p = int(price_match.group(1).replace(",", ""))
+        if any(k in low for k in ["이상", "돌파", "상향"]):
+            checks.append((price >= p, f"price>={p}"))
+        elif any(k in low for k in ["이하", "이탈", "하향"]):
+            checks.append((price <= p, f"price<={p}"))
+
+    rsi_match = re.search(r"rsi[^0-9]*([0-9]+(?:\\.[0-9]+)?)", low)
+    if rsi_match and rsi is not None:
+        rv = float(rsi_match.group(1))
+        if any(k in low for k in ["이상", ">=", "초과", "상향"]):
+            checks.append((float(rsi) >= rv, f"rsi>={rv}"))
+        elif any(k in low for k in ["이하", "<=", "미만", "하향"]):
+            checks.append((float(rsi) <= rv, f"rsi<={rv}"))
+
+    if not checks:
+        return False, "no_parsable_rule"
+    ok = all(flag for flag, _ in checks)
+    return ok, ",".join(rule for _, rule in checks)
+
+
+def _apply_semiforce_transition_if_needed(signal, claude_opinion: str | None) -> str | None:
+    """준강제 전환: 홀드 + 전환조건 충족 시 매수/매도로 전환 (critical risk는 예외)."""
+    if not isinstance(claude_opinion, str) or not claude_opinion.strip():
+        return claude_opinion
+    first = claude_opinion.strip().splitlines()[0].strip().lower()
+    if "홀드" not in first and "hold" not in first:
+        return claude_opinion
+
+    condition_text = _extract_last_hold_transition_condition(getattr(signal, "stock_code", ""))
+    if not condition_text:
+        return claude_opinion
+
+    ok, rule_info = _evaluate_transition_condition(signal, condition_text)
+    if not ok:
+        return claude_opinion
+
+    trigger_ids = set(getattr(signal, "triggered_ids", []) or [])
+    critical_ids = {"stop_loss_price", "rsi_critical", "bollinger_critical_below"}
+    has_critical_risk = bool(trigger_ids & critical_ids)
+
+    cond_low = condition_text.lower()
+    if "매도" in cond_low:
+        target = "매도"
+    elif "매수" in cond_low:
+        target = "매수"
+    else:
+        sig_type = str(getattr(signal, "signal_type", "") or "")
+        target = "매도" if sig_type == "exit" else "매수"
+
+    if has_critical_risk and target == "매수":
+        logger.info(f"[{signal.stock_name}] 준강제 전환 차단(critical risk): {condition_text}")
+        return claude_opinion
+    if target == "매도" and not bool(getattr(signal, "in_portfolio", False)):
+        return claude_opinion
+
+    if target == "매수":
+        overridden = (
+            "[매수]\n"
+            f"• 근거1: 이전 홀드 전환조건 충족으로 준강제 전환 ({rule_info})\n"
+            f"• 근거2: 전환조건: {condition_text}\n"
+            "[주문시장] KRX\n"
+            "[주문방식] 시장가\n"
+            "[추천수량] 1주 (약 0만원)"
+        )
+    else:
+        overridden = (
+            "[매도]\n"
+            f"• 근거1: 이전 홀드 전환조건 충족으로 준강제 전환 ({rule_info})\n"
+            f"• 근거2: 전환조건: {condition_text}\n"
+            "[주문시장] KRX\n"
+            "[주문방식] 시장가"
+        )
+    logger.info(f"[{signal.stock_name}] 준강제 전환 적용: hold -> {target} ({condition_text})")
+    return overridden
+
+
 def run_weekly_performance_report():
     """매주 월요일 09:00 - 지난주 AI 신호 성과 리포트를 전략 노트에 기록하고 텔레그램 발송."""
     from data.db import get_weekly_performance_report, save_strategy_note
@@ -2518,6 +2637,9 @@ def run_check():
                             if cache_allowed:
                                 _set_cached_ai_opinion(signal, claude_opinion)
                             logger.info(f"[{signal.stock_name}] AI 판단: {claude_opinion[:80]}...")
+
+                    # 준강제: 홀드 + 전환조건 충족 시 기본 전환 (critical risk는 예외)
+                    claude_opinion = _apply_semiforce_transition_if_needed(signal, claude_opinion)
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
 
