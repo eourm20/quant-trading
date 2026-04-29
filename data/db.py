@@ -415,9 +415,13 @@ def init_db():
                 created_at TEXT NOT NULL,
                 category   TEXT NOT NULL,
                 summary    TEXT NOT NULL,
-                detail     TEXT NOT NULL DEFAULT ''
+                detail     TEXT NOT NULL DEFAULT '',
+                meta_json  TEXT DEFAULT NULL
             )
         """)
+        note_cols = [r["name"] for r in conn.execute("PRAGMA table_info(strategy_notes)").fetchall()]
+        if "meta_json" not in note_cols:
+            conn.execute("ALTER TABLE strategy_notes ADD COLUMN meta_json TEXT DEFAULT NULL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS improvement_issues (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1371,7 +1375,12 @@ def get_recent_realized_pnl_snapshots(limit: int = 20, scope: str = "") -> list[
 
 # ── 전략 노트 ──────────────────────────────────────────────────────────────
 
-def save_strategy_note(category: str, summary: str, detail: str = "") -> int:
+def save_strategy_note(
+    category: str,
+    summary: str,
+    detail: str = "",
+    meta: dict | None = None,
+) -> int:
     """전략 결정 기록 저장
     category: 'trade' | 'watchlist' | 'general'
     """
@@ -1383,13 +1392,23 @@ def save_strategy_note(category: str, summary: str, detail: str = "") -> int:
                 created_at  TEXT NOT NULL,
                 category    TEXT NOT NULL,
                 summary     TEXT NOT NULL,
-                detail      TEXT
+                detail      TEXT,
+                meta_json   TEXT DEFAULT NULL
             )
             """
         )
+        note_cols = [r["name"] for r in conn.execute("PRAGMA table_info(strategy_notes)").fetchall()]
+        if "meta_json" not in note_cols:
+            conn.execute("ALTER TABLE strategy_notes ADD COLUMN meta_json TEXT DEFAULT NULL")
         cur = conn.execute(
-            "INSERT INTO strategy_notes (created_at, category, summary, detail) VALUES (?, ?, ?, ?)",
-            (_now_kst().strftime("%Y-%m-%d %H:%M:%S"), category, summary, detail),
+            "INSERT INTO strategy_notes (created_at, category, summary, detail, meta_json) VALUES (?, ?, ?, ?, ?)",
+            (
+                _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                category,
+                summary,
+                detail,
+                json.dumps(meta, ensure_ascii=False) if meta is not None else None,
+            ),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -2107,15 +2126,24 @@ def get_verdict_accuracy(days: int = 14) -> dict:
     return result
 
 
-def get_recent_daily_reviews(limit: int = 3) -> list[dict]:
+def get_recent_daily_reviews(limit: int = 3, exclude_today: bool = False) -> list[dict]:
     """최근 daily_review 전략 노트 조회 (판단 AI 프롬프트 주입용)."""
     with get_conn() as conn:
         try:
-            rows = conn.execute(
-                "SELECT created_at, summary, detail FROM strategy_notes "
-                "WHERE category = 'daily_review' ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if exclude_today:
+                today_kst = _now_kst().strftime("%Y-%m-%d")
+                rows = conn.execute(
+                    "SELECT created_at, summary, detail, meta_json FROM strategy_notes "
+                    "WHERE category = 'daily_review' AND substr(created_at, 1, 10) < ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (today_kst, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT created_at, summary, detail, meta_json FROM strategy_notes "
+                    "WHERE category = 'daily_review' ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
             return []

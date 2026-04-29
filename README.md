@@ -21,6 +21,8 @@
 - `worker/claude_judge.py`: 판단 엔진(하네스 + Agent + 레거시 폴백)
 - `worker/agents/`: tool-calling 기반 judgment/research agent
 - `worker/agents/tools/rag_tools.py`: FAISS + SQLite 하이브리드 검색/인덱싱
+- 운영용 Agent는 **2개**입니다: `JudgmentAgent`, `ResearchAgent`
+- `base_agent.py`는 공통 실행 엔진(프레임워크)이며, `tools/`는 도구 모음으로 Agent 개수에 포함되지 않습니다.
 
 > 참고: 하네스와 서브에이전트는 신호 처리 결과에 직접 영향을 주는 핵심 경로입니다.  
 > 문서에는 운영/개발에 필요한 수준으로만 간결하게 포함했습니다.
@@ -88,9 +90,9 @@ quant_trading/
     adaptive_policy.py         # 과거 성과 기반 진입 강도 조정
     strategy_reflection.py     # 리플렉션/정책 업데이트 루프
     agents/
-      base_agent.py
-      judgment_agent.py
-      research_agent.py
+      base_agent.py            # 공통 런타임(Agent 아님)
+      judgment_agent.py        # 운영 Agent 1
+      research_agent.py        # 운영 Agent 2
       tools/
   kiwoom_mcp/
   logs/
@@ -124,6 +126,9 @@ quant_trading/
 7. AI 판단 호출
    - 하네스: `SKIP` / `DIRECT_SELL` / `AMBIGUOUS`
    - ambiguous면 모델 판단
+   - 운용 지침 주입 시점:
+     - `premarket/opening/news_monitor`: 당일 생성 지침을 당일 즉시 반영
+     - `daily_review`: 당일분 제외, 다음 거래일(T+1)부터 반영
 8. 신호 저장 (`save_signal`), trace 저장, RAG 인덱싱 큐 등록
 9. 텔레그램 알림
 10. 자동모드면 `_auto_execute`, 수동모드면 `_paper_execute`
@@ -184,6 +189,9 @@ quant_trading/
 - 매수 하드캡: 현금/증거금 주문가능수량 상한
 - 매도 하드캡: 보유수량 초과 방지
 - weak exit는 부분매도로 제한 + 확인 지연
+- `avoid_targets`는 기본적으로 **소프트 제약**으로 동작
+  - 회피 대상 종목이어도 강한 신호면 진입 가능
+  - 대신 매수 수량을 정책 계수(예: `avoid_targets_soft_factor`)로 축소
 
 주문 후 후처리:
 - trade/notes/cooldown 반영
@@ -261,9 +269,14 @@ quant_trading/
 
 10. `strategy_notes`
 - 전략 메모/리포트 본문 저장
+  - `meta_json`으로 일일 복기 구조화 데이터 저장 가능
+    - 예: `market_context`, `wins/losses`, `next_day_policy`
 
 11. `market_reports`
 - premarket/open 리포트 구조화 저장
+  - `meta_json.agent_policy` 저장
+    - 예: `aggressive_entry`, `avoid_targets`, `increase_cash`, `applied_session`
+    - 사후 리플레이(“왜 그날 그렇게 판단했는지”) 용도
 
 12. `agent_action_logs`
 - agent 의사결정 trace 장기 저장

@@ -2298,7 +2298,33 @@ Additional output rules (must follow):
 
     # ── 전략노트 저장 (human + structured) ──
     summary = f"{today_str} 자동 복기"
-    note_id = save_strategy_note("daily_review", summary, review_text_full)
+    _pitems = review_payload.get("portfolio_snapshot", []) or []
+    _wins = sum(1 for p in _pitems if float(p.get("profit_rate") or 0) > 0)
+    _losses = sum(1 for p in _pitems if float(p.get("profit_rate") or 0) < 0)
+    _blocks = _extract_section_blocks(review_text_human)
+    daily_review_meta = {
+        "type": "daily_review",
+        "review_date": today_str,
+        "market_context": {
+            "signal_count": len(signals),
+            "today_trade_count": len(today_trades),
+            "portfolio_eval_amount": total_eval,
+            "portfolio_profit_loss": total_pl,
+            "verdict_accuracy_14d": accuracy_14d,
+            "screening_accuracy_30d": screening_acc or {},
+        },
+        "wins_losses": {
+            "winning_positions": _wins,
+            "losing_positions": _losses,
+        },
+        "next_day_policy": {
+            "agent_guidance": _blocks.get("Agent Guidance", []),
+            "carry_over_check": _blocks.get("Carry-over Check", []),
+            "system_issues": _blocks.get("System Issues", []),
+        },
+        "rag_context": review_payload,
+    }
+    note_id = save_strategy_note("daily_review", summary, review_text_full, meta=daily_review_meta)
     logger.info(f"[일일복기] 전략노트 저장 완료")
 
     # ── System Issues를 별도 이슈 테이블에 저장 ──

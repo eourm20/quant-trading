@@ -729,7 +729,7 @@ def _fmt_recent_insights() -> str:
     try:
         from data.db import get_recent_daily_reviews, get_verdict_accuracy
         # 최근 복기 1건 — 핵심만 추출
-        reviews = get_recent_daily_reviews(limit=1)
+        reviews = get_recent_daily_reviews(limit=1, exclude_today=True)
         review_line = ""
         if reviews:
             detail = reviews[0].get("detail", "")
@@ -846,6 +846,66 @@ def _fmt_last_hold_condition(stock_code: str) -> str:
         return ""
 
 
+def _fmt_today_market_guidance(stock_code: str) -> str:
+    """Today guidance from premarket/open reports + recent stock-specific news_monitor alert."""
+    try:
+        from data.db import get_conn, get_latest_market_report
+        from datetime import date, timedelta
+
+        today = date.today().strftime("%Y-%m-%d")
+        pre = get_latest_market_report(report_type="premarket", report_date=today) or {}
+        opn = get_latest_market_report(report_type="open", report_date=today) or {}
+
+        base = opn or pre  # opening report has priority
+        if not base:
+            return "오늘 장전/장초 운용 지침 없음"
+
+        regime = str(base.get("market_regime") or "-")
+        vol = str(base.get("volatility") or "-")
+        aggr = str(base.get("recommended_aggressiveness") or "-")
+        aggressive_entry = bool(base.get("aggressive_entry")) if base.get("aggressive_entry") is not None else None
+        avoid_targets = str(base.get("avoid_targets") or "").strip()
+        increase_cash = bool(base.get("increase_cash")) if base.get("increase_cash") is not None else None
+
+        pre_regime = str(pre.get("market_regime") or "")
+        open_regime = str(opn.get("market_regime") or "")
+        has_regime_conflict = bool(pre_regime and open_regime and pre_regime != open_regime)
+
+        lines = [
+            f"- 지침 출처 우선순위: {'open' if opn else 'premarket'}",
+            f"- 시장레짐: {regime} / 변동성: {vol} / 권장 강도: {aggr}",
+            f"- 공격적 진입 허용: {'예' if aggressive_entry else '아니오' if aggressive_entry is not None else '-'}",
+            f"- 회피 대상: {avoid_targets or '-'}",
+            f"- 현금비중 확대: {'예' if increase_cash else '아니오' if increase_cash is not None else '-'}",
+        ]
+        if has_regime_conflict:
+            lines.append(
+                f"- 장전/장초 충돌 감지: premarket={pre_regime}, open={open_regime} -> 장초 기준 적용, 보수적 수량 권고"
+            )
+
+        cutoff = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT created_at, claude_opinion FROM signals "
+                "WHERE stock_code = ? AND source = 'news_monitor' AND created_at >= ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (stock_code, cutoff),
+            ).fetchone()
+        if row:
+            opinion = str(row["claude_opinion"] or "")
+            lowered = opinion.lower()
+            if "[매도]" in opinion or "critical" in lowered:
+                risk_label = "critical"
+            elif "[홀드]" in opinion or "warning" in lowered:
+                risk_label = "warning"
+            else:
+                risk_label = "notice"
+            ts = str(row["created_at"])[11:16]
+            lines.append(f"- 종목 뉴스 경보: {risk_label} ({ts})")
+
+        return "\n".join(lines)
+    except Exception:
+        return "오늘 운용 지침 조회 실패"
 def get_trade_opinion(
     signal,
     holdings: list[dict],
@@ -998,6 +1058,7 @@ def _legacy_get_trade_opinion(
     trades_text = _fmt_trades(recent_trades or [], signal.signal_type, getattr(signal, "add_signal_mode", ""))
     last_ai_text = _fmt_last_ai_decision(signal.stock_code)
     hold_condition_text = _fmt_last_hold_condition(signal.stock_code)
+    today_guidance_text = _fmt_today_market_guidance(signal.stock_code)
     history_text = _fmt_signal_history(signal.stock_code, signal_type=signal.signal_type)
 
     # ── SQL 범위 필터 RAG: 유사 지표 상황의 과거 신호 ──
@@ -1332,6 +1393,8 @@ def _legacy_get_trade_opinion(
 {_fmt_index(kospi, '코스피')}
 {_fmt_index(kosdaq, '코스닥')}
 {_fmt_sector(sector, signal.sector_code)}{_global_line}
+## 오늘 운용 지침 (장전/장초 + 뉴스경보)
+{today_guidance_text}
 {_insights_section}"""
 
     if _BACKEND == "anthropic":

@@ -17,6 +17,38 @@ from worker.adaptive_policy import get_research_adaptive_policy
 logger = logging.getLogger(__name__)
 
 
+def _get_today_market_guidance_for_research() -> dict:
+    """Opening report first, fallback to premarket report."""
+    try:
+        from datetime import date
+        from data.db import get_latest_market_report
+
+        today = date.today().strftime("%Y-%m-%d")
+        pre = get_latest_market_report(report_type="premarket", report_date=today) or {}
+        opn = get_latest_market_report(report_type="open", report_date=today) or {}
+        base = opn or pre
+        if not base:
+            return {"source": "none"}
+        return {
+            "source": "open" if opn else "premarket",
+            "market_regime": base.get("market_regime"),
+            "volatility": base.get("volatility"),
+            "recommended_aggressiveness": base.get("recommended_aggressiveness"),
+            "aggressive_entry": base.get("aggressive_entry"),
+            "avoid_targets": base.get("avoid_targets"),
+            "increase_cash": base.get("increase_cash"),
+            "premarket_regime": pre.get("market_regime"),
+            "open_regime": opn.get("market_regime"),
+            "regime_conflict": bool(
+                pre.get("market_regime")
+                and opn.get("market_regime")
+                and pre.get("market_regime") != opn.get("market_regime")
+            ),
+        }
+    except Exception:
+        return {"source": "error"}
+
+
 _SYSTEM_PROMPT = """당신은 개인 투자자의 퀀트 트레이딩 시스템에서 유망 종목을 발굴하는 AI입니다.
 시장 상황에 맞는 도구를 스스로 선택해 후보를 찾고, 검증된 종목만 관심종목에 등록하세요.
 
@@ -249,7 +281,7 @@ class ResearchAgent:
         has_recent_review_note = False
         try:
             from data.db import get_recent_daily_reviews
-            reviews = get_recent_daily_reviews(limit=1) or []
+            reviews = get_recent_daily_reviews(limit=1, exclude_today=True) or []
             if reviews:
                 r0 = reviews[0]
                 ctx["recent_review_note"] = {
@@ -469,6 +501,7 @@ class ResearchAgent:
         )
         self._agent.configure_run(target_unique_tools=self._target_unique_tools)
         perf_summary = self._build_performance_summary()
+        market_guidance = _get_today_market_guidance_for_research()
 
         def _brief(v, limit=180):
             text = json.dumps(v, ensure_ascii=False, default=str)
@@ -477,6 +510,7 @@ class ResearchAgent:
         initial_message = f"""## 오늘 시장 환경
 - KOSPI: {kospi_rate:+.2f}%
 - KOSDAQ: {kosdaq_rate:+.2f}%
+- today_market_guidance: {_brief(market_guidance, 260)}
 
 ## Preflight Context (validated)
 - market_brief: {_brief(pre_ctx.get('market_brief', {}))}

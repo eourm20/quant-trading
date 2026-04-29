@@ -1,4 +1,4 @@
-"""
+﻿"""
 백그라운드 워커 메인 진입점
 - 장 운영 시간 동안 주기적으로 종목 조건 체크
 - 조건 충족 시 Claude API 판단 → 텔레그램 알림
@@ -185,6 +185,32 @@ def _extract_first_number(payload: dict | None, keys: tuple[str, ...]) -> float:
     return 0.0
 
 
+def _fmt_pct_or_na(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        v = float(value)
+    except Exception:
+        return "N/A"
+    if abs(v) <= 1e-9:
+        return "N/A"
+    return f"{v:+.2f}%"
+
+
+def _fmt_num_or_na(value: float | int | None, digits: int = 0) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        v = float(value)
+    except Exception:
+        return "N/A"
+    if abs(v) <= 1e-9:
+        return "N/A"
+    if digits <= 0:
+        return f"{v:,.0f}"
+    return f"{v:.{digits}f}"
+
+
 def _extract_decision_confidence(
     claude_opinion: str | None,
     trace: dict | None = None,
@@ -349,7 +375,21 @@ def run_premarket_report():
 
         aggressive_entry = recommended_aggr == "high"
         increase_cash = market_regime == "risk_off" or volatility == "high"
+        agent_policy = {
+            "priority": "premarket",
+            "report_type": "premarket",
+            "report_date": today,
+            "generated_at": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "market_regime": market_regime,
+            "volatility": volatility,
+            "trend": trend,
+            "recommended_aggressiveness": recommended_aggr,
+            "aggressive_entry": aggressive_entry,
+            "increase_cash": increase_cash,
+        }
         avoid_targets = "갭 과열 추격 매수, 저유동성 급등주"
+
+        agent_policy["avoid_targets"] = avoid_targets
 
         summary = (
             f"장전 브리프 {today} | regime={market_regime}, vol={volatility}, "
@@ -388,6 +428,7 @@ def run_premarket_report():
                 "futures": {"nq": nq_fut, "es": es_fut},
                 "rates": {"us10y": us10y},
                 "commodities": {"wti": wti, "gold": gold},
+                "agent_policy": agent_policy,
             },
         )
         send_message(f"📘 *장 시작 전 리포트*\n\n{detail}")
@@ -451,6 +492,23 @@ def run_opening_report():
         aggressive_entry = recommended_aggr == "high"
         avoid_targets = ", ".join(m["name"] for m in top_dn) or "급락/저유동성 종목"
         increase_cash = market_regime == "risk_off" or volatility == "high"
+        has_conflict = bool(expected and expected != market_regime)
+        agent_policy = {
+            "priority": "open",
+            "report_type": "open",
+            "report_date": today,
+            "generated_at": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+            "market_regime": market_regime,
+            "volatility": volatility,
+            "trend": trend,
+            "recommended_aggressiveness": recommended_aggr,
+            "aggressive_entry": aggressive_entry,
+            "avoid_targets": avoid_targets,
+            "increase_cash": increase_cash,
+            "premarket_expected_regime": expected or None,
+            "regime_conflict": has_conflict,
+            "conflict_resolution": "open_first" if has_conflict else "aligned",
+        }
 
         up_txt = ", ".join(f"{m['name']} {m['pct']:+.2f}%" for m in top_up) or "없음"
         dn_txt = ", ".join(f"{m['name']} {m['pct']:+.2f}%" for m in top_dn) or "없음"
@@ -492,6 +550,7 @@ def run_opening_report():
                 "movers_top_up": top_up,
                 "movers_top_down": top_dn,
                 "premarket_expected_regime": expected,
+                "agent_policy": agent_policy,
             },
         )
         send_message(f"📗 *장 시작 직후 리포트*\n\n{detail}")
@@ -601,6 +660,26 @@ def _has_recent_buy_trade(stock_code: str, within_minutes: int) -> bool:
 def _parse_ymd(value: str) -> str:
     s = str(value or "").replace("-", "").strip()
     return s if len(s) == 8 and s.isdigit() else ""
+
+
+def _today_soft_avoid_hit(stock_code: str, stock_name: str) -> tuple[bool, str]:
+    """Return whether stock is in today's avoid targets (open first, then premarket)."""
+    try:
+        today = _now_kst().strftime("%Y-%m-%d")
+        rep = get_latest_market_report(report_type="open", report_date=today) or {}
+        if not rep:
+            rep = get_latest_market_report(report_type="premarket", report_date=today) or {}
+        avoid_text = str(rep.get("avoid_targets") or "").strip()
+        if not avoid_text:
+            return False, ""
+        code = str(stock_code or "").strip()
+        name = str(stock_name or "").strip()
+        tokens = [t.strip() for t in avoid_text.split(",") if t.strip()]
+        code_hit = code and any(code == t for t in tokens)
+        name_hit = name and any(name in t or t in name for t in tokens)
+        return bool(code_hit or name_hit), avoid_text
+    except Exception:
+        return False, ""
 
 
 def _business_days_elapsed(start_dt, end_dt) -> int:
@@ -1052,7 +1131,20 @@ def run_news_monitor():
 
     now = _now_kst()
     news_ai_max_calls_per_run = max(0, int(_WORKER_CONFIG.get("news_ai_max_calls_per_run", 2)))
+    news_max_age_hours = max(1, int(_WORKER_CONFIG.get("news_max_age_hours", 48)))
     news_ai_calls = 0
+
+    def _is_fresh_news(pub_date_text: str) -> bool:
+        text = str(pub_date_text or "").strip()
+        if not text:
+            return False
+        try:
+            # news_client currently normalizes to YYYY-MM-DD.
+            pub_dt = datetime.strptime(text[:10], "%Y-%m-%d").replace(tzinfo=now.tzinfo)
+            age_hours = (now - pub_dt).total_seconds() / 3600.0
+            return 0 <= age_hours <= news_max_age_hours
+        except Exception:
+            return False
 
     for h in holdings:
         code = str(h.get("stock_code", "")).strip()
@@ -1073,6 +1165,12 @@ def run_news_monitor():
 
         if not news_items:
             continue
+
+        fresh_items = [n for n in news_items if _is_fresh_news(n.get("pub_date", ""))]
+        if not fresh_items:
+            logger.info(f"[news_monitor] no fresh news within {news_max_age_hours}h: {name}")
+            continue
+        news_items = fresh_items
 
         if news_ai_calls >= news_ai_max_calls_per_run:
             logger.info(
@@ -1906,6 +2004,21 @@ def _auto_execute(
                 )
         except Exception as _adaptive_e:
             logger.debug(f"[{signal.stock_name}] adaptive policy 적용 실패: {_adaptive_e}")
+
+        try:
+            is_avoid, avoid_text = _today_soft_avoid_hit(signal.stock_code, signal.stock_name)
+            if is_avoid and qty > 0:
+                soft_factor = float(_WORKER_CONFIG.get("avoid_targets_soft_factor", 0.5))
+                soft_factor = min(1.0, max(0.1, soft_factor))
+                old_qty = qty
+                qty = max(1, int(round(qty * soft_factor)))
+                if qty != old_qty:
+                    logger.info(
+                        f"[{signal.stock_name}] avoid_targets soft constraint: "
+                        f"{old_qty}주 -> {qty}주 (factor={soft_factor:.2f}, avoid={avoid_text})"
+                    )
+        except Exception as _avoid_e:
+            logger.debug(f"[{signal.stock_name}] avoid_targets soft constraint apply failed: {_avoid_e}")
 
     # 하드캡: 매수 — 실질 매수 여력 초과 방지
     if order_type == "1" and signal.current_price > 0:
