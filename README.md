@@ -64,6 +64,16 @@
   - `AUTO_TRADE=false`: 알림/모의 기록
   - `AUTO_TRADE=true`: 자동 주문
 
+### 2.1 운영 관점 핵심 기능 프레임
+이 프로젝트를 운영할 때 핵심 축은 아래 7가지입니다.
+1. 두 에이전트 흐름: `JudgmentAgent` / `ResearchAgent`
+2. 하네스 분기: `SKIP` / `DIRECT_SELL` / `AMBIGUOUS`
+3. 서브에이전트(tool-calling) 실행 구조
+4. Agent 미세 학습/조정: 일일 복기, 리플렉션, adaptive policy
+5. 외부 API 활용: 키움, 뉴스, DART, LLM
+6. 저장 데이터 구조: signals/market_reports/strategy_notes 등
+7. 텔레그램 연동: 알림, 승인, 수동 명령 인터페이스
+
 ---
 
 ## 3. 디렉터리 구조(현재 코드 기준)
@@ -324,6 +334,11 @@ quant_trading/
 - 주문 승인/거부 플로우
 - 수동 커맨드 처리(`/buy`, `/sell`, `/balance` 등)
 - Markdown 파싱 실패 시 plain text 재전송 폴백
+
+운영상 중요 포인트:
+- 텔레그램은 단순 알림 채널이 아니라, 자동매매 안전장치와 수동介입 인터페이스 역할을 함께 수행
+- AUTO_TRADE 환경에서도 승인 플로우/거부 플로우를 통해 비정상 주문을 차단하는 마지막 게이트로 사용 가능
+- 장애 시(포맷 실패/일시 오류) plain text 폴백으로 신호 전달 연속성 유지
 
 ---
 
