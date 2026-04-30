@@ -93,12 +93,18 @@ quant_trading/
   worker/
     main.py                    # 엔트리포인트 + 스케줄러 + 런루프
     monitor.py                 # 종목 조건 평가, Signal 생성
-    claude_judge.py            # AI 판단 엔진
+    claude_judge.py            # AI 판단 엔진 (하네스 + Agent + 레거시 폴백)
     stock_analyzer.py          # 장중/종가 스크리닝 + 리뷰
     portfolio_sync.py          # 계좌/체결 동기화
     indicators.py              # 기술지표/패턴 계산
     adaptive_policy.py         # 과거 성과 기반 진입 강도 조정
     strategy_reflection.py     # 리플렉션/정책 업데이트 루프
+    watchlist_policy.py        # watchlist/positions 필드 정규화
+    daily_report.py            # 장전/장초/일일 리포트 생성
+    report.py                  # 리포트 조회 유틸
+    strategy_log.py            # 전략 노트 기록 헬퍼
+    cooldown.py                # 쿨다운 키 관리
+    rag_indexer.py             # RAG 배치/실시간 인덱싱
     agents/
       base_agent.py            # 공통 런타임(Agent 아님)
       judgment_agent.py        # 운영 Agent 1
@@ -166,8 +172,10 @@ quant_trading/
 ## 6. AI 판단 아키텍처 (`worker/claude_judge.py`)
 
 ### 6.1 백엔드 선택
-- `ANTHROPIC_API_KEY` 있으면 Anthropic
-- 없고 `OPENAI_API_KEY` 있으면 OpenAI
+- **Agent 모드** (`use_agent_mode: true`): 항상 OpenAI Function Calling 사용 (`OPENAI_API_KEY` 필수)
+  - `judgment_agent_model` / `judgment_agent_api_key` / `judgment_agent_base_url`로 worker.yaml에서 오버라이드 가능
+  - OpenAI 호환 엔드포인트(`base_url` 설정)를 통해 다른 모델로도 교체 가능
+- **레거시 모드** (폴백 또는 `use_agent_mode: false`): `ANTHROPIC_API_KEY` 있으면 Anthropic Claude, 없으면 OpenAI
 
 ### 6.2 판단 경로
 1. 하네스 검사 (`harness_check`)
@@ -420,7 +428,7 @@ python -m venv .venv
 | `name` | TEXT | 종목명 | `기아` |
 | `enabled` | INTEGER | 감시 여부(1/0) | `1` |
 | `horizon` | TEXT | 매매 기간(단기/중기/장기) | `중기` |
-| `strategy_note_id` | INTEGER/NULL | `strategy_notes.id` ?? (???? ??) | `18` |
+| `strategy_note_id` | INTEGER/NULL | `strategy_notes.id` 링크 (최근 전략 노트 연결) | `18` |
 | `sector_code` | TEXT | 업종 코드 | `G25` |
 | `target_price` | INTEGER/NULL | (레거시/보조) 목표가 | `165000` |
 | `stop_loss_price` | INTEGER/NULL | (레거시/보조) 손절가 | `152000` |
@@ -530,7 +538,7 @@ python -m venv .venv
 ### 16.10 리포트/전략/추적 테이블
 | 테이블 | 핵심 컬럼 | 설명 |
 |---|---|---|
-| `strategy_notes` | `id`, `category`, `summary`, `detail`, `meta_json` | ?? ??/?? ?? (id? watchlist/positions ??) |
+| `strategy_notes` | `id`, `category`, `summary`, `detail`, `meta_json` | 전략 메모/복기 저장 (id로 watchlist/positions 연결) |
 | `market_reports` | `report_date`, `report_type`, `market_regime`, `volatility`, `trend` | 장전/장초 리포트 |
 | `agent_action_logs` | `signal_id`, `tool_sequence`, `reasoning_chain`, `final_opinion` | Agent trace 장기 저장 |
 | `strategy_reflection_logs` | `agent_type`, `status`, `praise_tags`, `fix_tags` | 리플렉션 로그 |

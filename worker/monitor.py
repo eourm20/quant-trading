@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 TREND_FOLLOW_RSI_MIN = 55.0
 TREND_FOLLOW_RSI_MAX = 75.0
 TREND_FOLLOW_VOLUME_MIN = 1.2
+TREND_FOLLOW_BREAKOUT_MIN_5D_PCT = 20.0
+TREND_FOLLOW_BREAKOUT_VOLUME_MIN = 2.0
 
 
 def load_conditions() -> list[dict]:
@@ -145,11 +147,33 @@ def _evaluate_condition(
                 return None
             if chart.trend != "상승":
                 return None
-            if not (TREND_FOLLOW_RSI_MIN <= rsi <= TREND_FOLLOW_RSI_MAX):
-                return None
-            if volume_ratio < TREND_FOLLOW_VOLUME_MIN:
-                return None
-            return msg_template.format(**fmt)
+            normal_rsi_ok = TREND_FOLLOW_RSI_MIN <= rsi <= TREND_FOLLOW_RSI_MAX
+            normal_vol_ok = volume_ratio >= TREND_FOLLOW_VOLUME_MIN
+            if normal_rsi_ok and normal_vol_ok:
+                return msg_template.format(**fmt)
+
+            # 과열 구간(RSI 상단 초과)이라도 20일 신고가 돌파 + 거래량 급증일 때는 추격 진입 예외 허용
+            breakout_enabled = bool(stock_cond.get("new_high_20d"))
+            breakout_vol_threshold = stock_cond.get("volume_surge_ratio") or TREND_FOLLOW_BREAKOUT_VOLUME_MIN
+            breakout_vol_threshold = max(float(breakout_vol_threshold), TREND_FOLLOW_BREAKOUT_VOLUME_MIN)
+            breakout_price_ok = (
+                chart.price_change_5d is not None
+                and chart.price_change_5d >= TREND_FOLLOW_BREAKOUT_MIN_5D_PCT
+            )
+            breakout_ok = (
+                breakout_enabled
+                and bool(chart.new_high_20d)
+                and bool(chart.above_ma20)
+                and volume_ratio >= breakout_vol_threshold
+                and breakout_price_ok
+                and rsi >= TREND_FOLLOW_RSI_MAX
+            )
+            if breakout_ok:
+                return (
+                    f"신고가 돌파 추격 진입 (RSI {rsi:.1f}, 거래량 {volume_ratio:.1f}배, "
+                    f"5일상승 {chart.price_change_5d:.1f}%)"
+                )
+            return None
 
     except (KeyError, ValueError) as e:
         logger.warning(f"조건 메시지 포맷 오류 [{cond_def.get('id')}]: {e}")
