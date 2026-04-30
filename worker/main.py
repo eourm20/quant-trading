@@ -125,6 +125,60 @@ _SESSIONS: dict[str, tuple[dtime, dtime]] = {
     "offhours":   (dtime(16, 0),  dtime(18, 0)),    # 시간외 단일가 (trde_tp 62)
 }
 
+_MARKET_CALENDAR_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "krx_holidays.yaml")
+_MARKET_CALENDAR_CACHE: tuple[float, set[str]] | None = None
+
+
+def _load_krx_holiday_dates() -> set[str]:
+    """Load KRX holiday dates (YYYY-MM-DD) from config file."""
+    global _MARKET_CALENDAR_CACHE
+    try:
+        mtime = os.path.getmtime(_MARKET_CALENDAR_PATH)
+    except Exception:
+        mtime = -1.0
+    if _MARKET_CALENDAR_CACHE and _MARKET_CALENDAR_CACHE[0] == mtime:
+        return _MARKET_CALENDAR_CACHE[1]
+
+    dates: set[str] = set()
+    try:
+        with open(_MARKET_CALENDAR_PATH, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        for item in (data.get("closed_dates") or []):
+            text = str(item or "").strip()
+            if text:
+                dates.add(text)
+    except Exception as e:
+        logger.warning(f"[market-calendar] KRX holiday config load failed: {e}")
+
+    _MARKET_CALENDAR_CACHE = (mtime, dates)
+    return dates
+
+
+def _is_krx_closed_day(dt: datetime) -> tuple[bool, str]:
+    """Return (closed, reason) for a KST date."""
+    if dt.weekday() >= 5:
+        return True, "weekend"
+    ymd = dt.strftime("%Y-%m-%d")
+    if ymd in _load_krx_holiday_dates():
+        return True, "holiday_calendar"
+    return False, "open_day"
+
+
+def _get_market_event_context(now_kst: datetime | None = None) -> dict:
+    """System-level market event flags used by execution and AI context."""
+    now_kst = now_kst or _now_kst()
+    tomorrow = now_kst + _td(days=1)
+    today_closed, today_reason = _is_krx_closed_day(now_kst)
+    tomorrow_closed, tomorrow_reason = _is_krx_closed_day(tomorrow)
+    return {
+        "today": now_kst.strftime("%Y-%m-%d"),
+        "tomorrow": tomorrow.strftime("%Y-%m-%d"),
+        "today_closed": today_closed,
+        "today_closed_reason": today_reason,
+        "tomorrow_closed": tomorrow_closed,
+        "tomorrow_closed_reason": tomorrow_reason,
+    }
+
 
 def get_current_session() -> str | None:
     """현재 거래 가능 세션 반환. 장외 시간이면 None."""
@@ -1917,6 +1971,15 @@ def _auto_execute(
         logger.info(f"[{signal.stock_name}] 자동 모드: AI 홀드 — 스킵")
         return
 
+    market_event_ctx = getattr(signal, "market_event_context", {}) or {}
+    tomorrow_closed = bool(market_event_ctx.get("tomorrow_closed"))
+    if order_type == "1" and tomorrow_closed:
+        logger.info(
+            f"[{signal.stock_name}] 내일 휴장({market_event_ctx.get('tomorrow')}) "
+            f"이벤트로 신규 매수 차단"
+        )
+        return
+
     # 매수 직전마다 최신 예수금/실질 매수여력을 다시 산출해 stale budget 사용을 방지한다.
     if order_type == "1":
         try:
@@ -2558,11 +2621,18 @@ def run_check():
     time.sleep(1)
     kosdaq = kiwoom.get_market_index("kosdaq")
     time.sleep(1)
+    market_event_ctx = _get_market_event_context()
+    if market_event_ctx.get("tomorrow_closed"):
+        logger.info(
+            f"[market-event] tomorrow={market_event_ctx.get('tomorrow')} closed "
+            f"(reason={market_event_ctx.get('tomorrow_closed_reason')})"
+        )
 
     for stock in stocks:
         time.sleep(1)
         signal = check_stock(kiwoom, stock, conditions, holdings)
         if signal:
+            setattr(signal, "market_event_context", market_event_ctx)
             new_ids, new_conditions = filter_new_conditions(
                 signal.stock_code, signal.triggered_ids, signal.triggered_conditions, conditions
             )
@@ -2601,7 +2671,7 @@ def run_check():
                     if harness_result == HARNESS_DIRECT_SELL:
                         claude_opinion = (
                             "[매도]\n"
-                            "• 근거1: 손절가 이탈 또는 하드 매도 트리거 — 하네스 직행 처리"
+                            "• 근거1: 손절가 이탈 — 하네스 직행 처리"
                         )
                         logger.info(f"[{signal.stock_name}] 하네스 DIRECT_SELL → 풀 모델 생략")
 

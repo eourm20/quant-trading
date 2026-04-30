@@ -391,14 +391,9 @@ def harness_check(signal, holdings: list) -> str:
         except Exception:
             pass
 
-    # ── DIRECT_SELL: 하드 매도 트리거 (보유 종목만) ──
-    if in_portfolio:
-        hard_kw = ("데드크로스", "구름대 이탈", "하향 이탈")
-        if any(k in triggered_text for k in hard_kw):
-            logger.info(
-                f"[하네스] {signal.stock_name}: 하드 매도 트리거 → DIRECT_SELL"
-            )
-            return HARNESS_DIRECT_SELL
+    # NOTE:
+    # Direct sell in harness is intentionally limited to stop-loss breach only.
+    # Other sell scenarios are delegated to AI judgment for horizon/context-aware decisions.
 
     # ── SKIP: 오늘 홀드 판단 3회 이상 ──
     try:
@@ -1362,6 +1357,20 @@ def _legacy_get_trade_opinion(
             "- 단, 리스크가 높으면 홀드를 유지할 수 있으며 그 근거를 명확히 작성하세요."
         )
 
+    _market_event_ctx = getattr(signal, "market_event_context", {}) or {}
+    _tomorrow = _market_event_ctx.get("tomorrow") or "N/A"
+    _tomorrow_closed = bool(_market_event_ctx.get("tomorrow_closed"))
+    _tomorrow_reason = _market_event_ctx.get("tomorrow_closed_reason") or "-"
+    _market_event_text = (
+        f"- 내일 거래일 상태: {'휴장' if _tomorrow_closed else '개장'} "
+        f"({_tomorrow}, reason={_tomorrow_reason})"
+    )
+    _horizon_reason = (getattr(signal, "strategy_note", "") or "").strip()
+    if _horizon_reason:
+        _horizon_reason = _horizon_reason[:300]
+    else:
+        _horizon_reason = "미기록"
+
     user_prompt = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
 - 신호 유형: {signal_type_label}
@@ -1370,6 +1379,10 @@ def _legacy_get_trade_opinion(
 - 현재가: {signal.current_price:,}원
 - RSI(14일봉): {signal.rsi if signal.rsi else 'N/A'}
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
+
+## 기간/이벤트 컨텍스트
+- horizon 설정 배경: {_horizon_reason}
+{_market_event_text}
 
 ## 종목 전략 설정
 - {rr_text}{add_trigger_text}{_position_text}{_wl_settings_text}{_sector_text}
