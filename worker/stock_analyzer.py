@@ -2058,6 +2058,16 @@ def run_daily_review():
     today_str = now_kst().strftime("%Y-%m-%d")
     logger.info(f"[일일복기] {today_str} 복기 시작")
 
+    # 복기 직전 결과 스냅샷 최신화: 현재가/성과 계산을 먼저 갱신
+    try:
+        from worker.main import update_signal_results, update_screening_results, update_trade_results
+        update_signal_results()
+        update_screening_results()
+        update_trade_results()
+        logger.info("[일일복기] pre-refresh done (signal/screening/trade results)")
+    except Exception as _pre_e:
+        logger.warning(f"[일일복기] pre-refresh failed: {_pre_e}")
+
     # ── 데이터 수집 ──
     signals = get_today_signals()
     trades = get_trades(limit=30)
@@ -2066,6 +2076,14 @@ def run_daily_review():
     accuracy_14d = get_verdict_accuracy(days=14)
     screening_acc = get_screening_accuracy(days=30)
     recent_reviews = get_recent_daily_reviews(limit=2)
+    accuracy_samples_14d = int(sum(int((v or {}).get("count", 0)) for v in (accuracy_14d or {}).values()))
+    screening_registered_30d = int((screening_acc or {}).get("total") or 0)
+
+    # 성과 판단 최소 표본 규칙
+    min_acc_samples = 10
+    min_screening_samples = 10
+    acc_ready = accuracy_samples_14d >= min_acc_samples
+    screening_ready = screening_registered_30d >= min_screening_samples
     today_checklist_note = None
     try:
         for n in (get_strategy_notes(limit=30) or []):
@@ -2132,16 +2150,22 @@ def run_daily_review():
     for v, a in accuracy_14d.items():
         hit = a.get("hit_rate_3d")
         avg3 = a.get("avg_3d")
-        acc_lines.append(f"  {v}: {a['count']}건, 적중률 {hit}%, 평균3일 {avg3:+.1f}%")
+        cnt = int(a.get("count", 0) or 0)
+        if acc_ready and hit is not None and avg3 is not None:
+            acc_lines.append(f"  {v}: {cnt}건, 적중률 {hit}%, 평균3일 {avg3:+.1f}%")
+        else:
+            acc_lines.append(f"  {v}: {cnt}건, 표본부족으로 성과판단 보류")
 
     # 스크리닝 성과
     scr_text = ""
-    if screening_acc:
+    if screening_acc and screening_ready:
         scr_text = (
             f"추천 {screening_acc['total']}건"
             f" | 7일적중 {screening_acc.get('hit_7d', 'N/A')}%"
             f" | 30일적중 {screening_acc.get('hit_30d', 'N/A')}%"
         )
+    elif screening_acc:
+        scr_text = f"추천 {screening_acc['total']}건 | 표본부족으로 성과판단 보류"
 
     # ── AI 프롬프트 구성 (간결하게) ──
     user_prompt = f"""## {today_str} 장 마감 복기 데이터
@@ -2157,9 +2181,11 @@ def run_daily_review():
 
 ### 최근 14일 AI 판정 적중률
 {chr(10).join(acc_lines) if acc_lines else "데이터 부족"}
+성능평가 가능 여부: {"가능" if acc_ready else "보류(표본 부족)"} (samples={accuracy_samples_14d}, min={min_acc_samples})
 
 ### 최근 30일 스크리닝 성과
 {scr_text or "데이터 부족"}
+성능평가 가능 여부: {"가능" if screening_ready else "보류(표본 부족)"} (samples={screening_registered_30d}, min={min_screening_samples})
 
 ### 전일 Agent Guidance ({prev_review_date or "N/A"})
 {chr(10).join(f"- {g}" for g in prev_guidance[:8]) if prev_guidance else "- 없음"}
@@ -2197,6 +2223,8 @@ Additional output rules (must follow):
   [System Issues]
   [Agent Guidance]
 - Keep each section concise; avoid long background explanation.
+- IMPORTANT: If sample size is below minimum, explicitly state "표본 부족으로 성과판단 보류".
+- Do not conclude "부진/실패/0% 성과" from sparse data below minimum samples.
 """
 
 
@@ -2210,7 +2238,7 @@ Additional output rules (must follow):
         if _AI_BACKEND == "anthropic":
             response = _ai_client.messages.create(
                 model=_AI_MODEL_MINI,
-                max_tokens=600,
+                max_tokens=1200,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -2218,7 +2246,7 @@ Additional output rules (must follow):
         else:
             response = _ai_client.chat.completions.create(
                 model=_AI_MODEL_MINI,
-                max_tokens=600,
+                max_tokens=1200,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -2345,6 +2373,14 @@ Additional output rules (must follow):
             "portfolio_profit_loss": total_pl,
             "verdict_accuracy_14d": accuracy_14d,
             "screening_accuracy_30d": screening_acc or {},
+            "data_sufficiency": {
+                "accuracy_samples_14d": accuracy_samples_14d,
+                "accuracy_min_samples": min_acc_samples,
+                "accuracy_ready": acc_ready,
+                "screening_samples_30d": screening_registered_30d,
+                "screening_min_samples": min_screening_samples,
+                "screening_ready": screening_ready,
+            },
         },
         "wins_losses": {
             "winning_positions": _wins,
@@ -2390,10 +2426,60 @@ Additional output rules (must follow):
     except Exception as _issue_e:
         logger.warning(f"[일일복기] 개선 이슈 저장 실패: {_issue_e}")
 
-    # ── 텔레그램 발송 (human-readable only) ──
-    tg_text = f"📊 *{today_str} 일일 복기*\n\n{review_text_human}"
-    if len(tg_text) > 3900:
-        tg_text = tg_text[:3900] + "\n\n_(이하 생략)_"
+    # ── 텔레그램 발송 (concise summary; full text is stored in DB) ──
+    def _extract_section_lines(text: str, header: str, max_lines: int = 3) -> list[str]:
+        lines: list[str] = []
+        current = None
+        for raw in (text or "").replace("\r", "").split("\n"):
+            s = raw.strip()
+            if s == f"[{header}]":
+                current = header
+                continue
+            if s.startswith("[") and s.endswith("]"):
+                current = None
+                continue
+            if current == header:
+                if not s:
+                    continue
+                if s.startswith("-"):
+                    lines.append(s[1:].strip())
+                else:
+                    lines.append(s)
+                if len(lines) >= max_lines:
+                    break
+        return lines
+
+    exec_lines = _extract_section_lines(review_text_human, "Executive Summary", max_lines=2)
+    worked_lines = _extract_section_lines(review_text_human, "What Worked", max_lines=2)
+    failed_lines = _extract_section_lines(review_text_human, "What Failed", max_lines=2)
+    guidance_lines = _extract_section_lines(review_text_human, "Agent Guidance", max_lines=3)
+    carry_lines = _extract_section_lines(review_text_human, "Carry-over Check", max_lines=2)
+
+    tg_parts = [f"📊 *{today_str} 일일 복기 요약*"]
+    if exec_lines:
+        tg_parts.append("")
+        tg_parts.append("*Executive Summary*")
+        tg_parts.extend(f"- {x}" for x in exec_lines)
+    if worked_lines:
+        tg_parts.append("")
+        tg_parts.append("*What Worked*")
+        tg_parts.extend(f"- {x}" for x in worked_lines)
+    if failed_lines:
+        tg_parts.append("")
+        tg_parts.append("*What Failed*")
+        tg_parts.extend(f"- {x}" for x in failed_lines)
+    if carry_lines:
+        tg_parts.append("")
+        tg_parts.append("*Carry-over Check*")
+        tg_parts.extend(f"- {x}" for x in carry_lines)
+    if guidance_lines:
+        tg_parts.append("")
+        tg_parts.append("*Agent Guidance (핵심)*")
+        tg_parts.extend(f"- {x}" for x in guidance_lines)
+
+    tg_parts.append("")
+    tg_parts.append(f"_전문은 strategy_notes(daily_review, note_id={note_id})에 저장됨_")
+    tg_text = "\n".join(tg_parts).strip()
     send_message(tg_text)
     logger.info(f"[일일복기] 텔레그램 발송 완료")
 

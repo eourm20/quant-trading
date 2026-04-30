@@ -1443,9 +1443,11 @@ def run_daily_review_with_checklist():
         # verification checkpoint: confirm today's checklist row is visible in DB
         from data.db import get_strategy_notes
         today = _now_kst().strftime("%Y-%m-%d")
-        notes = get_strategy_notes("general", limit=20) or []
+        notes = get_strategy_notes(limit=50) or []
         ok = False
         for n in notes:
+            if str(n.get("category", "")) != "general":
+                continue
             s = str(n.get("summary", ""))
             if today in s and "daily_review 반영 체크리스트" in s:
                 ok = True
