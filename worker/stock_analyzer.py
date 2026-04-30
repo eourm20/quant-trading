@@ -2077,13 +2077,17 @@ def run_daily_review():
     screening_acc = get_screening_accuracy(days=30)
     recent_reviews = get_recent_daily_reviews(limit=2)
     accuracy_samples_14d = int(sum(int((v or {}).get("count", 0)) for v in (accuracy_14d or {}).values()))
-    screening_registered_30d = int((screening_acc or {}).get("total") or 0)
+    screening_activity_30d = int((screening_acc or {}).get("activity_total") or (screening_acc or {}).get("total") or 0)
+    screening_matured_7d = int((screening_acc or {}).get("matured_7d_count") or 0)
+    screening_matured_30d = int((screening_acc or {}).get("matured_30d_count") or 0)
 
     # 성과 판단 최소 표본 규칙
     min_acc_samples = 10
-    min_screening_samples = 10
+    min_screening_samples_7d = 10
+    min_screening_samples_30d = 10
     acc_ready = accuracy_samples_14d >= min_acc_samples
-    screening_ready = screening_registered_30d >= min_screening_samples
+    screening_7d_ready = screening_matured_7d >= min_screening_samples_7d
+    screening_30d_ready = screening_matured_30d >= min_screening_samples_30d
     today_checklist_note = None
     try:
         for n in (get_strategy_notes(limit=30) or []):
@@ -2156,16 +2160,18 @@ def run_daily_review():
         else:
             acc_lines.append(f"  {v}: {cnt}건, 표본부족으로 성과판단 보류")
 
-    # 스크리닝 성과
-    scr_text = ""
-    if screening_acc and screening_ready:
-        scr_text = (
-            f"추천 {screening_acc['total']}건"
-            f" | 7일적중 {screening_acc.get('hit_7d', 'N/A')}%"
-            f" | 30일적중 {screening_acc.get('hit_30d', 'N/A')}%"
-        )
-    elif screening_acc:
-        scr_text = f"추천 {screening_acc['total']}건 | 표본부족으로 성과판단 보류"
+    # 스크리닝 활동/성과 분리
+    scr_activity_text = f"최근 30일 관심종목 등록 {screening_activity_30d}건"
+    scr_perf_7d = (
+        f"7D 만기코호트 {screening_matured_7d}건 | 적중 {screening_acc.get('hit_7d', 'N/A')}% | 평균 {screening_acc.get('avg_7d', 'N/A')}%"
+        if screening_acc and screening_7d_ready else
+        f"7D 만기코호트 {screening_matured_7d}건 | 표본부족으로 성과판단 보류"
+    )
+    scr_perf_30d = (
+        f"30D 만기코호트 {screening_matured_30d}건 | 적중 {screening_acc.get('hit_30d', 'N/A')}% | 평균 {screening_acc.get('avg_30d', 'N/A')}%"
+        if screening_acc and screening_30d_ready else
+        f"30D 만기코호트 {screening_matured_30d}건 | 표본부족으로 성과판단 보류"
+    )
 
     # ── AI 프롬프트 구성 (간결하게) ──
     user_prompt = f"""## {today_str} 장 마감 복기 데이터
@@ -2183,9 +2189,14 @@ def run_daily_review():
 {chr(10).join(acc_lines) if acc_lines else "데이터 부족"}
 성능평가 가능 여부: {"가능" if acc_ready else "보류(표본 부족)"} (samples={accuracy_samples_14d}, min={min_acc_samples})
 
-### 최근 30일 스크리닝 성과
-{scr_text or "데이터 부족"}
-성능평가 가능 여부: {"가능" if screening_ready else "보류(표본 부족)"} (samples={screening_registered_30d}, min={min_screening_samples})
+### 최근 30일 스크리닝 활동
+{scr_activity_text}
+
+### 스크리닝 만기 코호트 성과
+{scr_perf_7d}
+평가 가능 여부(7D): {"가능" if screening_7d_ready else "보류(표본 부족)"} (matured_samples={screening_matured_7d}, min={min_screening_samples_7d})
+{scr_perf_30d}
+평가 가능 여부(30D): {"가능" if screening_30d_ready else "보류(표본 부족)"} (matured_samples={screening_matured_30d}, min={min_screening_samples_30d})
 
 ### 전일 Agent Guidance ({prev_review_date or "N/A"})
 {chr(10).join(f"- {g}" for g in prev_guidance[:8]) if prev_guidance else "- 없음"}
@@ -2223,6 +2234,8 @@ Additional output rules (must follow):
   [System Issues]
   [Agent Guidance]
 - Keep each section concise; avoid long background explanation.
+- IMPORTANT: Separate activity metrics from performance metrics.
+- IMPORTANT: Performance must use matured cohort samples (7D/30D), not raw recent activity count.
 - IMPORTANT: If sample size is below minimum, explicitly state "표본 부족으로 성과판단 보류".
 - Do not conclude "부진/실패/0% 성과" from sparse data below minimum samples.
 """
@@ -2377,9 +2390,14 @@ Additional output rules (must follow):
                 "accuracy_samples_14d": accuracy_samples_14d,
                 "accuracy_min_samples": min_acc_samples,
                 "accuracy_ready": acc_ready,
-                "screening_samples_30d": screening_registered_30d,
-                "screening_min_samples": min_screening_samples,
-                "screening_ready": screening_ready,
+                "screening_samples_30d": screening_activity_30d,
+                "screening_activity_30d": screening_activity_30d,
+                "screening_matured_7d": screening_matured_7d,
+                "screening_matured_30d": screening_matured_30d,
+                "screening_min_samples_7d": min_screening_samples_7d,
+                "screening_min_samples_30d": min_screening_samples_30d,
+                "screening_7d_ready": screening_7d_ready,
+                "screening_30d_ready": screening_30d_ready,
             },
         },
         "wins_losses": {

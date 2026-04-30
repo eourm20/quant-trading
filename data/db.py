@@ -2548,8 +2548,11 @@ def backfill_improvement_issues_from_daily_reviews(limit: int = 120) -> int:
 
 
 def get_screening_accuracy(days: int = 30) -> dict:
-    """최근 N일 스크리닝 추천 종목의 성과 통계.
-    Returns: {total, hit_7d, hit_30d, avg_7d, avg_30d}
+    """최근 N일 스크리닝 활동/성과 통계.
+
+    - activity_total: 최근 N일 '관심종목 등록' 건수 (활동량)
+    - matured_7d_count: result_7d가 채워진 건수 (7D 만기 코호트)
+    - matured_30d_count: result_30d가 채워진 건수 (30D 만기 코호트)
     """
     since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
     with get_conn() as conn:
@@ -2568,7 +2571,12 @@ def get_screening_accuracy(days: int = 30) -> dict:
     r7_vals = [r["result_7d"] for r in rows if r["result_7d"] is not None]
     r30_vals = [r["result_30d"] for r in rows if r["result_30d"] is not None]
     return {
+        # legacy key (keep for compatibility)
         "total": total,
+        # explicit split
+        "activity_total": total,
+        "matured_7d_count": len(r7_vals),
+        "matured_30d_count": len(r30_vals),
         "avg_7d": round(sum(r7_vals) / len(r7_vals), 2) if r7_vals else None,
         "avg_30d": round(sum(r30_vals) / len(r30_vals), 2) if r30_vals else None,
         "hit_7d": round(sum(1 for v in r7_vals if v > 0) / len(r7_vals) * 100, 1) if r7_vals else None,
