@@ -2047,7 +2047,7 @@ def run_daily_review():
     from data.db import (
         get_today_signals, get_portfolio, get_trades,
         get_verdict_accuracy, save_strategy_note, get_screening_accuracy,
-        get_recent_daily_reviews, save_improvement_issue,
+        get_recent_daily_reviews, save_improvement_issue, get_strategy_notes,
     )
     from notifications.telegram import send_message
 
@@ -2066,6 +2066,17 @@ def run_daily_review():
     accuracy_14d = get_verdict_accuracy(days=14)
     screening_acc = get_screening_accuracy(days=30)
     recent_reviews = get_recent_daily_reviews(limit=2)
+    today_checklist_note = None
+    try:
+        for n in (get_strategy_notes(limit=30) or []):
+            created = str(n.get("created_at", ""))
+            if not created.startswith(today_str):
+                continue
+            if "daily_review 반영 체크리스트" in str(n.get("summary", "")):
+                today_checklist_note = str(n.get("detail", "") or "").strip()
+                break
+    except Exception:
+        today_checklist_note = None
 
     def _extract_bullets_by_header(text: str, header: str) -> list[str]:
         out: list[str] = []
@@ -2153,6 +2164,9 @@ def run_daily_review():
 ### 전일 Agent Guidance ({prev_review_date or "N/A"})
 {chr(10).join(f"- {g}" for g in prev_guidance[:8]) if prev_guidance else "- 없음"}
 
+### 당일 복기 반영 체크리스트 로그
+{today_checklist_note[:1200] if today_checklist_note else "없음"}
+
 위 데이터를 분석하여 아래 형식으로 하루 복기를 작성하세요.
 
 ## 출력 형식 (엄격히 준수)
@@ -2161,6 +2175,7 @@ def run_daily_review():
 [What Failed]
 [Carry-over Check]
 - 전일 Agent Guidance 항목별 준수 여부를 평가(준수/미준수/부분준수 + 간단 근거)
+- 당일 복기 반영 체크리스트 로그에서 반영/무시 이유가 타당했는지 평가
 [System Issues]
 - 운영자가 직접 수정해야 하는 시스템/데이터/필터/집계 이슈만 bullet로 작성
 - 항목 없으면 "- 없음"

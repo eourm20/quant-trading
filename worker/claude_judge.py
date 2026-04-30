@@ -375,6 +375,7 @@ def harness_check(signal, holdings: list) -> str:
     volume_ratio    = getattr(signal, "volume_ratio", None)
     triggered_text  = " ".join(str(x) for x in (getattr(signal, "triggered_conditions", []) or []))
     in_portfolio    = bool(getattr(signal, "in_portfolio", False))
+    stop_sensitivity = str(getattr(signal, "stop_loss_sensitivity", "유지") or "유지").strip()
 
     # ── DIRECT_SELL: 손절가 이탈 ──
     if in_portfolio and current_price > 0:
@@ -382,10 +383,17 @@ def harness_check(signal, holdings: list) -> str:
             from data.db import get_positions as _gp
             pos = {p["stock_code"]: p for p in _gp()}.get(signal.stock_code, {})
             stop_loss = pos.get("stop_loss_price") or 0
-            if stop_loss > 0 and current_price <= stop_loss:
+            effective_stop = stop_loss
+            if stop_loss > 0:
+                if stop_sensitivity == "강화":
+                    effective_stop = int(round(stop_loss * 1.01))
+                elif stop_sensitivity == "완화":
+                    effective_stop = int(round(stop_loss * 0.99))
+            if stop_loss > 0 and current_price <= effective_stop:
                 logger.info(
                     f"[하네스] {signal.stock_name}: 손절가 이탈 "
-                    f"({current_price:,}≤{stop_loss:,}) → DIRECT_SELL"
+                    f"({current_price:,}≤{stop_loss:,}, effective={effective_stop:,}, mode={stop_sensitivity}) "
+                    f"→ DIRECT_SELL"
                 )
                 return HARNESS_DIRECT_SELL
         except Exception:
@@ -1365,13 +1373,21 @@ def _legacy_get_trade_opinion(
         f"- 내일 거래일 상태: {'휴장' if _tomorrow_closed else '개장'} "
         f"({_tomorrow}, reason={_tomorrow_reason})"
     )
+    _dr_core3 = getattr(signal, "daily_review_core3", []) or []
+    _dr_core3_lines = [str(x or "").strip() for x in _dr_core3 if str(x or "").strip()][:3]
+    if not _dr_core3_lines:
+        _dr_core3_lines = ["복기 핵심 미제공", "복기 핵심 미제공", "복기 핵심 미제공"]
+    _dr_core3_text = "\n".join(f"- {ln}" for ln in _dr_core3_lines)
     _horizon_reason = (getattr(signal, "strategy_note", "") or "").strip()
     if _horizon_reason:
         _horizon_reason = _horizon_reason[:300]
     else:
         _horizon_reason = "미기록"
 
-    user_prompt = f"""## 신호 정보
+    user_prompt = f"""## 전일 복기 핵심 3줄 (고정)
+{_dr_core3_text}
+
+## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code}) | 매매 기간: {getattr(signal, 'horizon', '')}
 - 신호 유형: {signal_type_label}
 - 트리거 조건:

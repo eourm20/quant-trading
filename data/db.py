@@ -611,6 +611,23 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_policy_queue_status_date ON strategy_policy_update_queue (status, created_at)")
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_policy_cycle_logs (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at          TEXT NOT NULL,
+                agent_type          TEXT NOT NULL,
+                outcome             TEXT NOT NULL, -- applied | queued | skipped | rejected
+                reason_code         TEXT NOT NULL DEFAULT '',
+                reason_detail       TEXT DEFAULT '',
+                sample_count        INTEGER NOT NULL DEFAULT 0,
+                avg_quality         REAL DEFAULT NULL,
+                current_risk_mode   TEXT DEFAULT '',
+                target_risk_mode    TEXT DEFAULT '',
+                queue_update_id     INTEGER DEFAULT NULL,
+                applied_version     TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_policy_cycle_logs_agent_date ON strategy_policy_cycle_logs (agent_type, created_at)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS realized_pnl_snapshots (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at    TEXT NOT NULL,

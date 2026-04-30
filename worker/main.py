@@ -72,6 +72,7 @@ from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_a
                      update_stock_field, save_strategy_note, save_market_report, get_latest_market_report,
                      get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
                      get_positions, get_position, update_position_field, create_position_from_trade,
+                     get_recent_daily_reviews,
                      save_realized_pnl_snapshot)
 
 _log_prefix = os.getenv("LOG_PREFIX", "worker")
@@ -111,6 +112,9 @@ _ai_judgment_cache: dict[str, tuple[datetime, str]] = {}
 _rag_pending_signal_ids: set[int] = set()
 _pending_weak_exit_confirm: dict[str, datetime] = {}
 _shutdown_event = threading.Event()
+_daily_review_guardrail_context: dict = {}
+_daily_review_execution_events: list[dict] = []
+_daily_review_event_date: str = ""
 
 
 def _handle_shutdown_signal(signum, _frame):
@@ -178,6 +182,155 @@ def _get_market_event_context(now_kst: datetime | None = None) -> dict:
         "tomorrow_closed": tomorrow_closed,
         "tomorrow_closed_reason": tomorrow_reason,
     }
+
+
+def _build_core3_from_daily_review(review: dict | None) -> list[str]:
+    """Build fixed 3-line summary from latest daily_review meta/guidance."""
+    if not review:
+        return []
+    lines: list[str] = []
+    date = str(review.get("created_at", ""))[:10] or "N/A"
+    lines.append(f"{date} 복기 반영")
+    try:
+        meta = json.loads(review.get("meta_json") or "{}")
+    except Exception:
+        meta = {}
+    guidance = (((meta.get("next_day_policy") or {}).get("agent_guidance")) or [])
+    if isinstance(guidance, list) and guidance:
+        for g in guidance[:2]:
+            txt = str(g or "").strip()
+            if txt:
+                lines.append(txt[:120])
+    while len(lines) < 3:
+        lines.append("복기 지침 없음")
+    return lines[:3]
+
+
+def _resolve_guardrails_from_daily_review(review: dict | None) -> dict:
+    """Infer intraday guardrails from latest daily_review guidance."""
+    policy = {
+        "source_date": "",
+        "allow_new_entry": True,
+        "qty_multiplier": 1.0,
+        "stop_loss_sensitivity": "유지",  # 완화/유지/강화
+        "reason": "default",
+        "daily_review_core3": _build_core3_from_daily_review(review),
+    }
+    if not review:
+        policy["reason"] = "no_daily_review"
+        return policy
+
+    policy["source_date"] = str(review.get("created_at", ""))[:10]
+    try:
+        meta = json.loads(review.get("meta_json") or "{}")
+    except Exception:
+        meta = {}
+    guidance = (((meta.get("next_day_policy") or {}).get("agent_guidance")) or [])
+    gtext = " ".join(str(x or "") for x in guidance).lower()
+
+    reasons: list[str] = []
+    if any(k in gtext for k in ("신규진입 금지", "신규 진입 금지", "신규매수 금지", "신규 매수 금지", "신규진입 차단", "신규 매수 차단")):
+        policy["allow_new_entry"] = False
+        reasons.append("entry_block")
+
+    m = re.search(r"(0\.\d+|1\.0)\s*배", gtext)
+    if m:
+        try:
+            q = float(m.group(1))
+            policy["qty_multiplier"] = min(1.0, max(0.1, q))
+            reasons.append(f"qty={policy['qty_multiplier']:.2f}")
+        except Exception:
+            pass
+    elif any(k in gtext for k in ("수량 축소", "비중 축소", "포지션 축소", "보수적으로")):
+        policy["qty_multiplier"] = 0.7
+        reasons.append("qty=0.70")
+
+    if any(k in gtext for k in ("손절 강화", "손절 민감도 강화", "손절 타이트", "손절 엄격")):
+        policy["stop_loss_sensitivity"] = "강화"
+        reasons.append("sl=강화")
+    elif any(k in gtext for k in ("손절 완화", "손절 민감도 완화", "손절 완충")):
+        policy["stop_loss_sensitivity"] = "완화"
+        reasons.append("sl=완화")
+
+    policy["reason"] = ", ".join(reasons) if reasons else "guidance_parsed_no_override"
+    return policy
+
+
+def _log_daily_review_event(stock_code: str, stock_name: str, status: str, reason: str, extra: dict | None = None) -> None:
+    event = {
+        "time": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "stock_code": stock_code,
+        "stock_name": stock_name,
+        "status": status,  # applied / ignored / skipped
+        "reason": reason,
+        "extra": extra or {},
+    }
+    _daily_review_execution_events.append(event)
+    try:
+        src = (_daily_review_guardrail_context or {}).get("source_date") or "N/A"
+    except Exception:
+        src = "N/A"
+    logger.info(
+        "[daily_review][event] "
+        f"source_daily_review_date={src} "
+        f"applied_or_ignored={status} "
+        f"reason={reason} "
+        f"stock={stock_name}({stock_code}) "
+        f"extra={event.get('extra', {})}"
+    )
+
+
+def _save_daily_review_execution_checklist() -> int:
+    """Persist end-of-day checklist: applied/ignored with reasons."""
+    if not _daily_review_guardrail_context:
+        logger.info("[daily_review] checklist skip: empty guardrail context")
+        return 0
+    today = _now_kst().strftime("%Y-%m-%d")
+    applied = [e for e in _daily_review_execution_events if e.get("status") == "applied"]
+    ignored = [e for e in _daily_review_execution_events if e.get("status") == "ignored"]
+    summary = f"{today} daily_review 반영 체크리스트"
+    core3 = _daily_review_guardrail_context.get("daily_review_core3") or []
+    lines = [
+        "[Checklist Summary]",
+        f"- source_date: {_daily_review_guardrail_context.get('source_date') or 'N/A'}",
+        f"- allow_new_entry: {_daily_review_guardrail_context.get('allow_new_entry')}",
+        f"- qty_multiplier: {_daily_review_guardrail_context.get('qty_multiplier')}",
+        f"- stop_loss_sensitivity: {_daily_review_guardrail_context.get('stop_loss_sensitivity')}",
+        f"- applied: {len(applied)} / ignored: {len(ignored)} / total_events: {len(_daily_review_execution_events)}",
+        "[Daily Review Core3]",
+    ]
+    for c in core3[:3]:
+        lines.append(f"- {c}")
+    lines.append("[Applied]")
+    if applied:
+        for e in applied[:30]:
+            lines.append(f"- {e['time']} {e['stock_name']}({e['stock_code']}): {e['reason']}")
+    else:
+        lines.append("- 없음")
+    lines.append("[Ignored]")
+    if ignored:
+        for e in ignored[:30]:
+            lines.append(f"- {e['time']} {e['stock_name']}({e['stock_code']}): {e['reason']}")
+    else:
+        lines.append("- 없음")
+    detail = "\n".join(lines)
+    try:
+        note_id = save_strategy_note(
+            "general",
+            summary,
+            detail,
+            meta={
+                "type": "daily_review_execution_checklist",
+                "review_source_date": _daily_review_guardrail_context.get("source_date"),
+                "guardrails": _daily_review_guardrail_context,
+                "events": _daily_review_execution_events,
+            },
+        )
+        logger.info(f"[daily_review] execution checklist saved note_id={note_id} summary='{summary}'")
+        return int(note_id or 0)
+    except Exception as e:
+        logger.warning(f"[daily_review] execution checklist save failed: {e}")
+        return 0
 
 
 def get_current_session() -> str | None:
@@ -1253,16 +1406,25 @@ def run_weekly_self_correction():
 def run_reflection_policy_cycle():
     """Reflection -> Policy update 자동 루프 실행."""
     try:
-        from worker.strategy_reflection import run_policy_update_cycle
+        from worker.strategy_reflection import run_policy_update_cycle, get_recent_policy_cycle_logs
         cfg = _WORKER_CONFIG.get("strategy_tuning", {}) if isinstance(_WORKER_CONFIG, dict) else {}
         min_samples = int(cfg.get("min_samples", 10))
         auto_apply_low_risk = bool(cfg.get("auto_apply_low_risk", True))
         out = run_policy_update_cycle(min_samples=min_samples, auto_apply_low_risk=auto_apply_low_risk)
         reflection_written = int((out.get("queued", 0) + out.get("applied", 0)) > 0)
+        recent = get_recent_policy_cycle_logs(limit=8)
+        reason_lines = []
+        for r in recent:
+            reason_lines.append(
+                f"{r.get('agent_type')}:{r.get('outcome')}:{r.get('reason_code')}"
+            )
+        reason_text = ", ".join(reason_lines[:6]) if reason_lines else "none"
         logger.info(
             f"[PolicyLoop] preflight_pass=1 missing_fields=[] "
             f"policy_version=system reflection_written={reflection_written} "
-            f"queued={out.get('queued',0)} applied={out.get('applied',0)} skipped={out.get('skipped',0)}"
+            f"queued={out.get('queued',0)} applied={out.get('applied',0)} skipped={out.get('skipped',0)} "
+            f"min_samples={min_samples} auto_apply_low_risk={auto_apply_low_risk} "
+            f"recent_reasons=[{reason_text}]"
         )
     except Exception as e:
         logger.warning(f"[PolicyLoop] 실패: {e}", exc_info=True)
@@ -1270,6 +1432,36 @@ def run_reflection_policy_cycle():
 
 
 # 뉴스 알림 쿨다운: {stock_code: 마지막_알림_시각}
+def run_daily_review_with_checklist():
+    """Persist daily_review guardrail execution checklist, then run daily review."""
+    note_id = 0
+    try:
+        note_id = _save_daily_review_execution_checklist()
+    except Exception as e:
+        logger.warning(f"[daily_review] checklist flush failed: {e}")
+    try:
+        # verification checkpoint: confirm today's checklist row is visible in DB
+        from data.db import get_strategy_notes
+        today = _now_kst().strftime("%Y-%m-%d")
+        notes = get_strategy_notes("general", limit=20) or []
+        ok = False
+        for n in notes:
+            s = str(n.get("summary", ""))
+            if today in s and "daily_review 반영 체크리스트" in s:
+                ok = True
+                break
+        logger.info(
+            f"[daily_review] checklist verification "
+            f"note_id={note_id} found_today={int(ok)} date={today}"
+        )
+    except Exception as e:
+        logger.warning(f"[daily_review] checklist verification failed: {e}")
+    try:
+        run_daily_review()
+    except Exception as e:
+        logger.warning(f"[daily_review] run failed: {e}", exc_info=True)
+
+
 def run_agent_action_log_refresh():
     """Weekly rolling refresh for agent_action_logs."""
     keep_days = max(1, int(_WORKER_CONFIG.get("agent_action_log_keep_days", 7)))
@@ -1974,11 +2166,30 @@ def _auto_execute(
     market_event_ctx = getattr(signal, "market_event_context", {}) or {}
     tomorrow_closed = bool(market_event_ctx.get("tomorrow_closed"))
     if order_type == "1" and tomorrow_closed:
+        _log_daily_review_event(
+            signal.stock_code, signal.stock_name, "applied",
+            "holiday_block_new_entry",
+            {"tomorrow": market_event_ctx.get("tomorrow")},
+        )
         logger.info(
             f"[{signal.stock_name}] 내일 휴장({market_event_ctx.get('tomorrow')}) "
             f"이벤트로 신규 매수 차단"
         )
         return
+
+    dr_guardrails = getattr(signal, "daily_review_guardrails", {}) or {}
+    if order_type == "1" and dr_guardrails:
+        if not bool(dr_guardrails.get("allow_new_entry", True)):
+            _log_daily_review_event(
+                signal.stock_code, signal.stock_name, "applied",
+                "daily_review_block_new_entry",
+                {"source_date": dr_guardrails.get("source_date")},
+            )
+            logger.info(
+                f"[{signal.stock_name}] daily_review 가드레일로 신규 매수 차단 "
+                f"(source={dr_guardrails.get('source_date')})"
+            )
+            return
 
     # 매수 직전마다 최신 예수금/실질 매수여력을 다시 산출해 stale budget 사용을 방지한다.
     if order_type == "1":
@@ -2121,6 +2332,30 @@ def _auto_execute(
                     )
         except Exception as _avoid_e:
             logger.debug(f"[{signal.stock_name}] avoid_targets soft constraint apply failed: {_avoid_e}")
+
+        try:
+            dr_mult = float(dr_guardrails.get("qty_multiplier", 1.0))
+            dr_mult = min(1.0, max(0.1, dr_mult))
+            old_qty = qty
+            qty = max(1, int(round(qty * dr_mult)))
+            if qty != old_qty:
+                _log_daily_review_event(
+                    signal.stock_code, signal.stock_name, "applied",
+                    "daily_review_qty_multiplier",
+                    {"from": old_qty, "to": qty, "multiplier": dr_mult},
+                )
+                logger.info(
+                    f"[{signal.stock_name}] daily_review 수량계수 적용: "
+                    f"{old_qty}주 -> {qty}주 (x{dr_mult:.2f})"
+                )
+            else:
+                _log_daily_review_event(
+                    signal.stock_code, signal.stock_name, "ignored",
+                    "daily_review_qty_multiplier_no_change",
+                    {"qty": qty, "multiplier": dr_mult},
+                )
+        except Exception as _dr_mult_e:
+            logger.debug(f"[{signal.stock_name}] daily_review qty multiplier apply failed: {_dr_mult_e}")
 
     # 하드캡: 매수 — 실질 매수 여력 초과 방지
     if order_type == "1" and signal.current_price > 0:
@@ -2559,6 +2794,24 @@ def run_check():
         logger.info(f"정규장 외 시간({session}) - run_check 스킵")
         return
 
+    global _daily_review_guardrail_context, _daily_review_event_date
+    today = _now_kst().strftime("%Y-%m-%d")
+    if _daily_review_event_date != today:
+        _daily_review_execution_events.clear()
+        _daily_review_event_date = today
+    try:
+        latest_review = (get_recent_daily_reviews(limit=1, exclude_today=True) or [None])[0]
+    except Exception:
+        latest_review = None
+    _daily_review_guardrail_context = _resolve_guardrails_from_daily_review(latest_review)
+    logger.info(
+        "[daily_review] intraday guardrails loaded "
+        f"(source={_daily_review_guardrail_context.get('source_date') or 'N/A'}, "
+        f"entry={_daily_review_guardrail_context.get('allow_new_entry')}, "
+        f"qty={_daily_review_guardrail_context.get('qty_multiplier')}, "
+        f"sl={_daily_review_guardrail_context.get('stop_loss_sensitivity')})"
+    )
+
     # DB에서 최신 종목/조건 로드 (MCP로 변경 시 즉시 반영)
     stocks = [s for s in get_watchlist() if s.get("enabled", False)]
     conditions = load_conditions()
@@ -2633,6 +2886,8 @@ def run_check():
         signal = check_stock(kiwoom, stock, conditions, holdings)
         if signal:
             setattr(signal, "market_event_context", market_event_ctx)
+            setattr(signal, "daily_review_core3", _daily_review_guardrail_context.get("daily_review_core3", []))
+            setattr(signal, "daily_review_guardrails", _daily_review_guardrail_context)
             new_ids, new_conditions = filter_new_conditions(
                 signal.stock_code, signal.triggered_ids, signal.triggered_conditions, conditions
             )
@@ -2652,6 +2907,25 @@ def run_check():
 
             signal.triggered_conditions = new_conditions
             signal.triggered_ids = new_ids
+            setattr(
+                signal,
+                "stop_loss_sensitivity",
+                str((_daily_review_guardrail_context or {}).get("stop_loss_sensitivity", "유지")),
+            )
+            if bool(getattr(signal, "in_portfolio", False)):
+                _sl_mode = str(getattr(signal, "stop_loss_sensitivity", "유지"))
+                if _sl_mode != "유지":
+                    _log_daily_review_event(
+                        signal.stock_code, signal.stock_name, "applied",
+                        "daily_review_stop_loss_sensitivity",
+                        {"mode": _sl_mode, "signal_type": getattr(signal, "signal_type", "")},
+                    )
+                else:
+                    _log_daily_review_event(
+                        signal.stock_code, signal.stock_name, "ignored",
+                        "daily_review_stop_loss_sensitivity_default",
+                        {"mode": _sl_mode, "signal_type": getattr(signal, "signal_type", "")},
+                    )
             logger.info(f"[{signal.stock_name}] 신호 감지: {new_conditions}")
 
             claude_opinion = None
@@ -2930,7 +3204,7 @@ def main():
     scheduler.add_job(run_daily_screening, "cron",
                       day_of_week="mon-fri", hour=15, minute=40,
                       id="daily_screening")
-    scheduler.add_job(run_daily_review, "cron",
+    scheduler.add_job(run_daily_review_with_checklist, "cron",
                       day_of_week="mon-fri", hour=16, minute=10,
                       id="daily_review")
     scheduler.add_job(run_weekly_performance_report, "cron",

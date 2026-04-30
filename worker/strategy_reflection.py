@@ -17,6 +17,48 @@ from data.db import (
 logger = logging.getLogger(__name__)
 
 
+def _log_policy_cycle(
+    agent_type: str,
+    outcome: str,
+    reason_code: str,
+    reason_detail: str = "",
+    sample_count: int = 0,
+    avg_quality: float | None = None,
+    current_risk_mode: str = "",
+    target_risk_mode: str = "",
+    queue_update_id: int | None = None,
+    applied_version: str = "",
+) -> None:
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO strategy_policy_cycle_logs
+                    (created_at, agent_type, outcome, reason_code, reason_detail,
+                     sample_count, avg_quality, current_risk_mode, target_risk_mode,
+                     queue_update_id, applied_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    agent_type,
+                    outcome,
+                    reason_code or "",
+                    reason_detail or "",
+                    int(sample_count or 0),
+                    (None if avg_quality is None else float(avg_quality)),
+                    current_risk_mode or "",
+                    target_risk_mode or "",
+                    (None if queue_update_id is None else int(queue_update_id)),
+                    applied_version or "",
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.debug(f"[PolicyLoop] cycle log insert failed: {e}")
+
+
 def _next_policy_version(agent_type: str) -> str:
     ts = _now_kst().strftime("%Y%m%d%H%M%S")
     return f"{agent_type}-v{ts}"
@@ -280,6 +322,14 @@ def run_policy_update_cycle(min_samples: int = 10, auto_apply_low_risk: bool = T
         cnt, avg_q = _aggregate_quality(agent_type, days=7)
         if cnt < max(1, int(min_samples)):
             out["skipped"] += 1
+            _log_policy_cycle(
+                agent_type=agent_type,
+                outcome="skipped",
+                reason_code="insufficient_samples",
+                reason_detail=f"samples={cnt} < min_samples={max(1, int(min_samples))}",
+                sample_count=cnt,
+                avg_quality=avg_q,
+            )
             continue
 
         target_mode = "balanced"
@@ -292,6 +342,16 @@ def run_policy_update_cycle(min_samples: int = 10, auto_apply_low_risk: bool = T
         cur_mode = str((snap.get("policy") or {}).get("risk_mode", "balanced"))
         if cur_mode == target_mode:
             out["skipped"] += 1
+            _log_policy_cycle(
+                agent_type=agent_type,
+                outcome="skipped",
+                reason_code="already_target_mode",
+                reason_detail=f"current={cur_mode}, target={target_mode}",
+                sample_count=cnt,
+                avg_quality=avg_q,
+                current_risk_mode=cur_mode,
+                target_risk_mode=target_mode,
+            )
             continue
 
         suggestion = {
@@ -300,19 +360,63 @@ def run_policy_update_cycle(min_samples: int = 10, auto_apply_low_risk: bool = T
         }
         qid = enqueue_policy_update(agent_type, suggestion=suggestion, low_risk=True)
         out["queued"] += 1
+        _log_policy_cycle(
+            agent_type=agent_type,
+            outcome="queued",
+            reason_code="mode_change_suggested",
+            reason_detail=suggestion["reason"],
+            sample_count=cnt,
+            avg_quality=avg_q,
+            current_risk_mode=cur_mode,
+            target_risk_mode=target_mode,
+            queue_update_id=qid,
+        )
 
         if auto_apply_low_risk:
             if _has_conflicting_pending_updates(agent_type):
-                mark_policy_update(qid, "rejected", note="conflicting_pending_high_risk_update")
+                reason = "conflicting_pending_high_risk_update"
+                mark_policy_update(qid, "rejected", note=reason)
                 out["skipped"] += 1
+                _log_policy_cycle(
+                    agent_type=agent_type,
+                    outcome="rejected",
+                    reason_code=reason,
+                    sample_count=cnt,
+                    avg_quality=avg_q,
+                    current_risk_mode=cur_mode,
+                    target_risk_mode=target_mode,
+                    queue_update_id=qid,
+                )
                 continue
             if _hours_since_policy_update(agent_type) < 24:
-                mark_policy_update(qid, "rejected", note="update_cooldown_under_24h")
+                reason = "update_cooldown_under_24h"
+                mark_policy_update(qid, "rejected", note=reason)
                 out["skipped"] += 1
+                _log_policy_cycle(
+                    agent_type=agent_type,
+                    outcome="rejected",
+                    reason_code=reason,
+                    sample_count=cnt,
+                    avg_quality=avg_q,
+                    current_risk_mode=cur_mode,
+                    target_risk_mode=target_mode,
+                    queue_update_id=qid,
+                )
                 continue
             if not _is_adjacent_risk_mode(cur_mode, target_mode):
-                mark_policy_update(qid, "rejected", note="risk_mode_jump_blocked")
+                reason = "risk_mode_jump_blocked"
+                mark_policy_update(qid, "rejected", note=reason)
                 out["skipped"] += 1
+                _log_policy_cycle(
+                    agent_type=agent_type,
+                    outcome="rejected",
+                    reason_code=reason,
+                    sample_count=cnt,
+                    avg_quality=avg_q,
+                    current_risk_mode=cur_mode,
+                    target_risk_mode=target_mode,
+                    queue_update_id=qid,
+                )
                 continue
 
             new_policy = dict(snap.get("policy") or {})
@@ -320,6 +424,18 @@ def run_policy_update_cycle(min_samples: int = 10, auto_apply_low_risk: bool = T
             updated = upsert_policy_snapshot(agent_type, new_policy, reason=suggestion["reason"])
             mark_policy_update(qid, "applied", applied_version=updated["policy_version"], note="auto_apply_low_risk")
             out["applied"] += 1
+            _log_policy_cycle(
+                agent_type=agent_type,
+                outcome="applied",
+                reason_code="auto_apply_low_risk",
+                reason_detail=suggestion["reason"],
+                sample_count=cnt,
+                avg_quality=avg_q,
+                current_risk_mode=cur_mode,
+                target_risk_mode=target_mode,
+                queue_update_id=qid,
+                applied_version=updated["policy_version"],
+            )
             try:
                 save_strategy_note(
                     "general",
@@ -331,3 +447,20 @@ def run_policy_update_cycle(min_samples: int = 10, auto_apply_low_risk: bool = T
 
     logger.info(f"[PolicyLoop] queued={out['queued']} applied={out['applied']} skipped={out['skipped']}")
     return out
+
+
+def get_recent_policy_cycle_logs(limit: int = 10) -> list[dict]:
+    n = max(1, int(limit))
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT created_at, agent_type, outcome, reason_code, reason_detail,
+                   sample_count, avg_quality, current_risk_mode, target_risk_mode,
+                   queue_update_id, applied_version
+            FROM strategy_policy_cycle_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (n,),
+        ).fetchall()
+    return [dict(r) for r in rows]
