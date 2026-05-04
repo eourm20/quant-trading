@@ -87,6 +87,56 @@ def _link_strategy_note(
         )
 
 
+def _build_strategy_note_meta(
+    category: str,
+    summary: str,
+    detail: str = "",
+    meta: dict | None = None,
+    source: str = "save_strategy_note",
+    migrated: bool = False,
+) -> dict:
+    base = {
+        "schema_version": 1,
+        "source": source,
+        "category": str(category or ""),
+        "summary": str(summary or ""),
+        "has_detail": bool(str(detail or "").strip()),
+        "detail_length": len(str(detail or "")),
+        "migrated": bool(migrated),
+    }
+    if isinstance(meta, dict):
+        merged = dict(base)
+        merged.update(meta)
+        return merged
+    return base
+
+
+def _backfill_strategy_notes_meta(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        """
+        SELECT id, category, summary, detail
+        FROM strategy_notes
+        WHERE meta_json IS NULL OR TRIM(meta_json) = ''
+        """
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        payload = _build_strategy_note_meta(
+            category=row["category"],
+            summary=row["summary"],
+            detail=row["detail"] or "",
+            meta={"legacy_backfill": True},
+            source="init_db:backfill_strategy_notes_meta",
+            migrated=True,
+        )
+        conn.execute(
+            "UPDATE strategy_notes SET meta_json = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), int(row["id"])),
+        )
+        updated += 1
+    return updated
+
+
 def _backfill_strategy_note_links(conn: sqlite3.Connection) -> None:
     """Ensure current strategy_note_id state has at least one active link row."""
     now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
@@ -208,9 +258,25 @@ def _repair_legacy_watchlist_conditions(conn: sqlite3.Connection, stock_code: st
             ts = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
             extra = f"{marker} {ts} legacy watchlist row had no monitoring conditions."
             new_note = f"{old_note}\n{extra}".strip() if old_note else extra
+        _summary = f"{stock_name} 재평가 필요"
         cur = conn.execute(
             "INSERT INTO strategy_notes (created_at, category, summary, detail, meta_json) VALUES (?, ?, ?, ?, ?)",
-            (_now_kst().strftime("%Y-%m-%d %H:%M:%S"), "watchlist", f"{stock_name} 재평가 필요", new_note, None),
+            (
+                _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                "watchlist",
+                _summary,
+                new_note,
+                json.dumps(
+                    _build_strategy_note_meta(
+                        category="watchlist",
+                        summary=_summary,
+                        detail=new_note,
+                        meta={"event_type": "legacy_watchlist_condition_repair", "stock_code": row["code"]},
+                        source="_repair_legacy_watchlist_conditions",
+                    ),
+                    ensure_ascii=False,
+                ),
+            ),
         )
         note_id = int(cur.lastrowid or 0)
         conn.execute(
@@ -533,6 +599,7 @@ def init_db():
         note_cols = [r["name"] for r in conn.execute("PRAGMA table_info(strategy_notes)").fetchall()]
         if "meta_json" not in note_cols:
             conn.execute("ALTER TABLE strategy_notes ADD COLUMN meta_json TEXT DEFAULT NULL")
+        _backfill_strategy_notes_meta(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS improvement_issues (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -969,9 +1036,26 @@ def update_stock_field(code: str, field: str, value) -> bool:
         if field == "strategy_note":
             row = conn.execute("SELECT name FROM watchlist WHERE code = ?", (code,)).fetchone()
             stock_name = row["name"] if row and row["name"] else code
+            _detail = str(value or "")
+            _summary = f"{stock_name} ???? ?? ??"
             note_cur = conn.execute(
                 "INSERT INTO strategy_notes (created_at, category, summary, detail, meta_json) VALUES (?, ?, ?, ?, ?)",
-                (now, "watchlist", f"{stock_name} ???? ?? ??", str(value or ""), None),
+                (
+                    now,
+                    "watchlist",
+                    _summary,
+                    _detail,
+                    json.dumps(
+                        _build_strategy_note_meta(
+                            category="watchlist",
+                            summary=_summary,
+                            detail=_detail,
+                            meta={"event_type": "update_stock_field_strategy_note", "stock_code": code},
+                            source="update_stock_field",
+                        ),
+                        ensure_ascii=False,
+                    ),
+                ),
             )
             note_id = int(note_cur.lastrowid or 0)
             if note_id:
@@ -1623,7 +1707,16 @@ def save_strategy_note(
                 category,
                 summary,
                 detail,
-                json.dumps(meta, ensure_ascii=False) if meta is not None else None,
+                json.dumps(
+                    _build_strategy_note_meta(
+                        category=category,
+                        summary=summary,
+                        detail=detail,
+                        meta=meta,
+                        source="save_strategy_note",
+                    ),
+                    ensure_ascii=False,
+                ),
             ),
         )
         conn.commit()
