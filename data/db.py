@@ -111,24 +111,105 @@ def _build_strategy_note_meta(
     return base
 
 
+def _infer_strategy_note_stock(conn: sqlite3.Connection, summary: str) -> tuple[str | None, str | None]:
+    text = str(summary or "").strip()
+    if not text:
+        return None, None
+    try:
+        rows = conn.execute(
+            "SELECT code, name FROM watchlist WHERE ? LIKE '%' || name || '%' ORDER BY LENGTH(name) DESC",
+            (text,),
+        ).fetchall()
+        if rows:
+            return str(rows[0]["code"]), str(rows[0]["name"])
+    except Exception:
+        pass
+    return None, None
+
+
+def _normalize_strategy_note_meta(
+    conn: sqlite3.Connection,
+    note_id: int,
+    category: str,
+    summary: str,
+    detail: str,
+    meta_json_text: str | None,
+) -> dict:
+    try:
+        existing = json.loads(meta_json_text) if meta_json_text else {}
+    except Exception:
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+
+    stock_code = existing.get("stock_code")
+    stock_name = existing.get("stock_name")
+    inf_code, inf_name = _infer_strategy_note_stock(conn, summary)
+    if not stock_code and inf_code:
+        stock_code = inf_code
+    if not stock_name and inf_name:
+        stock_name = inf_name
+
+    if category == "trade":
+        note_type = "trade_note"
+    elif category == "watchlist":
+        note_type = "watchlist_note"
+    elif category == "daily_review":
+        note_type = "daily_review_note"
+    else:
+        note_type = "general_note"
+
+    event_type = existing.get("event_type")
+    if not event_type:
+        if "전환조건" in str(summary):
+            event_type = "hold_transition_condition"
+        elif "재평가" in str(summary):
+            event_type = "reassessment"
+        else:
+            event_type = "strategy_note"
+
+    base = _build_strategy_note_meta(
+        category=category,
+        summary=summary,
+        detail=detail or "",
+        meta=existing,
+        source=str(existing.get("source") or "save_strategy_note"),
+        migrated=True,
+    )
+    base.update(
+        {
+            "note_id": int(note_id),
+            "note_type": note_type,
+            "event_type": str(event_type),
+            "created_by": str(base.get("source") or "save_strategy_note"),
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "signal_id": existing.get("signal_id"),
+        }
+    )
+    return base
+
+
 def _backfill_strategy_notes_meta(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         """
-        SELECT id, category, summary, detail
+        SELECT id, category, summary, detail, meta_json
         FROM strategy_notes
-        WHERE meta_json IS NULL OR TRIM(meta_json) = ''
         """
     ).fetchall()
     updated = 0
     for row in rows:
-        payload = _build_strategy_note_meta(
+        payload = _normalize_strategy_note_meta(
+            conn=conn,
+            note_id=int(row["id"]),
             category=row["category"],
             summary=row["summary"],
             detail=row["detail"] or "",
-            meta={"legacy_backfill": True},
-            source="init_db:backfill_strategy_notes_meta",
-            migrated=True,
+            meta_json_text=row["meta_json"],
         )
+        payload["legacy_backfill"] = True
+        payload["source"] = str(payload.get("source") or "init_db:backfill_strategy_notes_meta")
+        payload["created_by"] = str(payload.get("created_by") or payload["source"])
         conn.execute(
             "UPDATE strategy_notes SET meta_json = ? WHERE id = ?",
             (json.dumps(payload, ensure_ascii=False), int(row["id"])),
@@ -1700,27 +1781,39 @@ def save_strategy_note(
         note_cols = [r["name"] for r in conn.execute("PRAGMA table_info(strategy_notes)").fetchall()]
         if "meta_json" not in note_cols:
             conn.execute("ALTER TABLE strategy_notes ADD COLUMN meta_json TEXT DEFAULT NULL")
+        _ts = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+        _raw_meta = _build_strategy_note_meta(
+            category=category,
+            summary=summary,
+            detail=detail,
+            meta=meta,
+            source="save_strategy_note",
+        )
         cur = conn.execute(
             "INSERT INTO strategy_notes (created_at, category, summary, detail, meta_json) VALUES (?, ?, ?, ?, ?)",
             (
-                _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+                _ts,
                 category,
                 summary,
                 detail,
-                json.dumps(
-                    _build_strategy_note_meta(
-                        category=category,
-                        summary=summary,
-                        detail=detail,
-                        meta=meta,
-                        source="save_strategy_note",
-                    ),
-                    ensure_ascii=False,
-                ),
+                json.dumps(_raw_meta, ensure_ascii=False),
             ),
         )
+        note_id = int(cur.lastrowid)
+        _norm = _normalize_strategy_note_meta(
+            conn=conn,
+            note_id=note_id,
+            category=category,
+            summary=summary,
+            detail=detail or "",
+            meta_json_text=json.dumps(_raw_meta, ensure_ascii=False),
+        )
+        conn.execute(
+            "UPDATE strategy_notes SET meta_json = ? WHERE id = ?",
+            (json.dumps(_norm, ensure_ascii=False), note_id),
+        )
         conn.commit()
-        return int(cur.lastrowid)
+        return note_id
 
 
 def get_strategy_notes(limit: int = 20) -> list[dict]:
