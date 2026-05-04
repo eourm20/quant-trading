@@ -1161,7 +1161,7 @@ def _check_semiforce_transition(signal, claude_opinion: str | None) -> dict | No
     # AUTO_TRADE에서는 명시적으로 켜지지 않으면 준강제 자동 전환 비활성(안전 기본값).
     semi_force_cfg = bool(_WORKER_CONFIG.get("semi_force_transition_auto_trade", False))
     if AUTO_TRADE and not semi_force_cfg:
-        logger.info(f"[{signal.stock_name}] 준강제 전환 스킵: AUTO_TRADE 안전 기본값(off)")
+        logger.info(f"[{signal.stock_name}] 준강제 전환 스킵")
         return None
 
     cond_low = condition_text.lower()
