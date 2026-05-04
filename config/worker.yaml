@@ -20,16 +20,17 @@ worker:
   ai_cache_minutes: 180
   buy_reentry_block_minutes: 60
   news_ai_max_calls_per_run: 1
-  agent_max_steps: 7
-  agent_max_tokens: 550
-  agent_target_unique_tools: 5
-  agent_rate_limit_retries: 3
-  agent_rate_limit_wait_seconds: 2
+  # 429/TPM 완화: 판단 Agent 토큰/스텝/재시도 텀 보수화
+  agent_max_steps: 4
+  agent_max_tokens: 320
+  agent_target_unique_tools: 3
+  agent_rate_limit_retries: 2
+  agent_rate_limit_wait_seconds: 4
   research_agent_max_steps: 30
-  research_agent_max_tokens: 900
+  research_agent_max_tokens: 700
   research_agent_target_unique_tools: 3
-  research_agent_rate_limit_retries: 3
-  research_agent_rate_limit_wait_seconds: 2
+  research_agent_rate_limit_retries: 2
+  research_agent_rate_limit_wait_seconds: 4
   research_max_candidates: 4
   news_monitor_times: "8:55,12:00"
   rag_realtime_index: false
