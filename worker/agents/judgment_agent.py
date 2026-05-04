@@ -7,11 +7,13 @@ Judgment Agent — 신호 수신 시 AI가 도구를 스스로 호출하여 매�
 from __future__ import annotations
 import logging
 import json
+import re
 
 from worker.agents.base_agent import BaseAgent
 from worker.agents.tools.registry import load_judgment_tools
 from worker.strategy_reflection import get_policy_snapshot, reflect_judgment, enqueue_policy_update
 from worker.adaptive_policy import get_judgment_adaptive_policy
+from data.db import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +262,88 @@ class JudgmentAgent:
             text = json.dumps(v, ensure_ascii=False, default=str)
             return text[:limit] + ("..." if len(text) > limit else "")
 
+        def _extract_last_hold_transition_condition(stock_code: str) -> str:
+            if not stock_code:
+                return ""
+            try:
+                with get_conn() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT claude_opinion
+                        FROM signals
+                        WHERE stock_code = ?
+                          AND claude_opinion IS NOT NULL
+                          AND claude_opinion LIKE '%[홀드]%'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (stock_code,),
+                    ).fetchone()
+                if not row:
+                    return ""
+                opinion = str(row["claude_opinion"] or "")
+                for line in opinion.splitlines():
+                    txt = line.strip()
+                    if txt.startswith("[전환조건]"):
+                        return txt[len("[전환조건]"):].strip()
+            except Exception:
+                return ""
+            return ""
+
+        def _evaluate_transition_with_available_metrics(condition_text: str) -> tuple[str, list[str], list[str]]:
+            if not condition_text:
+                return "none", [], []
+            hits: list[str] = []
+            misses: list[str] = []
+            unknown: list[str] = []
+
+            try:
+                cur_rsi = float(signal.rsi) if signal.rsi is not None else None
+            except Exception:
+                cur_rsi = None
+            try:
+                cur_vol = float(signal.volume_ratio) if signal.volume_ratio is not None else None
+            except Exception:
+                cur_vol = None
+
+            matched_any = False
+            for m in re.finditer(r"RSI\s*(\d+(?:\.\d+)?)\s*(이상|이하)", condition_text):
+                matched_any = True
+                v = float(m.group(1))
+                op = m.group(2)
+                if cur_rsi is None:
+                    unknown.append(f"RSI {v:g}{op} (현재 RSI 없음)")
+                elif op == "이상" and cur_rsi >= v:
+                    hits.append(f"RSI {cur_rsi:.2f} >= {v:g}")
+                elif op == "이하" and cur_rsi <= v:
+                    hits.append(f"RSI {cur_rsi:.2f} <= {v:g}")
+                else:
+                    misses.append(f"RSI {cur_rsi:.2f}, 조건 {v:g}{op}")
+
+            for m in re.finditer(r"거래량(?:\s*배율)?\s*(\d+(?:\.\d+)?)\s*배\s*이상", condition_text):
+                matched_any = True
+                v = float(m.group(1))
+                if cur_vol is None:
+                    unknown.append(f"거래량 {v:g}배 이상 (현재 거래량 배율 없음)")
+                elif cur_vol >= v:
+                    hits.append(f"거래량 {cur_vol:.2f}배 >= {v:g}배")
+                else:
+                    misses.append(f"거래량 {cur_vol:.2f}배, 조건 {v:g}배 이상")
+
+            if not matched_any:
+                unknown.append("정형 평가 가능한 RSI/거래량 규칙 미검출")
+
+            if hits and not misses:
+                status = "met_or_partially_met"
+            elif misses:
+                status = "not_met"
+            else:
+                status = "unknown"
+            return status, hits, (misses + unknown)
+
+        prev_transition = _extract_last_hold_transition_condition(getattr(signal, "stock_code", "") or "")
+        transition_status, transition_hits, transition_gaps = _evaluate_transition_with_available_metrics(prev_transition)
+
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})
 - 신호 유형: {signal_type_label}
@@ -281,6 +365,12 @@ class JudgmentAgent:
 - recent_review_note: {_brief(pre_ctx.get('recent_review_note', {}))}
 - policy_snapshot: {_brief(pre_ctx.get('policy_snapshot', {}))}
 - adaptive_policy: {_brief(pre_ctx.get('adaptive_policy', {}))}
+
+## 이전 홀드 전환조건 컨텍스트
+- previous_hold_transition_condition: {prev_transition or '없음'}
+- transition_check_status: {transition_status}
+- satisfied_signals: {', '.join(transition_hits) if transition_hits else '없음'}
+- unsatisfied_or_unverified: {', '.join(transition_gaps) if transition_gaps else '없음'}
 
 상황을 파악하고 필요한 도구를 직접 선택하여 매매 판단을 내려주세요.
 Fallback chain if primary tool fails: search_agent_memory_context -> search_similar_signals -> get_trade_performance -> search_text_context."""
