@@ -65,6 +65,10 @@ class JudgmentAgent:
         max_steps: int = 7,
         max_tokens: int = 700,
         target_unique_tools: int = 0,
+        context_char_limit: int = 200,
+        history_limit: int = 5,
+        news_limit: int = 5,
+        macro_limit: int = 6,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -80,6 +84,10 @@ class JudgmentAgent:
             max_tokens=max_tokens,
         )
         self._target_unique_tools = max(0, int(target_unique_tools or 0))
+        self._context_char_limit = max(80, int(context_char_limit or 200))
+        self._history_limit = max(1, int(history_limit or 5))
+        self._news_limit = max(1, int(news_limit or 5))
+        self._macro_limit = max(1, int(macro_limit or 6))
         self._preflight_used_tools: list[str] = []
         self._preflight_missing_fields: list[str] = []
         self._policy_version: str = "judgment-v0"
@@ -120,7 +128,7 @@ class JudgmentAgent:
             "get_signal_history",
             stock_code=signal.stock_code,
             signal_type=signal.signal_type or "",
-            limit=5,
+            limit=self._history_limit,
         )
         ctx["performance_review"] = _call(
             "get_trade_performance",
@@ -151,9 +159,9 @@ class JudgmentAgent:
                 "optional_missing": True,
                 "reason": f"daily_review_fetch_error:{e}",
             }
-        ctx["market_brief"] = _call("market_news_brief", max_items=5)
-        ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=5)
-        ctx["macro_brief"] = _call("rss_macro_brief", max_total=6)
+        ctx["market_brief"] = _call("market_news_brief", max_items=self._news_limit)
+        ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=self._news_limit)
+        ctx["macro_brief"] = _call("rss_macro_brief", max_total=self._macro_limit)
         policy_snapshot = get_policy_snapshot("judgment")
         self._policy_version = str(policy_snapshot.get("policy_version") or "judgment-v0")
         ctx["policy_snapshot"] = policy_snapshot
@@ -246,7 +254,9 @@ class JudgmentAgent:
 
         self._agent.configure_run(target_unique_tools=self._target_unique_tools)
 
-        def _brief(v, limit=200):
+        def _brief(v, limit=None):
+            if limit is None:
+                limit = self._context_char_limit
             text = json.dumps(v, ensure_ascii=False, default=str)
             return text[:limit] + ("..." if len(text) > limit else "")
 

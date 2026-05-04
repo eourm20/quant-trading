@@ -14,6 +14,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 # Agent 모드 실행 시 마지막 trace 저장 (main.py에서 DB 기록에 활용)
 _last_agent_trace: dict = {}
+_agent_rate_limit_cooldown_until: float = 0.0
 
 
 def get_last_agent_trace() -> dict:
@@ -944,16 +945,52 @@ def get_trade_opinion(
         try:
             from worker.agents.judgment_agent import JudgmentAgent
             _wcfg = (_cfg.get("worker") or {})
-            _agent_model = str(_wcfg.get("judgment_agent_model") or os.getenv("OPENAI_MODEL", "gpt-4.1")).strip()
+            _cooldown_seconds = max(10, int(_wcfg.get("agent_rate_limit_cooldown_seconds", 120)))
+            _is_high_priority = _is_high_priority_signal(signal)
+            _primary_model = str(_wcfg.get("judgment_agent_model") or os.getenv("OPENAI_MODEL", "gpt-4.1")).strip()
+            _light_model = str(
+                _wcfg.get("judgment_agent_light_model")
+                or _wcfg.get("research_agent_model")
+                or os.getenv("OPENAI_MODEL_MINI", "")
+            ).strip()
+            _agent_model = _primary_model if (_is_high_priority or not _light_model) else _light_model
+            _context_char_limit = int(
+                _wcfg.get(
+                    "agent_context_char_limit",
+                    _wcfg.get("agent_context_char_limit_high", 200)
+                    if _is_high_priority
+                    else _wcfg.get("agent_context_char_limit_low", 120),
+                )
+            )
+            _history_limit = int(_wcfg.get("agent_signal_history_limit", 5 if _is_high_priority else 3))
+            _news_limit = int(_wcfg.get("agent_news_items_limit", 5 if _is_high_priority else 3))
+            _macro_limit = int(_wcfg.get("agent_macro_items_limit", 6 if _is_high_priority else 4))
+            global _agent_rate_limit_cooldown_until
+            _now = time.time()
+            if _in_agent_rate_limit_cooldown(_now):
+                _remain = int(max(1, _agent_rate_limit_cooldown_until - _now))
+                logger.warning(
+                    f"[Agent모드] 429 쿨다운 유지 중({_remain}s 남음) — 레거시 폴백"
+                )
+                raise RuntimeError("agent_rate_limit_cooldown_active")
             _agent_api_key = str(_wcfg.get("judgment_agent_api_key") or os.getenv("OPENAI_API_KEY", "")).strip()
             _agent_base_url = str(_wcfg.get("judgment_agent_base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
             _agent = JudgmentAgent(
                 max_steps=int(_wcfg.get("agent_max_steps", 7)),
                 max_tokens=int(_wcfg.get("agent_max_tokens", 700)),
                 target_unique_tools=int(_wcfg.get("agent_target_unique_tools", 0)),
+                context_char_limit=_context_char_limit,
+                history_limit=_history_limit,
+                news_limit=_news_limit,
+                macro_limit=_macro_limit,
                 model=_agent_model,
                 api_key=_agent_api_key,
                 base_url=(_agent_base_url or None),
+            )
+            logger.info(
+                f"[Agent모드] profile={'high' if _is_high_priority else 'low'} "
+                f"model={_agent_model} context={_context_char_limit} "
+                f"history={_history_limit} news={_news_limit} macro={_macro_limit}"
             )
             _retry_count = max(0, int(_wcfg.get("agent_rate_limit_retries", 2)))
             _retry_wait = max(1, int(_wcfg.get("agent_rate_limit_wait_seconds", 12)))
@@ -975,6 +1012,11 @@ def get_trade_opinion(
                         )
                         time.sleep(_retry_wait)
                         continue
+                    if _is_rl:
+                        _agent_rate_limit_cooldown_until = time.time() + _cooldown_seconds
+                        logger.warning(
+                            f"[Agent모드] 429 누적 — {_cooldown_seconds}s 쿨다운 진입 후 레거시 폴백"
+                        )
                     raise
             # 마지막 agent trace를 모듈 변수에 저장 (main.py에서 DB 저장에 활용)
             global _last_agent_trace
@@ -1372,6 +1414,34 @@ def _legacy_get_trade_opinion(
     _market_event_text = (
         f"- 내일 거래일 상태: {'휴장' if _tomorrow_closed else '개장'} "
         f"({_tomorrow}, reason={_tomorrow_reason})"
+    )
+
+
+def _in_agent_rate_limit_cooldown(now_ts: float | None = None) -> bool:
+    now = now_ts if now_ts is not None else time.time()
+    return now < _agent_rate_limit_cooldown_until
+
+
+def _is_high_priority_signal(signal) -> bool:
+    """High-priority signals keep premium model/context."""
+    st = str(getattr(signal, "signal_type", "") or "").strip().lower()
+    horizon = str(getattr(signal, "horizon", "") or "").strip()
+    in_portfolio = bool(getattr(signal, "in_portfolio", False))
+    add_mode = str(getattr(signal, "add_signal_mode", "") or "").strip().lower()
+    trigger_cnt = len(getattr(signal, "triggered_conditions", []) or [])
+    rsi = getattr(signal, "rsi", None)
+    try:
+        rsi_v = float(rsi) if rsi is not None else None
+    except Exception:
+        rsi_v = None
+    is_extreme_rsi = bool(rsi_v is not None and (rsi_v <= 35.0 or rsi_v >= 65.0))
+    return (
+        st == "exit"
+        or (st == "add" and add_mode == "momentum_add")
+        or (in_portfolio and st in {"add", "both"})
+        or trigger_cnt >= 2
+        or horizon == "단기"
+        or is_extreme_rsi
     )
     _dr_core3 = getattr(signal, "daily_review_core3", []) or []
     _dr_core3_lines = [str(x or "").strip() for x in _dr_core3 if str(x or "").strip()][:3]
