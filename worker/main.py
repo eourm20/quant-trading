@@ -10,6 +10,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import signal
 import sys
 import threading
@@ -182,6 +183,18 @@ def _get_market_event_context(now_kst: datetime | None = None) -> dict:
         "tomorrow_closed": tomorrow_closed,
         "tomorrow_closed_reason": tomorrow_reason,
     }
+
+
+def _run_on_open_day(job_name: str, fn, *args, **kwargs):
+    """Run scheduled job only when today is an open KRX day."""
+    ctx = _get_market_event_context()
+    if ctx.get("today_closed"):
+        logger.info(
+            f"[market-event] today={ctx.get('today')} closed "
+            f"(reason={ctx.get('today_closed_reason')}) - {job_name} skip"
+        )
+        return None
+    return fn(*args, **kwargs)
 
 
 def _build_core3_from_daily_review(review: dict | None) -> list[str]:
@@ -3161,67 +3174,67 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
     # 평일 08:00~18:59 사이에만 실행
-    scheduler.add_job(run_check, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_check", run_check), "cron",
                       day_of_week="mon-fri", hour="8-18", minute=f"*/{interval_min}",
                       id="monitor")
-    scheduler.add_job(reset_all_cooldowns, "cron", hour=9, minute=0, id="reset_cooldowns")
-    scheduler.add_job(auto_sync, "cron", hour=8, minute=30, id="sync_premarket")
-    scheduler.add_job(auto_sync, "cron", hour=9, minute=1, id="sync_open")
-    scheduler.add_job(auto_sync, "cron", hour=18, minute=5, id="sync_close")
+    scheduler.add_job(lambda: _run_on_open_day("reset_all_cooldowns", reset_all_cooldowns), "cron", hour=9, minute=0, id="reset_cooldowns")
+    scheduler.add_job(lambda: _run_on_open_day("sync_premarket", auto_sync), "cron", hour=8, minute=30, id="sync_premarket")
+    scheduler.add_job(lambda: _run_on_open_day("sync_open", auto_sync), "cron", hour=9, minute=1, id="sync_open")
+    scheduler.add_job(lambda: _run_on_open_day("sync_close", auto_sync), "cron", hour=18, minute=5, id="sync_close")
     pre_hh, pre_mm = _parse_hhmm(_WORKER_CONFIG.get("premarket_report_time", "08:50"), 8, 50)
     open_hh, open_mm = _parse_hhmm(_WORKER_CONFIG.get("opening_report_time", "09:05"), 9, 5)
-    scheduler.add_job(run_premarket_report, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_premarket_report", run_premarket_report), "cron",
                       day_of_week="mon-fri", hour=pre_hh, minute=pre_mm,
                       id="premarket_report")
-    scheduler.add_job(run_opening_report, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_opening_report", run_opening_report), "cron",
                       day_of_week="mon-fri", hour=open_hh, minute=open_mm,
                       id="opening_report")
-    scheduler.add_job(auto_sync, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("sync_realtime", auto_sync), "cron",
                       day_of_week="mon-fri", hour="8-18", minute=f"*/{sync_realtime_minutes}",
                       id="sync_realtime")
-    scheduler.add_job(update_signal_results, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("update_signal_results", update_signal_results), "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="result_update")
-    scheduler.add_job(update_screening_results, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("update_screening_results", update_screening_results), "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="screening_result_update")
-    scheduler.add_job(check_trailing_stops, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("check_trailing_stops", check_trailing_stops), "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="trailing_stops")
-    scheduler.add_job(lambda: reassess_watchlist(kiwoom), "cron",
+    scheduler.add_job(lambda: _run_on_open_day("reassess_watchlist", reassess_watchlist, kiwoom), "cron",
                       day_of_week="mon-fri", hour=9, minute=15,
                       id="reassess_watchlist")
-    scheduler.add_job(check_inactive_stocks, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("check_inactive_stocks", check_inactive_stocks), "cron",
                       day_of_week="mon-fri", hour=8, minute=30,
                       id="inactive_alert")
-    scheduler.add_job(check_removal_candidates, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("check_removal_candidates", check_removal_candidates), "cron",
                       day_of_week="mon-fri", hour="9-15", minute="*/30",
                       id="removal_check")
-    scheduler.add_job(check_market_dip, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("check_market_dip", check_market_dip), "cron",
                       day_of_week="mon-fri", hour="9-14", minute="*/30",
                       id="dip_buy")
-    scheduler.add_job(run_intraday_scan, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_intraday_scan", run_intraday_scan), "cron",
                       day_of_week="mon-fri", hour=11, minute=0,
                       id="intraday_scan")
-    scheduler.add_job(run_daily_screening, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_daily_screening", run_daily_screening), "cron",
                       day_of_week="mon-fri", hour=15, minute=40,
                       id="daily_screening")
-    scheduler.add_job(run_daily_review_with_checklist, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_daily_review_with_checklist", run_daily_review_with_checklist), "cron",
                       day_of_week="mon-fri", hour=16, minute=10,
                       id="daily_review")
-    scheduler.add_job(run_weekly_performance_report, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_weekly_performance_report", run_weekly_performance_report), "cron",
                       day_of_week="mon", hour=9, minute=0,
                       id="weekly_performance_report")
-    scheduler.add_job(run_weekly_self_correction, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_weekly_self_correction", run_weekly_self_correction), "cron",
                       day_of_week="mon", hour=9, minute=5,
                       id="weekly_self_correction")
-    scheduler.add_job(run_reflection_policy_cycle, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_reflection_policy_cycle", run_reflection_policy_cycle), "cron",
                       day_of_week="mon-fri", hour=16, minute=20,
                       id="daily_reflection_policy_loop")
-    scheduler.add_job(run_agent_action_log_refresh, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_agent_action_log_refresh", run_agent_action_log_refresh), "cron",
                       day_of_week="mon", hour=9, minute=10,
                       id="weekly_agent_action_log_refresh")
-    scheduler.add_job(update_trade_results, "cron",
+    scheduler.add_job(lambda: _run_on_open_day("update_trade_results", update_trade_results), "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="trade_result_update")
     news_monitor_times = str(_WORKER_CONFIG.get("news_monitor_times", "8:55,12:00") or "").strip()
@@ -3236,7 +3249,7 @@ def main():
         except ValueError:
             continue
         scheduler.add_job(
-            run_news_monitor,
+            lambda: _run_on_open_day("run_news_monitor", run_news_monitor),
             "cron",
             day_of_week="mon-fri",
             hour=hour_i,
@@ -3260,7 +3273,7 @@ def main():
                 except ValueError:
                     continue
                 scheduler.add_job(
-                    run_rag_batch_index,
+                    lambda: _run_on_open_day("run_rag_batch_index", run_rag_batch_index),
                     "cron",
                     day_of_week="mon-fri",
                     hour=hour_i,
@@ -3271,7 +3284,7 @@ def main():
                 )
         elif rag_batch_hours:
             scheduler.add_job(
-                run_rag_batch_index,
+                lambda: _run_on_open_day("run_rag_batch_index", run_rag_batch_index),
                 "cron",
                 day_of_week="mon-fri",
                 hour=rag_batch_hours,
@@ -3285,7 +3298,7 @@ def main():
         if bool(_WORKER_CONFIG.get("rag_batch_run_close", False)):
             # Optional close-time catch-up run
             scheduler.add_job(
-                run_rag_batch_index,
+                lambda: _run_on_open_day("run_rag_batch_index_close", run_rag_batch_index),
                 "cron",
                 day_of_week="mon-fri",
                 hour=18,
@@ -3294,7 +3307,7 @@ def main():
                 max_instances=1,
                 coalesce=True,
             )
-    run_check()
+    _run_on_open_day("startup_run_check", run_check)
 
     for sig_name in ("SIGTERM", "SIGINT"):
         sig = getattr(signal, sig_name, None)
