@@ -21,9 +21,9 @@ worker:
   buy_reentry_block_minutes: 60
   news_ai_max_calls_per_run: 1
   # 429/TPM 완화: 판단 Agent 토큰/스텝/재시도 텀 보수화
-  agent_max_steps: 4
-  agent_max_tokens: 320
-  agent_target_unique_tools: 3
+  agent_max_steps: 7
+  agent_max_tokens: 600
+  agent_target_unique_tools: 5
   agent_rate_limit_retries: 2
   agent_rate_limit_wait_seconds: 4
   research_agent_max_steps: 30
