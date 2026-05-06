@@ -567,6 +567,9 @@ def run_premarket_report():
         from worker.clients.global_market import get_global_indices
         from worker.clients.news_client import get_macro_news_for_ai
 
+        kospi = kiwoom.get_market_index("kospi") or {}
+        time.sleep(0.5)
+        kosdaq = kiwoom.get_market_index("kosdaq") or {}
         global_idx = get_global_indices() or {}
         nasdaq = global_idx.get("나스닥", {})
         spx = global_idx.get("S&P500", {})
@@ -616,6 +619,7 @@ def run_premarket_report():
             f"trend={trend}, aggr={recommended_aggr}"
         )
         detail_lines = [
+            f"[전일 국내장] KOSPI {_extract_change_pct(kospi):+.2f}% / KOSDAQ {_extract_change_pct(kosdaq):+.2f}%",
             f"[전일 미국장/글로벌] 나스닥 {nasdaq.get('change_pct', 0):+.2f}% / S&P500 {spx.get('change_pct', 0):+.2f}%",
             f"[선물] NQ {nq_fut.get('change_pct', 0):+.2f}% / ES {es_fut.get('change_pct', 0):+.2f}%",
             f"[환율] USD/KRW {usdkrw.get('price', 0):,.0f} ({usdkrw.get('change_pct', 0):+.2f}%)",
@@ -644,6 +648,7 @@ def run_premarket_report():
             avoid_targets=avoid_targets,
             increase_cash=increase_cash,
             meta={
+                "domestic_indices": {"kospi": kospi, "kosdaq": kosdaq},
                 "global_indices": global_idx,
                 "futures": {"nq": nq_fut, "es": es_fut},
                 "rates": {"us10y": us10y},
