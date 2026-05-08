@@ -118,6 +118,46 @@ _daily_review_execution_events: list[dict] = []
 _daily_review_event_date: str = ""
 
 
+def _extract_trade_action_guidance(review: dict | None, max_items: int = 8) -> list[str]:
+    """Extract only trade-action guidance lines for next-session execution."""
+    if not review:
+        return []
+    try:
+        meta = json.loads(review.get("meta_json") or "{}")
+    except Exception:
+        meta = {}
+    raw = (((meta.get("next_day_policy") or {}).get("agent_guidance")) or [])
+    if not isinstance(raw, list):
+        return []
+
+    # Exclude system/ops instructions from execution guidance.
+    system_markers = (
+        "시스템", "모니터링", "로그", "집계", "기록", "대시보드", "알림",
+        "인프라", "db", "데이터", "체크리스트",
+    )
+    # Keep only practical trading actions.
+    trade_markers = (
+        "매수", "매도", "진입", "청산", "손절", "익절", "비중", "수량", "분할",
+        "관망", "홀드", "차단", "허용", "재진입", "추격",
+        "entry", "exit", "stop", "target", "position", "hold",
+    )
+
+    out: list[str] = []
+    for g in raw:
+        txt = str(g or "").strip()
+        if not txt:
+            continue
+        low = txt.lower()
+        if any(m in low for m in system_markers):
+            continue
+        if not any(m in low for m in trade_markers):
+            continue
+        out.append(txt)
+        if len(out) >= max_items:
+            break
+    return out
+
+
 def _handle_shutdown_signal(signum, _frame):
     logger.info(f"[종료신호] signal={signum}")
     _shutdown_event.set()
@@ -204,13 +244,9 @@ def _build_core3_from_daily_review(review: dict | None) -> list[str]:
     lines: list[str] = []
     date = str(review.get("created_at", ""))[:10] or "N/A"
     lines.append(f"{date} 복기 반영")
-    try:
-        meta = json.loads(review.get("meta_json") or "{}")
-    except Exception:
-        meta = {}
-    guidance = (((meta.get("next_day_policy") or {}).get("agent_guidance")) or [])
-    if isinstance(guidance, list) and guidance:
-        for g in guidance[:2]:
+    guidance = _extract_trade_action_guidance(review, max_items=2)
+    if guidance:
+        for g in guidance:
             txt = str(g or "").strip()
             if txt:
                 lines.append(txt[:120])
@@ -234,11 +270,7 @@ def _resolve_guardrails_from_daily_review(review: dict | None) -> dict:
         return policy
 
     policy["source_date"] = str(review.get("created_at", ""))[:10]
-    try:
-        meta = json.loads(review.get("meta_json") or "{}")
-    except Exception:
-        meta = {}
-    guidance = (((meta.get("next_day_policy") or {}).get("agent_guidance")) or [])
+    guidance = _extract_trade_action_guidance(review, max_items=8)
     gtext = " ".join(str(x or "") for x in guidance).lower()
 
     reasons: list[str] = []
