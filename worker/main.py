@@ -2185,7 +2185,8 @@ def _auto_execute(
 
     market_event_ctx = getattr(signal, "market_event_context", {}) or {}
     tomorrow_closed = bool(market_event_ctx.get("tomorrow_closed"))
-    if order_type == "1" and tomorrow_closed:
+    holiday_entry_policy = str(_WORKER_CONFIG.get("holiday_new_entry_policy", "soft")).strip().lower()
+    if order_type == "1" and tomorrow_closed and holiday_entry_policy == "block":
         _log_daily_review_event(
             signal.stock_code, signal.stock_name, "applied",
             "holiday_block_new_entry",
@@ -2193,9 +2194,14 @@ def _auto_execute(
         )
         logger.info(
             f"[{signal.stock_name}] 내일 휴장({market_event_ctx.get('tomorrow')}) "
-            f"이벤트로 신규 매수 차단"
+            f"이벤트로 신규 매수 차단(policy=block)"
         )
         return
+    if order_type == "1" and tomorrow_closed and holiday_entry_policy != "block":
+        logger.info(
+            f"[{signal.stock_name}] 내일 휴장({market_event_ctx.get('tomorrow')}) "
+            f"참고 정보 반영만 수행(policy={holiday_entry_policy or 'soft'})"
+        )
 
     dr_guardrails = getattr(signal, "daily_review_guardrails", {}) or {}
     if order_type == "1" and dr_guardrails:

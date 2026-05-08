@@ -21,6 +21,7 @@ worker:
   research_agent_api_key: ""
   ai_cache_minutes: 180
   buy_reentry_block_minutes: 60
+  holiday_new_entry_policy: soft  # soft: 참고만, block: 휴장 전 신규매수 차단
   semi_force_transition_auto_trade: true
   news_ai_max_calls_per_run: 1
   # 429/TPM 완화: 판단 Agent 토큰/스텝/재시도 텀 보수화
