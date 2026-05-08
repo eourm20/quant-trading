@@ -2803,7 +2803,7 @@ def _set_position_by_ai(stock_code: str, stock_name: str, current_price: int, qt
         logger.error(f"[{stock_name}] AI 포지션 설정 실패: {e}")
 
 
-def run_check():
+def run_check(check_mode: str = "all"):
     session = "main" if TEST_MODE else get_current_session()
     if session is None:
         logger.debug("장 운영 시간 외 - 스킵")
@@ -2858,7 +2858,13 @@ def run_check():
     except Exception as _sort_e:
         logger.warning(f"[우선순위] R/R 정렬 실패, 기본 순서 유지: {_sort_e}")
 
-    logger.info(f"=== 조건 체크 시작 [{session}] ({len(stocks)}개 종목, {len(conditions)}개 조건) ===")
+    if check_mode not in {"all", "entry_only", "exit_only"}:
+        check_mode = "all"
+
+    logger.info(
+        f"=== 조건 체크 시작 [{session}|mode={check_mode}] "
+        f"({len(stocks)}개 종목, {len(conditions)}개 조건) ==="
+    )
 
     use_claude = _WORKER_CONFIG.get("use_ai_judgment", _WORKER_CONFIG.get("use_claude_api", True))
     ai_cache_minutes = int(_WORKER_CONFIG.get("ai_cache_minutes", 20))
@@ -2905,6 +2911,16 @@ def run_check():
         time.sleep(1)
         signal = check_stock(kiwoom, stock, conditions, holdings)
         if signal:
+            signal_type = str(getattr(signal, "signal_type", "") or "").strip().lower()
+            in_portfolio = bool(getattr(signal, "in_portfolio", False))
+
+            if check_mode == "exit_only":
+                if (not in_portfolio) or (signal_type not in {"exit", "both"}):
+                    continue
+            elif check_mode == "entry_only":
+                if signal_type not in {"entry", "both", "add"}:
+                    continue
+
             setattr(signal, "market_event_context", market_event_ctx)
             setattr(signal, "daily_review_core3", _daily_review_guardrail_context.get("daily_review_core3", []))
             setattr(signal, "daily_review_guardrails", _daily_review_guardrail_context)
@@ -3153,11 +3169,13 @@ def run_check():
                 else:
                     _paper_execute(signal, claude_opinion, signal_id)
 
-    logger.info(f"=== 조건 체크 완료 === (AI calls: {ai_calls})")
+    logger.info(f"=== 조건 체크 완료 [mode={check_mode}] === (AI calls: {ai_calls})")
 
 
 def main():
     interval = _WORKER_CONFIG.get("interval_seconds", 60)
+    entry_interval = int(_WORKER_CONFIG.get("entry_interval_seconds", interval))
+    exit_interval = int(_WORKER_CONFIG.get("exit_interval_seconds", 60))
     init_db()
 
     logger.info("포트폴리오 초기 동기화 중...")
@@ -3166,11 +3184,15 @@ def main():
     logger.info("텔레그램 봇 시작...")
     start_bot_thread(kiwoom_client=kiwoom)
 
-    interval_min = max(1, interval // 60)
+    interval_min = max(1, entry_interval // 60)
+    exit_interval_min = max(1, exit_interval // 60)
     sync_realtime_minutes = max(1, int(_WORKER_CONFIG.get("sync_realtime_minutes", 2)))
     _trade_env = "모의투자" if kiwoom._is_mock else "실전투자"
     _trade_mode = "자동매매" if AUTO_TRADE else "수동(알림)"
-    logger.info(f"워커 시작 - {interval}초 간격으로 실행 (평일 08:00~18:00)")
+    logger.info(
+        "워커 시작 - "
+        f"entry {entry_interval}초 / exit {exit_interval}초 간격 실행 (평일 08:00~18:00)"
+    )
     send_message(f"✅ 워커 시작 [{_trade_env} | {_trade_mode}]")
 
     def auto_sync():
@@ -3179,9 +3201,12 @@ def main():
 
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")
     # 평일 08:00~18:59 사이에만 실행
-    scheduler.add_job(lambda: _run_on_open_day("run_check", run_check), "cron",
+    scheduler.add_job(lambda: _run_on_open_day("run_check_entry", run_check, "entry_only"), "cron",
                       day_of_week="mon-fri", hour="8-18", minute=f"*/{interval_min}",
-                      id="monitor")
+                      id="monitor_entry")
+    scheduler.add_job(lambda: _run_on_open_day("run_check_exit", run_check, "exit_only"), "cron",
+                      day_of_week="mon-fri", hour="8-18", minute=f"*/{exit_interval_min}",
+                      id="monitor_exit")
     scheduler.add_job(lambda: _run_on_open_day("reset_all_cooldowns", reset_all_cooldowns), "cron", hour=9, minute=0, id="reset_cooldowns")
     scheduler.add_job(lambda: _run_on_open_day("sync_premarket", auto_sync), "cron", hour=8, minute=30, id="sync_premarket")
     scheduler.add_job(lambda: _run_on_open_day("sync_open", auto_sync), "cron", hour=9, minute=1, id="sync_open")

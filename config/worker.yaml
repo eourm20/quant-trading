@@ -1,6 +1,8 @@
 ﻿# Worker runtime config
 worker:
   interval_seconds: 600
+  entry_interval_seconds: 600
+  exit_interval_seconds: 60
   sync_realtime_minutes: 10
   news_cooldown_hours: 8
   use_ai_judgment: true
@@ -19,6 +21,7 @@ worker:
   research_agent_api_key: ""
   ai_cache_minutes: 180
   buy_reentry_block_minutes: 60
+  semi_force_transition_auto_trade: true
   news_ai_max_calls_per_run: 1
   # 429/TPM 완화: 판단 Agent 토큰/스텝/재시도 텀 보수화
   agent_max_steps: 7
@@ -58,7 +61,7 @@ worker:
 
 watchlist_management:
   inactive_days_alert: 30
-  inactive_days_removal: 30
+  inactive_days_removal: 5
   alert_interval_days: 7
 
 sector:
@@ -66,11 +69,11 @@ sector:
 
 prefilter:
   market_cap_min: 500
-  change_upper: 7
+  change_upper: 5
   change_lower: -10
-  rsi_max: 70
+  rsi_max: 67
   ma_ratio: 0.95
-  volume_ratio_min: 2.0
+  volume_ratio_min: 2.2
   volume_ratio_max: 15
   consecutive_candles: 5
 
@@ -87,7 +90,7 @@ prefilter:
   bear_consecutive_disable: true
   prefilter_input_cap: 25
   prefilter_fallback_candidates: 5
-  max_ai_candidates: 10
+  max_ai_candidates: 12
 
 # KRX session notes (see worker/main.py _SESSIONS)
 # Pre-open: 08:30~09:00 trde_tp=61

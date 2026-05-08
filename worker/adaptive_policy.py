@@ -158,7 +158,8 @@ def get_judgment_adaptive_policy(
             score -= 1
         if avg3 <= -0.5:
             score -= 1
-    if loss_streak >= 3:
+    # Keep adaptive brakes, but avoid over-blocking after short losing streaks.
+    if loss_streak >= 4:
         score -= 1
     if regime == "risk_on":
         score += 1
@@ -178,15 +179,16 @@ def get_judgment_adaptive_policy(
             allow_new_entry=True,
             reason=f"score={score}, regime={regime}, basis={basis}, samples={samples}, hit={hit}, edge3={avg3}",
         )
-    if score <= -1:
+    # Move conservative gate one notch lower so borderline cases stay tradable.
+    if score <= -2:
         return AdaptivePolicy(
             stance="conservative",
             score=score,
             samples=samples,
             hit_rate_3d=hit,
             avg_3d=avg3,
-            qty_multiplier=0.5,
-            allow_new_entry=(st == "add" or (trigger_count >= 4 and regime != "risk_off")),
+            qty_multiplier=0.7,
+            allow_new_entry=(st == "add" or (trigger_count >= 3 and regime != "risk_off")),
             reason=f"score={score}, regime={regime}, basis={basis}, loss_streak={loss_streak}, samples={samples}",
         )
     return AdaptivePolicy(
