@@ -2870,6 +2870,19 @@ def run_check(check_mode: str = "all"):
     ai_cache_minutes = int(_WORKER_CONFIG.get("ai_cache_minutes", 20))
     ai_calls = 0
     holdings = get_portfolio()
+    holding_codes = {
+        str(h.get("stock_code", ""))
+        for h in holdings
+        if int(h.get("quantity") or 0) > 0
+    }
+
+    # exit-only path should scan only held positions to avoid unnecessary
+    # watchlist-wide checks every minute.
+    if check_mode == "exit_only":
+        stocks = [s for s in stocks if str(s.get("code", "")) in holding_codes]
+        if not stocks:
+            logger.info("=== 조건 체크 완료 [mode=exit_only] === (보유 종목 없음, 스킵)")
+            return
 
     deposit = 0
     try:
