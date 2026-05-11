@@ -1241,8 +1241,9 @@ def _check_semiforce_transition(signal, claude_opinion: str | None) -> dict | No
 
 def run_weekly_performance_report():
     """매주 월요일 09:00 - 지난주 AI 신호 성과 리포트를 전략 노트에 기록하고 텔레그램 발송."""
-    from data.db import get_weekly_performance_report, save_strategy_note
+    from data.db import get_weekly_performance_report, save_strategy_note, get_conn, HOLD_NEUTRAL_BAND_PCT
     from notifications.telegram import send_message
+    from datetime import datetime
 
     logger.info("[성과리포트] 주간 성과 분석 시작")
     try:
@@ -1251,8 +1252,141 @@ def run_weekly_performance_report():
         logger.warning(f"[성과리포트] 데이터 조회 실패: {e}")
         return
 
-    if not rpt or rpt.get("rated_count", 0) == 0:
-        logger.info("[성과리포트] 최근 7일 평가 가능 신호 없음 - 스킵")
+    if not rpt:
+        logger.info("[성과리포트] 최근 7일 데이터 없음 - 스킵")
+        return
+
+    # 5일 윈도우 평가: 판단시점 D 기준 D-2 ~ D+2
+    # pre_2d: D-2 -> D(판단 전 흐름), post_2d: D -> D+2(판단 후 흐름)
+    def _calc_window_5d_metrics(days: int = 7) -> dict:
+        since = (_now_kst() - _td(days=days)).strftime("%Y-%m-%d")
+        with get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, stock_code, stock_name, verdict, in_portfolio, created_at
+                   FROM signals
+                   WHERE created_at >= ? AND verdict IS NOT NULL
+                   ORDER BY created_at DESC""",
+                (since,),
+            ).fetchall()
+        signals = [dict(r) for r in rows]
+        if not signals:
+            return {"total": {"rated_count": 0}, "portfolio": {"rated_count": 0}, "watchlist": {"rated_count": 0}}
+
+        price_cache: dict[str, list[tuple[str, int]]] = {}
+        band = max(0.0, float(HOLD_NEUTRAL_BAND_PCT))
+
+        def _load_series(stock_code: str) -> list[tuple[str, int]]:
+            cached = price_cache.get(stock_code)
+            if cached is not None:
+                return cached
+            daily = kiwoom.get_daily_ohlcv(stock_code, period=120) or []
+            parsed: list[tuple[str, int]] = []
+            for d in daily:
+                ymd = (
+                    _parse_ymd(d.get("dt"))
+                    or _parse_ymd(d.get("trde_dt"))
+                    or _parse_ymd(d.get("stck_bsop_date"))
+                    or _parse_ymd(d.get("bsop_date"))
+                    or _parse_ymd(d.get("date"))
+                )
+                cp = _safe_int_price(d.get("cur_prc") or d.get("stck_clpr") or d.get("close"))
+                if ymd and cp > 0:
+                    parsed.append((ymd, cp))
+            parsed.sort(key=lambda x: x[0])
+            price_cache[stock_code] = parsed
+            return parsed
+
+        def _classify(verdict: str, post_2d: float) -> bool:
+            if verdict == "매수":
+                return post_2d > band
+            if verdict == "매도":
+                return post_2d < -band
+            if verdict == "홀드":
+                return -band <= post_2d <= band
+            return False
+
+        eval_rows: list[dict] = []
+        for s in signals:
+            try:
+                d0 = datetime.strptime(str(s["created_at"])[:10], "%Y-%m-%d").strftime("%Y%m%d")
+            except Exception:
+                continue
+            series = _load_series(str(s["stock_code"] or ""))
+            if not series:
+                continue
+            idx = -1
+            for i, (ymd, _) in enumerate(series):
+                if ymd <= d0:
+                    idx = i
+                else:
+                    break
+            if idx < 2 or (idx + 2) >= len(series):
+                continue
+            p_prev2 = series[idx - 2][1]
+            p0 = series[idx][1]
+            p_next2 = series[idx + 2][1]
+            if p_prev2 <= 0 or p0 <= 0 or p_next2 <= 0:
+                continue
+            pre_2d = (p0 - p_prev2) / p_prev2 * 100.0
+            post_2d = (p_next2 - p0) / p0 * 100.0
+            verdict = str(s.get("verdict") or "")
+            eval_rows.append(
+                {
+                    "verdict": verdict,
+                    "in_portfolio": int(s.get("in_portfolio") or 0),
+                    "post_2d": round(post_2d, 2),
+                    "pre_2d": round(pre_2d, 2),
+                    "is_hit": _classify(verdict, post_2d),
+                }
+            )
+
+        def _block(block_rows: list[dict]) -> dict:
+            rated_count = len(block_rows)
+            if rated_count == 0:
+                return {
+                    "rated_count": 0,
+                    "win_rate": None,
+                    "avg_post_2d": None,
+                    "avg_pre_2d": None,
+                    "verdict_breakdown": {},
+                }
+            wins = sum(1 for r in block_rows if r["is_hit"])
+            avg_post = round(sum(r["post_2d"] for r in block_rows) / rated_count, 2)
+            avg_pre = round(sum(r["pre_2d"] for r in block_rows) / rated_count, 2)
+            vb: dict[str, dict] = {}
+            for r in block_rows:
+                v = r["verdict"]
+                if v not in vb:
+                    vb[v] = {"count": 0, "wins": 0, "sum_post": 0.0}
+                vb[v]["count"] += 1
+                vb[v]["sum_post"] += r["post_2d"]
+                if r["is_hit"]:
+                    vb[v]["wins"] += 1
+            verdict_breakdown = {
+                k: {
+                    "count": v["count"],
+                    "win_rate": round(v["wins"] / v["count"] * 100, 1) if v["count"] else None,
+                    "avg_post_2d": round(v["sum_post"] / v["count"], 2) if v["count"] else None,
+                }
+                for k, v in vb.items()
+            }
+            return {
+                "rated_count": rated_count,
+                "win_rate": round(wins / rated_count * 100, 1),
+                "avg_post_2d": avg_post,
+                "avg_pre_2d": avg_pre,
+                "verdict_breakdown": verdict_breakdown,
+            }
+
+        return {
+            "total": _block(eval_rows),
+            "portfolio": _block([r for r in eval_rows if int(r["in_portfolio"]) == 1]),
+            "watchlist": _block([r for r in eval_rows if int(r["in_portfolio"]) == 0]),
+        }
+
+    win5 = _calc_window_5d_metrics(days=7)
+    if rpt.get("rated_count", 0) == 0 and int((win5.get("total") or {}).get("rated_count") or 0) == 0:
+        logger.info("[성과리포트] 최근 7일 평가 가능한 신호 없음 - 스킵")
         return
 
     def _section_lines(title: str, block: dict) -> list[str]:
@@ -1262,25 +1396,43 @@ def run_weekly_performance_report():
 
         if rated == 0:
             lines.append("- 평가 완료된 신호 없음")
-            return lines
+        else:
+            wr = block.get("win_rate_3d")
+            avg3 = block.get("avg_return_3d")
+            avg1 = block.get("avg_return_1d")
+            avg5 = block.get("avg_return_5d")
+            lines.append(f"- 승률 {wr}% | 3일 평균 {avg3:+.2f}%")
+            if avg1 is not None:
+                lines.append(f"- 1일 평균 {avg1:+.2f}%")
+            if avg5 is not None:
+                lines.append(f"- 5일 평균 {avg5:+.2f}%")
 
-        wr = block.get("win_rate_3d")
-        avg3 = block.get("avg_return_3d")
-        avg1 = block.get("avg_return_1d")
-        avg5 = block.get("avg_return_5d")
-        lines.append(f"- 승률 {wr}% | 3일 평균 {avg3:+.2f}%")
-        if avg1 is not None:
-            lines.append(f"- 1일 평균 {avg1:+.2f}%")
-        if avg5 is not None:
-            lines.append(f"- 5일 평균 {avg5:+.2f}%")
+            vbd = block.get("verdict_breakdown", {})
+            if vbd:
+                lines.append("- 판정별")
+                for verdict, stat in vbd.items():
+                    lines.append(
+                        f"  [{verdict}] {stat['count']}건 | 승률 {stat['win_rate']}% | 평균 {stat['avg_return']:+.2f}%"
+                    )
 
-        vbd = block.get("verdict_breakdown", {})
-        if vbd:
-            lines.append("- 판정별")
-            for verdict, stat in vbd.items():
-                lines.append(
-                    f"  [{verdict}] {stat['count']}건 | 승률 {stat['win_rate']}% | 평균 {stat['avg_return']:+.2f}%"
-                )
+        w5_block_map = {
+            "통합": (win5.get("total") or {}),
+            "Portfolio (보유 종목 기반)": (win5.get("portfolio") or {}),
+            "Watchlist (비보유 종목 기반)": (win5.get("watchlist") or {}),
+        }
+        w5 = w5_block_map.get(title, {})
+        if int(w5.get("rated_count") or 0) > 0:
+            lines.append(
+                f"- 5일윈도우(D-2~D+2) 승률 {w5.get('win_rate')}% | "
+                f"사전2일 {float(w5.get('avg_pre_2d') or 0):+.2f}% | 사후2일 {float(w5.get('avg_post_2d') or 0):+.2f}%"
+            )
+            w5_vb = w5.get("verdict_breakdown") or {}
+            if w5_vb:
+                lines.append("- 5일윈도우 판정별")
+                for verdict, stat in w5_vb.items():
+                    lines.append(
+                        f"  [{verdict}] {stat['count']}건 | 승률 {stat['win_rate']}% | 사후2일평균 {stat['avg_post_2d']:+.2f}%"
+                    )
 
         best = block.get("best_stock") or {}
         worst = block.get("worst_stock") or {}
@@ -1309,6 +1461,12 @@ def run_weekly_performance_report():
         f"평가 {total_block['rated_count']}건 / 승률 {total_block['win_rate_3d']}% / "
         f"3일평균 {total_block['avg_return_3d']:+.2f}%"
     )
+    total_w5 = win5.get("total") or {}
+    if int(total_w5.get("rated_count") or 0) > 0:
+        summary += (
+            f" / 5일윈도우승률 {total_w5.get('win_rate')}%"
+            f" / 사후2일평균 {float(total_w5.get('avg_post_2d') or 0):+.2f}%"
+        )
 
     detail_parts = [f"## 주간 성과 요약 (최근 {int(rpt.get('period_days') or 7)}일)"]
     detail_parts.extend(_section_lines("통합", total_block))
@@ -1350,6 +1508,22 @@ def run_weekly_performance_report():
                     msg_lines.append(
                         f"{verdict} {stat['count']}건 | 승률 {stat['win_rate']}% | 평균 {stat['avg_return']:+.2f}%"
                     )
+
+            w5_block_map = {
+                "통합": (win5.get("total") or {}),
+                "Portfolio": (win5.get("portfolio") or {}),
+                "Watchlist": (win5.get("watchlist") or {}),
+            }
+            w5 = w5_block_map.get(title, {})
+            if int(w5.get("rated_count") or 0) > 0:
+                msg_lines.append(
+                    f"5일윈도우 승률 {w5.get('win_rate')}% | "
+                    f"사전2일 {float(w5.get('avg_pre_2d') or 0):+.2f}% | 사후2일 {float(w5.get('avg_post_2d') or 0):+.2f}%"
+                )
+                for verdict, stat in (w5.get("verdict_breakdown") or {}).items():
+                    msg_lines.append(
+                        f"5D-{verdict} {stat['count']}건 | 승률 {stat['win_rate']}% | 사후2일 {stat['avg_post_2d']:+.2f}%"
+                    )
             msg_lines.append("")
 
         _telegram_section("통합", total_block)
@@ -1359,7 +1533,6 @@ def run_weekly_performance_report():
         send_message("\n".join(msg_lines).strip())
     except Exception as e:
         logger.debug(f"[성과리포트] 텔레그램 발송 실패: {e}")
-
 
 def run_weekly_self_correction():
     """Run weekly self-correction summary for verdict/condition/screening performance."""
@@ -3434,3 +3607,5 @@ if __name__ == "__main__":
     logger.info(f"DB:  {_db_path}")
     logger.info(f"==================================")
     main()
+
+
