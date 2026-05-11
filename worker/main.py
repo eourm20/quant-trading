@@ -569,34 +569,11 @@ def _parse_hhmm(value: str, default_h: int, default_m: int) -> tuple[int, int]:
         return default_h, default_m
 
 
-def _fetch_yahoo_quote(symbol: str) -> dict:
-    try:
-        import httpx
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        resp = httpx.get(
-            url,
-            params={"symbols": symbol, "fields": "regularMarketPrice,regularMarketChangePercent"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=6,
-        )
-        resp.raise_for_status()
-        rows = ((resp.json() or {}).get("quoteResponse") or {}).get("result") or []
-        if not rows:
-            return {}
-        row = rows[0]
-        return {
-            "price": _safe_float(row.get("regularMarketPrice")),
-            "change_pct": _safe_float(row.get("regularMarketChangePercent")),
-        }
-    except Exception:
-        return {}
-
-
 def run_premarket_report():
     """Generate premarket report (based on overnight/global context) and save structured labels."""
     today = _now_kst().strftime("%Y-%m-%d")
     try:
-        from worker.clients.global_market import get_global_indices
+        from worker.clients.global_market import get_global_indices, get_macro_proxies
         from worker.clients.news_client import get_macro_news_for_ai
 
         kospi = kiwoom.get_market_index("kospi") or {}
@@ -606,19 +583,14 @@ def run_premarket_report():
         nasdaq = global_idx.get("나스닥", {})
         spx = global_idx.get("S&P500", {})
         usdkrw = global_idx.get("달러/원", {})
-
-        nq_fut = _fetch_yahoo_quote("NQ=F")
-        es_fut = _fetch_yahoo_quote("ES=F")
-        us10y = _fetch_yahoo_quote("^TNX")
-        wti = _fetch_yahoo_quote("CL=F")
-        gold = _fetch_yahoo_quote("GC=F")
+        macro = get_macro_proxies() or {}
+        wti = macro.get("wti", {})
+        gold = macro.get("gold", {})
         macro_news = get_macro_news_for_ai(max_per_keyword=2, max_total=6) or "수집된 거시 뉴스 없음"
 
         base_moves = [
             _safe_float(nasdaq.get("change_pct")),
             _safe_float(spx.get("change_pct")),
-            _safe_float(nq_fut.get("change_pct")),
-            _safe_float(es_fut.get("change_pct")),
         ]
         base_moves = [v for v in base_moves if abs(v) > 0]
         avg_move = (sum(base_moves) / len(base_moves)) if base_moves else 0.0
@@ -653,9 +625,7 @@ def run_premarket_report():
         detail_lines = [
             f"[전일 국내장] KOSPI {_extract_change_pct(kospi):+.2f}% / KOSDAQ {_extract_change_pct(kosdaq):+.2f}%",
             f"[전일 미국장/글로벌] 나스닥 {nasdaq.get('change_pct', 0):+.2f}% / S&P500 {spx.get('change_pct', 0):+.2f}%",
-            f"[선물] NQ {nq_fut.get('change_pct', 0):+.2f}% / ES {es_fut.get('change_pct', 0):+.2f}%",
             f"[환율] USD/KRW {usdkrw.get('price', 0):,.0f} ({usdkrw.get('change_pct', 0):+.2f}%)",
-            f"[금리] 미국 10년물 {us10y.get('price', 0):.2f} ({us10y.get('change_pct', 0):+.2f}%)",
             f"[원자재] WTI {wti.get('price', 0):.2f} ({wti.get('change_pct', 0):+.2f}%), Gold {gold.get('price', 0):.2f} ({gold.get('change_pct', 0):+.2f}%)",
             f"[주요 뉴스/이벤트]\n{macro_news}",
             f"[시장 분위기] {market_regime}",
@@ -682,8 +652,6 @@ def run_premarket_report():
             meta={
                 "domestic_indices": {"kospi": kospi, "kosdaq": kosdaq},
                 "global_indices": global_idx,
-                "futures": {"nq": nq_fut, "es": es_fut},
-                "rates": {"us10y": us10y},
                 "commodities": {"wti": wti, "gold": gold},
                 "agent_policy": agent_policy,
             },
