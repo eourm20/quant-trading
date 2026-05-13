@@ -98,18 +98,38 @@ def _fetch_alpha(params: dict[str, str]) -> dict:
             resp = httpx.get(_ALPHA_BASE, params=q, headers=_HEADERS, timeout=8.0)
             resp.raise_for_status()
             data = resp.json() or {}
+            params_brief = {
+                "function": params.get("function"),
+                "symbol": params.get("symbol"),
+                "from_currency": params.get("from_currency"),
+                "to_currency": params.get("to_currency"),
+            }
             if "Error Message" in data or "Information" in data or "Note" in data:
-                logger.warning(f"Alpha Vantage response warning: {data}")
+                logger.warning(
+                    f"Alpha Vantage response warning (attempt {attempt + 1}/{_ALPHA_MAX_RETRIES + 1}, "
+                    f"params={params_brief}): {data}"
+                )
                 if attempt < _ALPHA_MAX_RETRIES:
                     time.sleep(_ALPHA_RETRY_BACKOFF_SEC * (attempt + 1))
                     continue
+                logger.error(
+                    "Alpha Vantage request exhausted by warning responses "
+                    f"(params={params}, retries={_ALPHA_MAX_RETRIES})"
+                )
                 return {}
             return data
         except Exception as e:
-            logger.warning(f"Alpha Vantage fetch failed: {e}")
+            logger.warning(
+                "Alpha Vantage fetch failed "
+                f"(attempt {attempt + 1}/{_ALPHA_MAX_RETRIES + 1}, params={params}): {e}"
+            )
             if attempt < _ALPHA_MAX_RETRIES:
                 time.sleep(_ALPHA_RETRY_BACKOFF_SEC * (attempt + 1))
                 continue
+            logger.error(
+                "Alpha Vantage request failed after retries "
+                f"(params={params}, retries={_ALPHA_MAX_RETRIES}, error={e})"
+            )
             return {}
     return {}
 

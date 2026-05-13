@@ -3154,7 +3154,8 @@ def run_check(check_mode: str = "all"):
             in_portfolio = bool(getattr(signal, "in_portfolio", False))
 
             if check_mode == "exit_only":
-                if (not in_portfolio) or (signal_type not in {"exit", "both"}):
+                # 1분 루프에서도 보유 종목 add(추가매수) 타이밍을 즉시 반영한다.
+                if (not in_portfolio) or (signal_type not in {"exit", "both", "add"}):
                     continue
             elif check_mode == "entry_only":
                 if signal_type not in {"entry", "both", "add"}:

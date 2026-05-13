@@ -1,7 +1,7 @@
 """
-신호 쿨다운 관리 (DB 기반 - 워커 재시작해도 유지)
-같은 종목 + 같은 조건은 쿨다운 시간 내 재발송 안 함.
-장 시작(기본 08:30) 시 모든 쿨다운 초기화.
+신호 쿨다운 관리 (DB 기반)
+- 같은 종목 + 같은 조건은 cooldown 시간 내 중복 실행/알림 방지
+- 쿨다운은 conditions_def.cooldown_minutes를 그대로 사용
 """
 
 from datetime import datetime, timedelta, timezone
@@ -22,7 +22,7 @@ def filter_new_conditions(
     conditions: list[dict],
 ) -> tuple[list[str], list[str]]:
     """쿨다운이 지난 조건만 반환. 반환값: (new_ids, new_messages)"""
-    cooldown_map = {c["id"]: c.get("cooldown_minutes", 60) for c in conditions}
+    cooldown_map = {c["id"]: int(c.get("cooldown_minutes", 60) or 60) for c in conditions}
     now = now_kst()
     new_ids, new_msgs = [], []
 
@@ -38,10 +38,10 @@ def filter_new_conditions(
 
 
 def mark_sent(stock_code: str, triggered_ids: list[str]):
-    """발송된 조건의 시간을 DB에 기록"""
+    """발송한 조건의 쿨다운 만료 시각을 DB에 기록"""
     from data.db import get_conditions
 
-    cooldown_map = {c["id"]: c.get("cooldown_minutes", 60) for c in get_conditions()}
+    cooldown_map = {c["id"]: int(c.get("cooldown_minutes", 60) or 60) for c in get_conditions()}
     for cid in triggered_ids:
         key = f"{stock_code}:{cid}"
         set_cooldown(key, cooldown_minutes=cooldown_map.get(cid, 60))

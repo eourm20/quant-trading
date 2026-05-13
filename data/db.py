@@ -856,6 +856,50 @@ def init_db():
         conn.execute("DROP TABLE IF EXISTS paper_trades")
         conn.commit()
     _seed_conditions()
+    apply_condition_cooldown_tuning()
+
+
+def apply_condition_cooldown_tuning() -> None:
+    """Apply tuned cooldown values to conditions_def.
+
+    Auto-applied on init_db() so server DB always stays aligned.
+    """
+
+    tuned: dict[str, int] = {
+        # Exit: fast risk response
+        "stop_loss_price": 3,
+        "target_price": 20,
+        "ma20_support_break": 5,
+        "ma5_support_break": 5,
+        "rsi_overbought": 30,
+        "cci_overbought": 30,
+        # Add: timing-sensitive but avoid over-trading
+        "rsi_oversold_add": 15,
+        "bollinger_lower_break_add": 15,
+        "ma5_recovery_add": 10,
+        # Entry: moderate cooldown to avoid noise re-entry
+        "rsi_oversold": 30,
+        "rsi_oversold_intraday": 10,
+        "ma5_recovery": 30,
+        "bollinger_lower_break": 30,
+        "new_high_20d": 30,
+        "trend_follow_entry": 20,
+        "cci_oversold": 30,
+        # Both / event-like
+        "volume_surge_ratio": 30,
+        "bollinger_upper_break": 60,
+        # Critical alerts keep short
+        "rsi_critical": 5,
+        "bollinger_critical_below": 5,
+    }
+
+    with get_conn() as conn:
+        for cid, cd in tuned.items():
+            conn.execute(
+                "UPDATE conditions_def SET cooldown_minutes = ? WHERE id = ?",
+                (int(cd), str(cid)),
+            )
+        conn.commit()
 
 
 def _migrate_watchlist_columns(conn):
