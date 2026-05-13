@@ -58,19 +58,21 @@ def _post(text: str, parse_mode: str | None = "Markdown", reply_markup: dict | N
 
 
 def send_message(text: str) -> bool:
+    # Free-form runtime text(종목명/AI 응답/리포트 본문)에는 Markdown 충돌 문자가 자주 섞여
+    # parse error를 유발하므로 기본 알림은 plain text로 보낸다.
     if len(text) <= TELEGRAM_MAX_LEN:
-        return _post(text)
+        return _post(text, parse_mode=None)
     # 길이 초과 시 줄 단위로 분할 발송
     lines = text.split("\n")
     chunk = ""
     ok = True
     for line in lines:
         if chunk and len(chunk) + len(line) + 1 > TELEGRAM_MAX_LEN:
-            ok = _post(chunk) and ok
+            ok = _post(chunk, parse_mode=None) and ok
             chunk = ""
         chunk = f"{chunk}\n{line}" if chunk else line
     if chunk:
-        ok = _post(chunk) and ok
+        ok = _post(chunk, parse_mode=None) and ok
     return ok
 
 

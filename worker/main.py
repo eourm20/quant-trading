@@ -576,17 +576,51 @@ def run_premarket_report():
         from worker.clients.global_market import get_global_indices, get_macro_proxies
         from worker.clients.news_client import get_macro_news_for_ai
 
+        def _meta_dict(rep: dict | None) -> dict:
+            if not rep:
+                return {}
+            raw = rep.get("meta_json")
+            if not raw:
+                return {}
+            try:
+                return json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except Exception:
+                return {}
+
         kospi = kiwoom.get_market_index("kospi") or {}
         time.sleep(0.5)
         kosdaq = kiwoom.get_market_index("kosdaq") or {}
         global_idx = get_global_indices() or {}
-        nasdaq = global_idx.get("나스닥", {})
-        spx = global_idx.get("S&P500", {})
-        usdkrw = global_idx.get("달러/원", {})
+        nasdaq = global_idx.get("nasdaq", {}) or global_idx.get("나스닥", {})
+        spx = global_idx.get("sp500", {}) or global_idx.get("S&P500", {})
+        usdkrw = global_idx.get("usdkrw", {}) or global_idx.get("달러/원", {})
         macro = get_macro_proxies() or {}
         wti = macro.get("wti", {})
         gold = macro.get("gold", {})
         macro_news = get_macro_news_for_ai(max_per_keyword=2, max_total=6) or "수집된 거시 뉴스 없음"
+
+        # Alpha Vantage 무료 키 제한(일 25회/초당 제한)으로 값이 비면
+        # 직전 premarket 리포트의 글로벌/원자재 값을 fallback으로 사용한다.
+        prev_pre_meta = _meta_dict(get_latest_market_report(report_type="premarket") or {})
+        prev_global_idx = (prev_pre_meta.get("global_indices") or {}) if isinstance(prev_pre_meta, dict) else {}
+        prev_commodities = (prev_pre_meta.get("commodities") or {}) if isinstance(prev_pre_meta, dict) else {}
+
+        if not nasdaq:
+            nasdaq = prev_global_idx.get("nasdaq", {}) or prev_global_idx.get("나스닥", {}) or {}
+            if nasdaq:
+                global_idx["nasdaq"] = nasdaq
+        if not spx:
+            spx = prev_global_idx.get("sp500", {}) or prev_global_idx.get("S&P500", {}) or {}
+            if spx:
+                global_idx["sp500"] = spx
+        if not usdkrw:
+            usdkrw = prev_global_idx.get("usdkrw", {}) or prev_global_idx.get("달러/원", {}) or {}
+            if usdkrw:
+                global_idx["usdkrw"] = usdkrw
+        if not wti:
+            wti = prev_commodities.get("wti", {}) or {}
+        if not gold:
+            gold = prev_commodities.get("gold", {}) or {}
 
         base_moves = [
             _safe_float(nasdaq.get("change_pct")),
@@ -622,8 +656,15 @@ def run_premarket_report():
             f"장전 브리프 {today} | regime={market_regime}, vol={volatility}, "
             f"trend={trend}, aggr={recommended_aggr}"
         )
+        kospi_close = _safe_float(kospi.get("cur_prc"))
+        kosdaq_close = _safe_float(kosdaq.get("cur_prc"))
+        domestic_line = (
+            f"[전일 국내장 종가] KOSPI {kospi_close:,.2f} / KOSDAQ {kosdaq_close:,.2f}"
+            if (kospi_close > 0 or kosdaq_close > 0)
+            else f"[전일 국내장] KOSPI {_extract_change_pct(kospi):+.2f}% / KOSDAQ {_extract_change_pct(kosdaq):+.2f}%"
+        )
         detail_lines = [
-            f"[전일 국내장] KOSPI {_extract_change_pct(kospi):+.2f}% / KOSDAQ {_extract_change_pct(kosdaq):+.2f}%",
+            domestic_line,
             f"[전일 미국장/글로벌] 나스닥 {nasdaq.get('change_pct', 0):+.2f}% / S&P500 {spx.get('change_pct', 0):+.2f}%",
             f"[환율] USD/KRW {usdkrw.get('price', 0):,.0f} ({usdkrw.get('change_pct', 0):+.2f}%)",
             f"[원자재] WTI {wti.get('price', 0):.2f} ({wti.get('change_pct', 0):+.2f}%), Gold {gold.get('price', 0):.2f} ({gold.get('change_pct', 0):+.2f}%)",
@@ -2886,6 +2927,12 @@ def check_market_dip():
                     buy_budget=buy_budget,
                     kospi_rate=kospi_rate,
                     kosdaq_rate=kosdaq_rate,
+                )
+                send_message(
+                    f"🛒 *급락 스캔 매수 체결*\n"
+                    f"종목: *{name}* ({code})\n"
+                    f"사유: 시장 급락 반등 매수 (AI 판단)\n"
+                    f"가격: {current_price:,}원"
                 )
                 bought += 1
                 results.append(f"✅ {name} 매수")
