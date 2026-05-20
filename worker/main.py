@@ -3266,6 +3266,12 @@ def run_check(check_mode: str = "all"):
                                 pass
                 except Exception as e:
                     logger.error(f"AI API 오류: {e}")
+                    if not claude_opinion:
+                        claude_opinion = (
+                            "[홀드]\n"
+                            "• 근거1: AI 응답 오류/레이트리밋으로 레거시 안전모드 전환\n"
+                            "• 근거2: 다음 주기 재평가"
+                        )
 
             # DART 공시 요약 (AI에게 전달된 것과 동일한 내용 저장)
             dart_summary = None

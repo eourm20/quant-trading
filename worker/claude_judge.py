@@ -40,6 +40,25 @@ def _is_rate_limit_error(exc: Exception) -> bool:
         or "tpm" in msg
     )
 
+
+def _extract_openai_chat_text(resp) -> str:
+    """OpenAI chat.completions 응답에서 텍스트를 안전 추출."""
+    try:
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return ""
+        msg = getattr(choices[0], "message", None)
+        if msg is None:
+            return ""
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return content
+        if content is None:
+            return ""
+        return str(content)
+    except Exception:
+        return ""
+
 _TRADING_KNOWLEDGE = """## 트레이딩 분석 지식 (기술적 분석 프레임워크)
 
 ### 1. 캔들 분석
@@ -311,7 +330,7 @@ def _call_mini(prompt: str, max_tokens: int = 200) -> str:
                 model=MODEL_MINI, max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return (resp.choices[0].message.content or "").strip()
+            return _extract_openai_chat_text(resp).strip()
     except Exception as e:
         logger.debug(f"[mini] 호출 실패: {e}")
         return ""
@@ -1531,7 +1550,7 @@ def _is_high_priority_signal(signal) -> bool:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content
+        return _extract_openai_chat_text(response)
 
 
 def get_dip_buy_opinion(
@@ -1659,7 +1678,7 @@ def get_dip_buy_opinion(
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content
+        return _extract_openai_chat_text(response)
 
 
 def get_news_risk_assessment(
@@ -1725,7 +1744,7 @@ def get_news_risk_assessment(
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            text = response.choices[0].message.content or ""
+            text = _extract_openai_chat_text(response)
     except Exception as e:
         return {
             "risk_level": "incomplete_context",
@@ -1898,7 +1917,7 @@ JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            text = response.choices[0].message.content
+            text = _extract_openai_chat_text(response)
 
         # JSON 파싱 (마크다운 코드블록 제거 + 숫자 내 쉼표 처리)
         import re
