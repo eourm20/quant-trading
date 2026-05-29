@@ -2366,14 +2366,21 @@ def _auto_execute(
         if any(tok in first for tok in ("[hold]", "hold", "홀드", "관망")):
             return None, None
 
-        buy_tokens = ("[매수]", "[추가매수", "[물타기", " 매수", "매수 ", "buy", "entry")
+        buy_tokens = ("[매수]", "[추가매수", "[물타기", "신규매수", " 매수", "매수 ", "buy", "entry")
         sell_tokens = ("[매도]", " 매도", "매도 ", "sell", "exit")
 
         # 1) 첫 줄에 명시된 단일 verdict를 최우선 사용
         first_compact = first.replace(" ", "")
         if first_compact.startswith("[매도]") or first_compact.startswith("매도"):
             return "2", "매도"
-        if first_compact.startswith("[매수]") or first_compact.startswith("[추가매수") or first_compact.startswith("[물타기"):
+        if (
+            first_compact.startswith("[매수]")
+            or first_compact.startswith("[추가매수")
+            or first_compact.startswith("[물타기")
+            or first_compact.startswith("매수(")
+            or first_compact.startswith("매수:")
+            or first_compact.startswith("신규매수")
+        ):
             return "1", "매수"
         if first.startswith("[sell]") or first.startswith("sell") or first.startswith("exit"):
             return "2", "매도"
@@ -2660,14 +2667,24 @@ def _auto_execute(
                 )
                 qty = weak_cap
 
+    trade_flavor = ""
+    if order_type == "1":
+        if bool(getattr(signal, "in_portfolio", False)):
+            add_mode = str(getattr(signal, "add_signal_mode", "") or "").strip().lower()
+            trade_flavor = "물타기" if add_mode == "averaging_down" else "추가매수"
+        else:
+            trade_flavor = "신규매수"
+    elif order_type == "2":
+        trade_flavor = "전량매도" if (held_qty_before > 0 and qty >= held_qty_before) else "부분손절"
+
     try:
         result = kiwoom.place_order(signal.stock_code, order_type, qty, price=order_price, order_market=order_market)
         ord_no = result.get("ord_no") or result.get("order_no") or "-"
         logger.info(
-            f"[{signal.stock_name}] 자동 {side}: {qty}주, 주문시장 {order_market or '기본값'}, 주문번호 {ord_no}"
+            f"[{signal.stock_name}] 자동 {side}({trade_flavor}): {qty}주, 주문시장 {order_market or '기본값'}, 주문번호 {ord_no}"
         )
         send_message(
-            f"🤖 *자동 {side} 주문 접수*\n"
+            f"🤖 *자동 {side}({trade_flavor}) 주문 접수*\n"
             f"종목: *{signal.stock_name}* (`{signal.stock_code}`)\n"
             f"수량: *{qty:,}주* (시장가)\n"
             f"주문시장: *{order_market or '기본값'}*\n"
@@ -2701,13 +2718,14 @@ def _auto_execute(
             update_signal_action(signal_id, side)
         save_strategy_note(
             "trade",
-            f"{signal.stock_name} {qty}주 {side} (자동 매매)",
+            f"{signal.stock_name} {qty}주 {side}({trade_flavor}) (자동 매매)",
             meta={
                 "type": "auto_trade_execution",
                 "signal_id": signal_id,
                 "stock_code": signal.stock_code,
                 "stock_name": signal.stock_name,
                 "side": side,
+                "trade_flavor": trade_flavor,
                 "order_type": order_type,
                 "quantity": qty,
                 "price_hint": signal.current_price or order_price,

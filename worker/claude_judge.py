@@ -59,6 +59,55 @@ def _extract_openai_chat_text(resp) -> str:
     except Exception:
         return ""
 
+
+def _normalize_trade_opinion_text(raw_text: str) -> str:
+    """LLM 자유서술 판단을 고정 포맷으로 정규화한다.
+
+    첫 줄 verdict를 반드시 [매수]/[매도]/[홀드] 중 하나로 강제한다.
+    나머지 본문은 원문을 최대한 유지한다.
+    """
+    text = str(raw_text or "").strip()
+    if not text:
+        return "[홀드]\n• 근거: 모델 응답 없음"
+
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    non_empty = [ln.strip() for ln in lines if ln.strip()]
+    first = non_empty[0] if non_empty else ""
+    f = first.lower().replace(" ", "")
+
+    def _pick_verdict() -> str:
+        if any(k in f for k in ("[매도]", "매도", "sell", "exit")):
+            return "매도"
+        if any(k in f for k in ("[홀드]", "홀드", "hold", "관망")):
+            return "홀드"
+        if any(k in f for k in ("[매수]", "매수", "buy", "entry", "추가매수", "물타기", "신규매수", "매수(신규매수)", "매수(신규")):
+            return "매수"
+        # 첫 줄 미검출 시 본문 상단에서 재검출
+        head = "\n".join(non_empty[:3]).lower().replace(" ", "")
+        if any(k in head for k in ("매도", "sell", "exit")):
+            return "매도"
+        if any(k in head for k in ("매수", "buy", "entry", "추가매수", "물타기", "신규매수")):
+            return "매수"
+        return "홀드"
+
+    verdict = _pick_verdict()
+    canonical_head = f"[{verdict}]"
+
+    # 기존 첫 줄이 이미 bracket verdict면 교체, 아니면 prepend
+    if non_empty:
+        # 원본 라인 인덱스 찾기
+        first_idx = next((i for i, ln in enumerate(lines) if ln.strip()), 0)
+        if lines[first_idx].strip().startswith("[") and "]" in lines[first_idx]:
+            lines[first_idx] = canonical_head
+            body = "\n".join(lines).strip()
+        else:
+            body = "\n".join(lines).strip()
+            body = f"{canonical_head}\n{body}"
+    else:
+        body = canonical_head
+
+    return body
+
 _TRADING_KNOWLEDGE = """## 트레이딩 분석 지식 (기술적 분석 프레임워크)
 
 ### 1. 캔들 분석
@@ -1337,7 +1386,7 @@ def _legacy_get_trade_opinion(
 - [임계값]: 기존 설정 유지가 기본. 구조적 오류일 때만 변경 제안. 기존값 대비 ±3 초과 금지. 허용 필드: rsi_overbought/rsi_oversold_intraday/volume_surge_ratio
 
 ## 출력 형식 (반드시 준수)
-[매수 or 추가매수(매수) or 물타기(매수) or 매도 or 홀드]
+[매수 or 홀드]
 • 근거1: (필수, 1문장)
 • 근거2: (선택, 1문장)
 • 근거3: (선택, 1문장)
@@ -1540,7 +1589,7 @@ def _is_high_priority_signal(signal) -> bool:
             ],
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return response.content[0].text
+        return _normalize_trade_opinion_text(response.content[0].text)
     else:
         response = _client.chat.completions.create(
             model=MODEL,
@@ -1550,7 +1599,7 @@ def _is_high_priority_signal(signal) -> bool:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return _extract_openai_chat_text(response)
+        return _normalize_trade_opinion_text(_extract_openai_chat_text(response))
 
 
 def get_dip_buy_opinion(
@@ -1631,7 +1680,7 @@ def get_dip_buy_opinion(
 - 물타기 여력이 있으면 첫 진입은 보수적으로 (목표 비중의 50~70%)
 
 ## 출력 형식 (반드시 준수)
-[매수 or 홀드]
+[매수 or 매도 or 홀드]
 • 근거1: (1~2문장)
 • 근거2: (1~2문장)
 [주문시장] KRX (홀드이면 생략, 모의투자는 KRX만 허용)
@@ -1668,7 +1717,7 @@ def get_dip_buy_opinion(
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return response.content[0].text
+        return _normalize_trade_opinion_text(response.content[0].text)
     else:
         response = _client.chat.completions.create(
             model=MODEL,
@@ -1678,7 +1727,7 @@ def get_dip_buy_opinion(
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return _extract_openai_chat_text(response)
+        return _normalize_trade_opinion_text(_extract_openai_chat_text(response))
 
 
 def get_news_risk_assessment(

@@ -1,4 +1,4 @@
-"""
+﻿"""
 텔레그램 알림
 """
 
@@ -205,6 +205,16 @@ def _parse_qty_rec(claude_opinion: str) -> int | None:
 
 def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list | None = None, signal_id: int | None = None, auto_mode: bool = False) -> bool:
     conditions_text = "\n".join(f"  • {c}" for c in signal.triggered_conditions)
+    signal_type = str(getattr(signal, "signal_type", "") or "").strip().lower()
+    add_mode = str(getattr(signal, "add_signal_mode", "") or "").strip().lower()
+    if signal_type == "exit":
+        signal_kind = "매도 신호"
+    elif signal_type == "add":
+        signal_kind = "물타기 신호" if add_mode == "averaging_down" else "추가매수 신호"
+    elif signal_type == "entry":
+        signal_kind = "신규매수 신호"
+    else:
+        signal_kind = "매매 신호"
 
     # 보유 중이면 매입가/수량/수익률 표시
     holding_line = ""
@@ -236,7 +246,7 @@ def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list 
     qty_rec_line = f"🎯 AI 추천 수량: *{rec_qty:,}주*\n" if rec_qty else ""
 
     signal_text = (
-        f"🚨 *{name}* ({code}) 신호 감지\n\n"
+        f"🚨 *{name}* ({code}) {signal_kind}\n\n"
         f"💰 현재가: *{signal.current_price:,}원*\n"
         f"{holding_line}"
         f"📊 RSI: {signal.rsi if signal.rsi else 'N/A'}\n"

@@ -1,4 +1,4 @@
-"""
+﻿"""
 텔레그램 봇 — 양방향 매매 명령 수신 + 실행
 - /buy 종목코드or이름 수량  : 시장가 매수 요청
 - /sell 종목코드or이름 수량 : 시장가 매도 요청
@@ -1128,6 +1128,21 @@ class TelegramBot:
             f"({price_label}, {order.order_market or '기본'}) 주문 전송 중..."
         )
 
+        held_qty_before = 0
+        try:
+            from data.db import get_portfolio
+            held_qty_before = next(
+                (int(h.get("quantity") or 0) for h in get_portfolio() if str(h.get("stock_code", "")) == order.stock_code),
+                0,
+            )
+        except Exception:
+            held_qty_before = 0
+
+        if order.order_type == "1":
+            trade_flavor = "물타기" if held_qty_before > 0 else "신규매수"
+        else:
+            trade_flavor = "전량매도" if (held_qty_before > 0 and order.qty >= held_qty_before) else "부분손절"
+
         try:
             result = self._kiwoom.place_order(
                 order.stock_code, order.order_type, order.qty,
@@ -1135,13 +1150,13 @@ class TelegramBot:
             )
             ord_no = result.get("ord_no") or result.get("order_no") or "-"
             self._send(
-                f"✅ *{order.side_label} 주문 접수 완료*\n\n"
+                f"✅ *{order.side_label}({trade_flavor}) 주문 접수 완료*\n\n"
                 f"종목: *{order.stock_name}* (`{order.stock_code}`)\n"
                 f"수량: *{order.qty:,}주* ({price_label})\n"
                 f"주문시장: *{order.order_market or '기본'}*\n"
                 f"주문번호: `{ord_no}`"
             )
-            logger.info(f"[bot] {order.side_label} 주문 완료: {order.stock_name} {order.qty}주 → 주문번호 {ord_no}")
+            logger.info(f"[bot] {order.side_label}({trade_flavor}) 주문 완료: {order.stock_name} {order.qty}주 → 주문번호 {ord_no}")
 
             # 모의투자: 체결내역 API 미지원 → trades 테이블에 직접 기록
             if getattr(self._kiwoom, "_is_mock", False):
@@ -1221,11 +1236,17 @@ class TelegramBot:
                 from data.db import save_strategy_note
                 save_strategy_note(
                     "trade",
-                    f"{order.stock_name} {order.qty}주 {order.side_label} (텔레그램 봇)",
+                    f"{order.stock_name} {order.qty}주 {order.side_label}({trade_flavor}) (텔레그램 봇)",
                     f"주문번호: {ord_no}",
                 )
             except Exception:
                 pass
+
+            try:
+                from worker.portfolio_sync import sync_all as _sync_all
+                _sync_all(self._kiwoom)
+            except Exception as e:
+                logger.warning(f"[bot] 체결 후 portfolio sync 실패: {e}")
 
         except Exception as e:
             logger.error(f"[bot] 주문 실패: {e}")
