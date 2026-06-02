@@ -3531,6 +3531,22 @@ def main():
     scheduler.add_job(lambda: _run_on_open_day("update_trade_results", update_trade_results), "cron",
                       day_of_week="mon-fri", hour="9-18", minute="*/30",
                       id="trade_result_update")
+
+    def _repair_verdicts():
+        try:
+            from data.db import repair_missing_verdicts
+            result = repair_missing_verdicts(limit=500, days_back=180)
+            logger.info("[verdict_repair] repaired=%d still_null=%d no_opinion=%d",
+                        result["repaired"], result["still_null"], result["still_no_opinion"])
+        except Exception as e:
+            logger.warning("[verdict_repair] 실패: %s", e)
+
+    # 매일 장마감 후 1회: 미판정 신호 verdict 재파싱 복구
+    scheduler.add_job(_repair_verdicts, "cron",
+                      day_of_week="mon-fri", hour=16, minute=35,
+                      id="verdict_repair")
+    # 서버 시작 시 1회 즉시 실행
+    _repair_verdicts()
     news_monitor_times = str(_WORKER_CONFIG.get("news_monitor_times", "8:55,12:00") or "").strip()
     for idx, token in enumerate(news_monitor_times.split(","), start=1):
         t = token.strip()

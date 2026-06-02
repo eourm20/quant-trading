@@ -24,6 +24,8 @@ DB_PATH = _env_db or _default_db
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -2332,6 +2334,56 @@ def save_signal(
         signal_id = cur.lastrowid
 
     return signal_id
+
+
+def repair_missing_verdicts(limit: int = 500, days_back: int = 180) -> dict:
+    """verdict=NULL 신호를 claude_opinion 재파싱으로 복구 (API 비용 없음).
+
+    claude_opinion이 있으면 _extract_verdict로만 복구.
+    claude_opinion도 NULL이면 복구 불가 → still_no_opinion 카운트.
+    Returns: {"repaired": N, "still_null": M, "still_no_opinion": K}
+    """
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, claude_opinion FROM signals "
+            "WHERE verdict IS NULL AND substr(created_at, 1, 10) >= ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+
+        repaired = 0
+        no_opinion = 0
+        for row in rows:
+            opinion = row["claude_opinion"] if hasattr(row, "__getitem__") else row[1]
+            if not opinion:
+                no_opinion += 1
+                continue
+            verdict = _extract_verdict(opinion)
+            if verdict:
+                conn.execute(
+                    "UPDATE signals SET verdict = ? WHERE id = ?",
+                    (verdict, row["id"] if hasattr(row, "__getitem__") else row[0]),
+                )
+                repaired += 1
+        conn.commit()
+
+        still_null = conn.execute(
+            "SELECT COUNT(*) FROM signals "
+            "WHERE verdict IS NULL AND claude_opinion IS NOT NULL "
+            "AND substr(created_at, 1, 10) >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+
+    return {
+        "repaired": repaired,
+        "still_null": int(still_null),
+        "still_no_opinion": no_opinion,
+        "days_back": days_back,
+        "limit": limit,
+    }
 
 
 def update_signal_agent_trace(
