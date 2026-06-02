@@ -288,18 +288,35 @@ def _f(value) -> float:
 HOLD_NEUTRAL_BAND_PCT = max(0.0, float(os.getenv("HOLD_NEUTRAL_BAND_PCT", "1.0")))
 
 
-def _is_verdict_hit_3d(verdict: str | None, return_3d: float | None, hold_band_pct: float = HOLD_NEUTRAL_BAND_PCT) -> bool:
-    if verdict is None or return_3d is None:
+def _combined_result(r1d, r3d, r5d, r10d) -> float | None:
+    """1일·3일·5일·10일 중 있는 결과의 평균 (종합 수익률)."""
+    vals = [float(v) for v in [r1d, r3d, r5d, r10d] if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _is_verdict_hit(verdict: str | None, combined: float | None, hold_band_pct: float = HOLD_NEUTRAL_BAND_PCT) -> bool:
+    """판정별 승리 조건 — 종합 수익률 기준.
+
+    매수: combined > 0
+    매도: combined < 0
+    홀드: |combined| ≤ band (±1%)
+    """
+    if verdict is None or combined is None:
         return False
     band = max(0.0, float(hold_band_pct))
-    r3 = float(return_3d)
+    r = float(combined)
     if verdict == "매수":
-        return r3 > band
+        return r > 0
     if verdict == "매도":
-        return r3 < -band
+        return r < 0
     if verdict == "홀드":
-        return -band <= r3 <= band
+        return -band <= r <= band
     return False
+
+
+# 하위 호환: 기존 3일 기준 함수 유지
+def _is_verdict_hit_3d(verdict: str | None, return_3d: float | None, hold_band_pct: float = HOLD_NEUTRAL_BAND_PCT) -> bool:
+    return _is_verdict_hit(verdict, return_3d, hold_band_pct)
 
 
 _WL_SIGNAL_FIELDS = (
@@ -2615,43 +2632,74 @@ def delete_all_signals() -> int:
 
 def get_verdict_accuracy(days: int = 14) -> dict:
     """최근 N일간 AI 판정(verdict)별 적중률 통계.
-    result_1d/result_pct(3d)/result_5d 가 채워진 신호만 집계.
-    Returns: {verdict: {count, avg_1d, avg_3d, avg_5d, hit_rate_3d}}
+
+    종합 수익률 = 1일·3일·5일·10일 중 있는 결과의 평균.
+    승리 조건: 매수>0, 매도<0, 홀드 ±1% 이내.
+    Returns: {verdict: {count, avg_combined, avg_1d, avg_3d, avg_5d, avg_10d, hit_rate}}
     """
     since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
     with get_conn() as conn:
-        rows = conn.execute(
-            """SELECT verdict, result_1d, result_pct, result_5d
-               FROM signals
-               WHERE created_at >= ? AND verdict IS NOT NULL
-                 AND result_pct IS NOT NULL""",
-            (since,),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """SELECT verdict, result_1d, result_pct, result_5d, result_10d
+                   FROM signals
+                   WHERE created_at >= ? AND verdict IS NOT NULL
+                     AND (result_1d IS NOT NULL OR result_pct IS NOT NULL
+                          OR result_5d IS NOT NULL OR result_10d IS NOT NULL)""",
+                (since,),
+            ).fetchall()
+        except Exception:
+            # result_10d 컬럼이 없는 구버전 DB 폴백
+            rows = conn.execute(
+                """SELECT verdict, result_1d, result_pct, result_5d, NULL as result_10d
+                   FROM signals
+                   WHERE created_at >= ? AND verdict IS NOT NULL
+                     AND (result_1d IS NOT NULL OR result_pct IS NOT NULL OR result_5d IS NOT NULL)""",
+                (since,),
+            ).fetchall()
+
     stats: dict = {}
     for r in rows:
         v = r["verdict"]
+        combined = _combined_result(r["result_1d"], r["result_pct"], r["result_5d"], r["result_10d"])
+        if combined is None:
+            continue
         if v not in stats:
-            stats[v] = {"count": 0, "sum_1d": 0.0, "sum_3d": 0.0, "sum_5d": 0.0, "hit_3d": 0, "n_1d": 0, "n_5d": 0}
+            stats[v] = {
+                "count": 0, "hits": 0,
+                "sum_combined": 0.0,
+                "sum_1d": 0.0, "n_1d": 0,
+                "sum_3d": 0.0, "n_3d": 0,
+                "sum_5d": 0.0, "n_5d": 0,
+                "sum_10d": 0.0, "n_10d": 0,
+            }
         s = stats[v]
         s["count"] += 1
-        r3 = r["result_pct"] or 0
-        s["sum_3d"] += r3
-        if _is_verdict_hit_3d(v, r3):
-            s["hit_3d"] += 1
+        s["sum_combined"] += combined
+        if _is_verdict_hit(v, combined):
+            s["hits"] += 1
         if r["result_1d"] is not None:
-            s["sum_1d"] += r["result_1d"]
-            s["n_1d"] += 1
+            s["sum_1d"] += float(r["result_1d"]); s["n_1d"] += 1
+        if r["result_pct"] is not None:
+            s["sum_3d"] += float(r["result_pct"]); s["n_3d"] += 1
         if r["result_5d"] is not None:
-            s["sum_5d"] += r["result_5d"]
-            s["n_5d"] += 1
+            s["sum_5d"] += float(r["result_5d"]); s["n_5d"] += 1
+        if r["result_10d"] is not None:
+            s["sum_10d"] += float(r["result_10d"]); s["n_10d"] += 1
+
     result = {}
     for v, s in stats.items():
+        cnt = s["count"]
         result[v] = {
-            "count": s["count"],
+            "count": cnt,
+            "avg_combined": round(s["sum_combined"] / cnt, 2) if cnt else None,
+            "hit_rate": round(s["hits"] / cnt * 100, 1) if cnt else None,
             "avg_1d": round(s["sum_1d"] / s["n_1d"], 2) if s["n_1d"] else None,
-            "avg_3d": round(s["sum_3d"] / s["count"], 2) if s["count"] else None,
+            "avg_3d": round(s["sum_3d"] / s["n_3d"], 2) if s["n_3d"] else None,
             "avg_5d": round(s["sum_5d"] / s["n_5d"], 2) if s["n_5d"] else None,
-            "hit_rate_3d": round(s["hit_3d"] / s["count"] * 100, 1) if s["count"] else None,
+            "avg_10d": round(s["sum_10d"] / s["n_10d"], 2) if s["n_10d"] else None,
+            # 하위 호환 필드
+            "hit_rate_3d": round(s["hits"] / cnt * 100, 1) if cnt else None,
         }
     return result
 
