@@ -235,6 +235,12 @@ def check_stock(
             return None
 
         sector_code = str(price_data.get("upjong_cd") or "").strip() or None
+        if sector_code and not stock.get("sector_code"):
+            try:
+                from data.db import update_stock_field
+                update_stock_field(code, "sector_code", sector_code)
+            except Exception:
+                pass
 
         # 일목균형표(52일) + 차트패턴(60일+) + 여유분으로 90일치 데이터 조회
         daily_data = client.get_daily_ohlcv(code, period=90)

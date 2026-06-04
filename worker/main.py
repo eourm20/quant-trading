@@ -730,11 +730,12 @@ def run_opening_report():
             pct = _extract_change_pct(pd)
             turnover = _extract_trade_value(pd)
             total_turnover += turnover
+            sector_code = str(pd.get("upjong_cd") or "").strip() or stock.get("sector_code")
             movers.append({
                 "code": code,
                 "name": name,
                 "pct": pct,
-                "sector_code": stock.get("sector_code"),
+                "sector_code": sector_code,
             })
             time.sleep(0.1)
 
@@ -747,7 +748,16 @@ def run_opening_report():
         for m in top_up:
             key = str(m.get("sector_code") or "unknown")
             sector_score[key] = sector_score.get(key, 0) + 1
-        lead_sector = max(sector_score.items(), key=lambda x: x[1])[0] if sector_score else "unknown"
+        lead_sector_code = max(sector_score.items(), key=lambda x: x[1])[0] if sector_score else "unknown"
+        lead_sector = lead_sector_code
+        if lead_sector_code and lead_sector_code != "unknown":
+            try:
+                _sec = kiwoom.get_sector_index(lead_sector_code)
+                _nm = str(_sec.get("upjong_nm") or "").strip()
+                if _nm:
+                    lead_sector = _nm
+            except Exception:
+                pass
 
         pre = get_latest_market_report(report_type="premarket", report_date=today) or {}
         expected = str(pre.get("market_regime") or "")
