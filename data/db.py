@@ -294,23 +294,21 @@ def _combined_result(r1d, r3d, r5d, r10d) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
-def _is_verdict_hit(verdict: str | None, combined: float | None, hold_band_pct: float = HOLD_NEUTRAL_BAND_PCT) -> bool:
-    """판정별 승리 조건 — 종합 수익률 기준.
+def _is_verdict_hit(verdict: str | None, r: float | None, hold_band_pct: float = HOLD_NEUTRAL_BAND_PCT) -> bool:
+    """판정별 승리 조건.
 
-    매수: combined > 0
-    매도: combined < 0
-    홀드: |combined| ≤ band (±1%)
+    매수: r > 0
+    매도: r < 0
+    홀드: 방향 근거 없음 → 승률 계산 제외 (항상 False)
     """
-    if verdict is None or combined is None:
+    if verdict is None or r is None:
         return False
-    band = max(0.0, float(hold_band_pct))
-    r = float(combined)
+    v = float(r)
     if verdict == "매수":
-        return r > 0
+        return v > 0
     if verdict == "매도":
-        return r < 0
-    if verdict == "홀드":
-        return -band <= r <= band
+        return v < 0
+    # 홀드/기타: 임의 ±1% 기준에 근거 없어 승률 계산에서 제외
     return False
 
 
@@ -2633,9 +2631,9 @@ def delete_all_signals() -> int:
 def get_verdict_accuracy(days: int = 14) -> dict:
     """최근 N일간 AI 판정(verdict)별 적중률 통계.
 
-    종합 수익률 = 1일·3일·5일·10일 중 있는 결과의 평균.
-    승리 조건: 매수>0, 매도<0, 홀드 ±1% 이내.
-    Returns: {verdict: {count, avg_combined, avg_1d, avg_3d, avg_5d, avg_10d, hit_rate}}
+    승률은 매수/매도만 집계 (홀드는 방향 근거 없어 제외).
+    1일(단기) / 10일(장기) 각각 별도 집계.
+    Returns: {verdict: {count, hit_rate_1d, hit_rate_10d, avg_1d, avg_10d, ...}}
     """
     since = (_now_kst() - timedelta(days=days)).strftime("%Y-%m-%d")
     with get_conn() as conn:
@@ -2649,7 +2647,6 @@ def get_verdict_accuracy(days: int = 14) -> dict:
                 (since,),
             ).fetchall()
         except Exception:
-            # result_10d 컬럼이 없는 구버전 DB 폴백
             rows = conn.execute(
                 """SELECT verdict, result_1d, result_pct, result_5d, NULL as result_10d
                    FROM signals
@@ -2658,49 +2655,53 @@ def get_verdict_accuracy(days: int = 14) -> dict:
                 (since,),
             ).fetchall()
 
+    EVALUABLE = {"매수", "매도"}
+
     stats: dict = {}
     for r in rows:
         v = r["verdict"]
-        combined = _combined_result(r["result_1d"], r["result_pct"], r["result_5d"], r["result_10d"])
-        if combined is None:
-            continue
         if v not in stats:
             stats[v] = {
-                "count": 0, "hits": 0,
-                "sum_combined": 0.0,
-                "sum_1d": 0.0, "n_1d": 0,
+                "count": 0,
+                "sum_1d": 0.0, "n_1d": 0, "hits_1d": 0,
                 "sum_3d": 0.0, "n_3d": 0,
                 "sum_5d": 0.0, "n_5d": 0,
-                "sum_10d": 0.0, "n_10d": 0,
+                "sum_10d": 0.0, "n_10d": 0, "hits_10d": 0,
             }
         s = stats[v]
         s["count"] += 1
-        s["sum_combined"] += combined
-        if _is_verdict_hit(v, combined):
-            s["hits"] += 1
         if r["result_1d"] is not None:
-            s["sum_1d"] += float(r["result_1d"]); s["n_1d"] += 1
+            r1 = float(r["result_1d"])
+            s["sum_1d"] += r1; s["n_1d"] += 1
+            if v in EVALUABLE and _is_verdict_hit(v, r1):
+                s["hits_1d"] += 1
         if r["result_pct"] is not None:
             s["sum_3d"] += float(r["result_pct"]); s["n_3d"] += 1
         if r["result_5d"] is not None:
             s["sum_5d"] += float(r["result_5d"]); s["n_5d"] += 1
         if r["result_10d"] is not None:
-            s["sum_10d"] += float(r["result_10d"]); s["n_10d"] += 1
+            r10 = float(r["result_10d"])
+            s["sum_10d"] += r10; s["n_10d"] += 1
+            if v in EVALUABLE and _is_verdict_hit(v, r10):
+                s["hits_10d"] += 1
 
     result = {}
     for v, s in stats.items():
-        cnt = s["count"]
-        result[v] = {
-            "count": cnt,
-            "avg_combined": round(s["sum_combined"] / cnt, 2) if cnt else None,
-            "hit_rate": round(s["hits"] / cnt * 100, 1) if cnt else None,
-            "avg_1d": round(s["sum_1d"] / s["n_1d"], 2) if s["n_1d"] else None,
+        n1, n10 = s["n_1d"], s["n_10d"]
+        entry: dict = {
+            "count": s["count"],
+            "avg_1d": round(s["sum_1d"] / n1, 2) if n1 else None,
             "avg_3d": round(s["sum_3d"] / s["n_3d"], 2) if s["n_3d"] else None,
             "avg_5d": round(s["sum_5d"] / s["n_5d"], 2) if s["n_5d"] else None,
-            "avg_10d": round(s["sum_10d"] / s["n_10d"], 2) if s["n_10d"] else None,
-            # 하위 호환 필드
-            "hit_rate_3d": round(s["hits"] / cnt * 100, 1) if cnt else None,
+            "avg_10d": round(s["sum_10d"] / n10, 2) if n10 else None,
         }
+        if v in EVALUABLE:
+            entry["hit_rate_1d"] = round(s["hits_1d"] / n1 * 100, 1) if n1 else None
+            entry["hit_rate_10d"] = round(s["hits_10d"] / n10 * 100, 1) if n10 else None
+        # 하위 호환
+        entry["hit_rate"] = entry.get("hit_rate_1d")
+        entry["hit_rate_3d"] = entry.get("hit_rate_1d")
+        result[v] = entry
     return result
 
 

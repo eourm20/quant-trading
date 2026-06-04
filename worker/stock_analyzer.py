@@ -2149,14 +2149,24 @@ def run_daily_review():
         rate = p.get("profit_rate", 0)
         port_lines.append(f"  {p.get('stock_name','')} {rate:+.1f}%")
 
-    # 적중률 요약
+    # 적중률 요약 — 매수/매도만 승률 집계, 홀드는 평균만 표시
     acc_lines = []
     for v, a in accuracy_14d.items():
-        hit = a.get("hit_rate_3d")
-        avg3 = a.get("avg_3d")
         cnt = int(a.get("count", 0) or 0)
-        if acc_ready and hit is not None and avg3 is not None:
-            acc_lines.append(f"  {v}: {cnt}건, 적중률 {hit}%, 평균3일 {avg3:+.1f}%")
+        avg1 = a.get("avg_1d")
+        avg10 = a.get("avg_10d")
+        hit1 = a.get("hit_rate_1d")
+        hit10 = a.get("hit_rate_10d")
+        if v == "홀드":
+            avg_str = f"1일평균 {avg1:+.1f}%" if avg1 is not None else "결과없음"
+            acc_lines.append(f"  {v}: {cnt}건, {avg_str} (승률집계제외)")
+        elif acc_ready:
+            parts = []
+            if hit1 is not None and avg1 is not None:
+                parts.append(f"1일 승률 {hit1}% 평균 {avg1:+.1f}%")
+            if hit10 is not None and avg10 is not None:
+                parts.append(f"10일 승률 {hit10}% 평균 {avg10:+.1f}%")
+            acc_lines.append(f"  {v}: {cnt}건, " + (" / ".join(parts) if parts else "결과없음"))
         else:
             acc_lines.append(f"  {v}: {cnt}건, 표본부족으로 성과판단 보류")
 
