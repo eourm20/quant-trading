@@ -484,6 +484,27 @@ def harness_check(signal, holdings: list) -> str:
         )
         return HARNESS_SKIP
 
+    # ── SKIP: 오늘 홀드 판단 5회 이상 + 강한 전환 신호 없음 ──
+    if not any(k in triggered_text for k in strong_kw):
+        try:
+            from data.db import get_conn as _gc
+            from datetime import date as _date
+            today = str(_date.today())
+            with _gc() as conn:
+                hold_cnt = conn.execute(
+                    "SELECT COUNT(*) FROM signals "
+                    "WHERE stock_code=? AND created_at>=? "
+                    "AND (claude_opinion LIKE '[홀드]%' OR claude_opinion LIKE '홀드%')",
+                    (signal.stock_code, today),
+                ).fetchone()[0]
+            if hold_cnt >= 5:
+                logger.info(
+                    f"[하네스] {signal.stock_name}: 오늘 홀드 {hold_cnt}회 → SKIP"
+                )
+                return HARNESS_SKIP
+        except Exception:
+            pass
+
     return HARNESS_AMBIGUOUS
 
 
