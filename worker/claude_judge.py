@@ -472,25 +472,6 @@ def harness_check(signal, holdings: list) -> str:
     # Direct sell in harness is intentionally limited to stop-loss breach only.
     # Other sell scenarios are delegated to AI judgment for horizon/context-aware decisions.
 
-    # ── SKIP: 오늘 홀드 판단 3회 이상 ──
-    try:
-        from data.db import get_conn as _gc
-        from datetime import date as _date
-        today = str(_date.today())
-        with _gc() as conn:
-            hold_cnt = conn.execute(
-                "SELECT COUNT(*) FROM signals "
-                "WHERE stock_code=? AND created_at>=? "
-                "AND (claude_opinion LIKE '[홀드]%' OR claude_opinion LIKE '홀드%')",
-                (signal.stock_code, today),
-            ).fetchone()[0]
-        if hold_cnt >= 3:
-            logger.info(
-                f"[하네스] {signal.stock_name}: 오늘 홀드 {hold_cnt}회 → SKIP"
-            )
-            return HARNESS_SKIP
-    except Exception:
-        pass
 
     # ── SKIP: RSI 중립 + 거래량 매우 약 + 전환 신호 없음 ──
     strong_kw = ("골든크로스", "데드크로스", "과매도", "볼린저", "이탈", "돌파", "급등")
