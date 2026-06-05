@@ -104,7 +104,14 @@ def _fetch_alpha(params: dict[str, str]) -> dict:
                 "from_currency": params.get("from_currency"),
                 "to_currency": params.get("to_currency"),
             }
-            if "Error Message" in data or "Information" in data or "Note" in data:
+            # "Information" = 일일 한도(25회) 초과 → 재시도해도 소용없음, 즉시 포기
+            if "Information" in data:
+                logger.warning(
+                    f"Alpha Vantage daily quota exceeded — aborting without retry "
+                    f"(params={params_brief}): {data.get('Information', '')[:120]}"
+                )
+                return {}
+            if "Error Message" in data or "Note" in data:
                 logger.warning(
                     f"Alpha Vantage response warning (attempt {attempt + 1}/{_ALPHA_MAX_RETRIES + 1}, "
                     f"params={params_brief}): {data}"
