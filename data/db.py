@@ -2641,17 +2641,27 @@ def get_verdict_accuracy(days: int = 14) -> dict:
             rows = conn.execute(
                 """SELECT verdict, result_1d, result_pct, result_5d, result_10d
                    FROM signals
-                   WHERE created_at >= ? AND verdict IS NOT NULL
-                     AND (result_1d IS NOT NULL OR result_pct IS NOT NULL
-                          OR result_5d IS NOT NULL OR result_10d IS NOT NULL)""",
+                   WHERE id IN (
+                       SELECT MIN(id)
+                       FROM signals
+                       WHERE created_at >= ? AND verdict IS NOT NULL
+                         AND (result_1d IS NOT NULL OR result_pct IS NOT NULL
+                              OR result_5d IS NOT NULL OR result_10d IS NOT NULL)
+                       GROUP BY stock_code, DATE(created_at), triggered_conditions
+                   )""",
                 (since,),
             ).fetchall()
         except Exception:
             rows = conn.execute(
                 """SELECT verdict, result_1d, result_pct, result_5d, NULL as result_10d
                    FROM signals
-                   WHERE created_at >= ? AND verdict IS NOT NULL
-                     AND (result_1d IS NOT NULL OR result_pct IS NOT NULL OR result_5d IS NOT NULL)""",
+                   WHERE id IN (
+                       SELECT MIN(id)
+                       FROM signals
+                       WHERE created_at >= ? AND verdict IS NOT NULL
+                         AND (result_1d IS NOT NULL OR result_pct IS NOT NULL OR result_5d IS NOT NULL)
+                       GROUP BY stock_code, DATE(created_at), triggered_conditions
+                   )""",
                 (since,),
             ).fetchall()
 
@@ -2685,11 +2695,13 @@ def get_verdict_accuracy(days: int = 14) -> dict:
             if v in EVALUABLE and _is_verdict_hit(v, r10):
                 s["hits_10d"] += 1
 
+    MIN_RELIABLE_SAMPLES = 5
     result = {}
     for v, s in stats.items():
         n1, n10 = s["n_1d"], s["n_10d"]
         entry: dict = {
             "count": s["count"],
+            "low_sample": s["count"] < MIN_RELIABLE_SAMPLES,
             "avg_1d": round(s["sum_1d"] / n1, 2) if n1 else None,
             "avg_3d": round(s["sum_3d"] / s["n_3d"], 2) if s["n_3d"] else None,
             "avg_5d": round(s["sum_5d"] / s["n_5d"], 2) if s["n_5d"] else None,
@@ -2997,7 +3009,12 @@ def get_condition_accuracy(days: int = 30, min_count: int = 3) -> list[dict]:
         rows = conn.execute(
             """SELECT triggered_conditions, verdict, result_pct, result_5d
                FROM signals
-               WHERE created_at >= ? AND verdict IS NOT NULL AND result_pct IS NOT NULL""",
+               WHERE id IN (
+                   SELECT MIN(id)
+                   FROM signals
+                   WHERE created_at >= ? AND verdict IS NOT NULL AND result_pct IS NOT NULL
+                   GROUP BY stock_code, DATE(created_at), triggered_conditions
+               )""",
             (since,),
         ).fetchall()
 

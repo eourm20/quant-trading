@@ -1576,15 +1576,18 @@ def run_weekly_self_correction():
         logger.info("[self-correct] no data - skip")
         return
 
+    MIN_RELIABLE_SAMPLES = 5
     verdict_lines = []
     for verdict, stat in sorted(verdict_stats.items()):
         hit_rate = stat.get("hit_rate_3d")
         avg_3d = stat.get("avg_3d")
         count = stat.get("count", 0)
+        low_sample = stat.get("low_sample", count < MIN_RELIABLE_SAMPLES)
+        suffix = " ⚠️표본부족" if low_sample else ""
         verdict_lines.append(
-            f"  [{verdict}] {count} | hit {hit_rate:.0f}% | avg3 {avg_3d:+.2f}%"
+            f"  [{verdict}] {count}{suffix} | hit {hit_rate:.0f}% | avg3 {avg_3d:+.2f}%"
             if hit_rate is not None and avg_3d is not None
-            else f"  [{verdict}] {count} (insufficient data)"
+            else f"  [{verdict}] {count}{suffix} (insufficient data)"
         )
 
     low_perf = [c for c in condition_stats if (c.get("hit_rate_3d") or 0) < 40]
@@ -2605,12 +2608,7 @@ def _auto_execute(
                     f"[{signal.stock_name}] daily_review 수량계수 적용: "
                     f"{old_qty}주 -> {qty}주 (x{dr_mult:.2f})"
                 )
-            else:
-                _log_daily_review_event(
-                    signal.stock_code, signal.stock_name, "ignored",
-                    "daily_review_qty_multiplier_no_change",
-                    {"qty": qty, "multiplier": dr_mult},
-                )
+            # dr_mult == 1.0 이면 적용할 지침 없음 → 로그 생략 (false "ignored" 방지)
         except Exception as _dr_mult_e:
             logger.debug(f"[{signal.stock_name}] daily_review qty multiplier apply failed: {_dr_mult_e}")
 
@@ -3224,12 +3222,7 @@ def run_check(check_mode: str = "all"):
                         "daily_review_stop_loss_sensitivity",
                         {"mode": _sl_mode, "signal_type": getattr(signal, "signal_type", "")},
                     )
-                else:
-                    _log_daily_review_event(
-                        signal.stock_code, signal.stock_name, "ignored",
-                        "daily_review_stop_loss_sensitivity_default",
-                        {"mode": _sl_mode, "signal_type": getattr(signal, "signal_type", "")},
-                    )
+                # _sl_mode == "유지" 이면 적용할 지침 없음 → 로그 생략 (false "ignored" 방지)
             logger.info(f"[{signal.stock_name}] 신호 감지: {new_conditions}")
 
             claude_opinion = None
@@ -3413,9 +3406,28 @@ def run_check(check_mode: str = "all"):
                     logger.debug(f"[AgentTrace] 저장 실패: {_e}")
             _rag_index_signal(signal, signal_id, claude_opinion,
                               dart_summary=dart_summary, news_summary=news_summary)
-            send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
-            if agent_tools_summary:
-                send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
+
+            # 신뢰도 게이트: policy의 min_confidence보다 낮으면 텔레그램 알림 억제
+            _low_confidence_suppress = False
+            if decision_confidence is not None:
+                try:
+                    from worker.strategy_reflection import get_policy_snapshot as _gps
+                    _min_conf_pct = float(
+                        (_gps("judgment").get("policy") or {}).get("min_confidence", 0.5)
+                    ) * 100
+                    if decision_confidence < _min_conf_pct:
+                        logger.info(
+                            f"[{signal.stock_name}] 신뢰도 {decision_confidence}% < 정책 최소 {_min_conf_pct:.0f}% "
+                            f"→ 텔레그램 알림 억제 (DB 저장은 유지)"
+                        )
+                        _low_confidence_suppress = True
+                except Exception as _ce:
+                    logger.debug(f"[{signal.stock_name}] min_confidence 체크 실패: {_ce}")
+
+            if not _low_confidence_suppress:
+                send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
+                if agent_tools_summary:
+                    send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
 
             if claude_opinion:
                 _maybe_save_hold_conditions(signal, claude_opinion)
