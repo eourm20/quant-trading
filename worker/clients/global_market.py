@@ -29,7 +29,8 @@ _HEADERS = {"User-Agent": "quant-trading-worker/1.0"}
 _ALPHA_MIN_INTERVAL_SEC = max(0.0, float(os.getenv("ALPHAVANTAGE_MIN_INTERVAL_SEC", "12.5") or 12.5))
 _ALPHA_MAX_RETRIES = max(0, int(os.getenv("ALPHAVANTAGE_MAX_RETRIES", "2") or 2))
 _ALPHA_RETRY_BACKOFF_SEC = max(0.1, float(os.getenv("ALPHAVANTAGE_RETRY_BACKOFF_SEC", "2.0") or 2.0))
-_ALPHA_CACHE_TTL_SEC = max(0, int(float(os.getenv("ALPHAVANTAGE_CACHE_TTL_SEC", "900") or 900)))
+# 0 = "until KST midnight" (default), positive value = fixed TTL in seconds
+_ALPHA_CACHE_TTL_SEC = max(0, int(float(os.getenv("ALPHAVANTAGE_CACHE_TTL_SEC", "0") or 0)))
 _alpha_lock = threading.Lock()
 _alpha_last_call_ts = 0.0
 _cache_lock = threading.Lock()
@@ -39,6 +40,21 @@ _alpha_usage_lock = threading.Lock()
 _alpha_usage_by_date: dict[str, int] = {}
 
 _KST = timezone(timedelta(hours=9))
+
+
+def _cache_expires_at() -> float:
+    """Return cache expiry timestamp.
+
+    Default: next KST midnight — so global indices are fetched once per calendar day.
+    Override: set ALPHAVANTAGE_CACHE_TTL_SEC to a positive integer for a fixed TTL.
+    """
+    if _ALPHA_CACHE_TTL_SEC > 0:
+        return time.time() + _ALPHA_CACHE_TTL_SEC
+    now_kst = datetime.now(_KST)
+    midnight_kst = (now_kst + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return midnight_kst.timestamp()
 
 
 def _today_kst() -> str:
@@ -177,7 +193,7 @@ def get_global_indices() -> dict[str, dict]:
     """
     now = time.time()
     with _cache_lock:
-        if _ALPHA_CACHE_TTL_SEC > 0 and now < float(_cache_global_indices.get("expires_at") or 0):
+        if now < float(_cache_global_indices.get("expires_at") or 0):
             cached = _cache_global_indices.get("value") or {}
             if isinstance(cached, dict):
                 return dict(cached)
@@ -198,7 +214,7 @@ def get_global_indices() -> dict[str, dict]:
 
     with _cache_lock:
         _cache_global_indices["value"] = dict(out)
-        _cache_global_indices["expires_at"] = now + _ALPHA_CACHE_TTL_SEC
+        _cache_global_indices["expires_at"] = _cache_expires_at()
     return out
 
 
@@ -206,7 +222,7 @@ def get_macro_proxies() -> dict[str, dict]:
     """Return macro proxy quotes from Alpha Vantage."""
     now = time.time()
     with _cache_lock:
-        if _ALPHA_CACHE_TTL_SEC > 0 and now < float(_cache_macro_proxies.get("expires_at") or 0):
+        if now < float(_cache_macro_proxies.get("expires_at") or 0):
             cached = _cache_macro_proxies.get("value") or {}
             if isinstance(cached, dict):
                 return dict(cached)
@@ -223,7 +239,7 @@ def get_macro_proxies() -> dict[str, dict]:
 
     with _cache_lock:
         _cache_macro_proxies["value"] = dict(out)
-        _cache_macro_proxies["expires_at"] = now + _ALPHA_CACHE_TTL_SEC
+        _cache_macro_proxies["expires_at"] = _cache_expires_at()
     return out
 
 
