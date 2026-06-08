@@ -1449,7 +1449,7 @@ def upsert_portfolio(holdings: list[dict]):
                     _p(h.get("pur_pric")),
                     _p(h.get("cur_prc")),
                     _p(h.get("evlt_amt")),
-                    _p(h.get("evltv_prft")),
+                    int(_f(h.get("evltv_prft"))),
                     _f(h.get("prft_rt")),
                     now,
                 ),
