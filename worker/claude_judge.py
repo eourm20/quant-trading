@@ -497,7 +497,7 @@ def harness_check(signal, holdings: list) -> str:
                     "AND (claude_opinion LIKE '[홀드]%' OR claude_opinion LIKE '홀드%')",
                     (signal.stock_code, today),
                 ).fetchone()[0]
-            if hold_cnt >= 5:
+            if hold_cnt >= 3:
                 logger.info(
                     f"[하네스] {signal.stock_name}: 오늘 홀드 {hold_cnt}회 → SKIP"
                 )
