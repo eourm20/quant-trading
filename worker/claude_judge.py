@@ -484,12 +484,12 @@ def harness_check(signal, holdings: list) -> str:
         )
         return HARNESS_SKIP
 
-    # ── SKIP: 최근 2시간 내 홀드 3회 이상 + 강한 전환 신호 없음 (2시간 경과 시 자동 해제) ──
+    # ── SKIP: 당일 홀드 3회 이상 + 강한 전환 신호 없음 → 당일 스킵 (다음날 09:00 쿨다운 리셋으로 자동 해제) ──
     if not any(k in triggered_text for k in strong_kw):
         try:
             from data.db import get_conn as _gc
-            from datetime import datetime as _dt, timedelta as _td
-            since = (_dt.now() - _td(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+            from datetime import datetime as _dt
+            since = _dt.now().strftime("%Y-%m-%d") + " 00:00:00"
             with _gc() as conn:
                 hold_cnt = conn.execute(
                     "SELECT COUNT(*) FROM signals "
@@ -499,7 +499,7 @@ def harness_check(signal, holdings: list) -> str:
                 ).fetchone()[0]
             if hold_cnt >= 3:
                 logger.info(
-                    f"[하네스] {signal.stock_name}: 최근 2시간 홀드 {hold_cnt}회 → SKIP"
+                    f"[하네스] {signal.stock_name}: 당일 홀드 {hold_cnt}회 → SKIP"
                 )
                 return HARNESS_SKIP
         except Exception:
