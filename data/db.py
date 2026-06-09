@@ -3174,8 +3174,10 @@ def get_weekly_performance_report(days: int = 7) -> dict:
             }
 
         returns_3d = [r["result_3d"] for r in rated]
-        wins = sum(1 for r in rated if _is_verdict_hit_3d(r["verdict"], r["result_3d"]))
-        win_rate = round(wins / rated_count * 100, 1)
+        # 홀드는 _is_verdict_hit_3d에서 항상 False이므로 분모에서도 제외해야 승률이 정확함
+        actionable = [r for r in rated if r["verdict"] in ("매수", "매도")]
+        wins = sum(1 for r in actionable if _is_verdict_hit_3d(r["verdict"], r["result_3d"]))
+        win_rate = round(wins / len(actionable) * 100, 1) if actionable else None
         avg_3d = round(sum(returns_3d) / rated_count, 2)
 
         r1d_vals = [r["result_1d"] for r in rated if r["result_1d"] is not None]
@@ -3203,7 +3205,7 @@ def get_weekly_performance_report(days: int = 7) -> dict:
         verdict_breakdown = {
             v: {
                 "count": s["count"],
-                "win_rate": round(s["wins"] / s["count"] * 100, 1),
+                "win_rate": round(s["wins"] / s["count"] * 100, 1) if v != "홀드" else None,
                 "avg_return": round(s["sum_3d"] / s["count"], 2),
             }
             for v, s in vbreakdown.items()
