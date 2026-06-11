@@ -484,7 +484,7 @@ def harness_check(signal, holdings: list) -> str:
         )
         return HARNESS_SKIP
 
-    # ── SKIP: 당일 홀드 3회 이상 + 강한 전환 신호 없음 → 당일 스킵 (다음날 09:00 쿨다운 리셋으로 자동 해제) ──
+    # ── SKIP: 당일 홀드 2회 이상 + 강한 전환 신호 없음 → 당일 스킵 (다음날 09:00 쿨다운 리셋으로 자동 해제) ──
     if not any(k in triggered_text for k in strong_kw):
         try:
             from data.db import get_conn as _gc
@@ -497,7 +497,7 @@ def harness_check(signal, holdings: list) -> str:
                     "AND (claude_opinion LIKE '[홀드]%' OR claude_opinion LIKE '홀드%')",
                     (signal.stock_code, since),
                 ).fetchone()[0]
-            if hold_cnt >= 3:
+            if hold_cnt >= 2:
                 logger.info(
                     f"[하네스] {signal.stock_name}: 당일 홀드 {hold_cnt}회 → SKIP"
                 )
