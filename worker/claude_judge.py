@@ -484,26 +484,41 @@ def harness_check(signal, holdings: list) -> str:
         )
         return HARNESS_SKIP
 
-    # ── SKIP: 당일 홀드 2회 이상 + 강한 전환 신호 없음 → 당일 스킵 (다음날 09:00 쿨다운 리셋으로 자동 해제) ──
+    # ── 선제 필터: 당일 홀드 이력 조회 (이후 두 블록에서 공유) ──
+    _today_hold_cnt = 0
     if not any(k in triggered_text for k in strong_kw):
         try:
             from data.db import get_conn as _gc
             from datetime import datetime as _dt
-            since = _dt.now().strftime("%Y-%m-%d") + " 00:00:00"
+            _since = _dt.now().strftime("%Y-%m-%d") + " 00:00:00"
             with _gc() as conn:
-                hold_cnt = conn.execute(
+                _today_hold_cnt = conn.execute(
                     "SELECT COUNT(*) FROM signals "
                     "WHERE stock_code=? AND created_at>=? "
                     "AND (claude_opinion LIKE '[홀드]%' OR claude_opinion LIKE '홀드%')",
-                    (signal.stock_code, since),
+                    (signal.stock_code, _since),
                 ).fetchone()[0]
-            if hold_cnt >= 2:
-                logger.info(
-                    f"[하네스] {signal.stock_name}: 당일 홀드 {hold_cnt}회 → SKIP"
-                )
-                return HARNESS_SKIP
         except Exception:
             pass
+
+    # ── SKIP: 당일 홀드 1회 이상 + RSI 완화 범위(42~58) + 거래량 보통 이하 ──
+    # 이미 오늘 홀드가 나온 종목은 조건 문턱을 낮춰 AI 호출 전 차단
+    if (_today_hold_cnt >= 1
+            and rsi is not None and 42 <= rsi <= 58
+            and volume_ratio is not None and volume_ratio < 0.8
+            and not any(k in triggered_text for k in strong_kw)):
+        logger.info(
+            f"[하네스] {signal.stock_name}: 당일 홀드 {_today_hold_cnt}회 + "
+            f"RSI({rsi:.1f}) + 거래량({volume_ratio:.2f}배) → 선제 SKIP"
+        )
+        return HARNESS_SKIP
+
+    # ── SKIP: 당일 홀드 3회 이상 + 강한 전환 신호 없음 → 당일 스킵 (다음날 09:00 쿨다운 리셋으로 자동 해제) ──
+    if _today_hold_cnt >= 3:
+        logger.info(
+            f"[하네스] {signal.stock_name}: 당일 홀드 {_today_hold_cnt}회 → SKIP"
+        )
+        return HARNESS_SKIP
 
     return HARNESS_AMBIGUOUS
 
