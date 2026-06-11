@@ -71,7 +71,7 @@ from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
                      update_signal_result, update_signal_agent_trace, save_agent_action_log, purge_agent_action_logs,
                      update_stock_field, save_strategy_note, save_market_report, get_latest_market_report,
-                     get_cooldown, set_cooldown, get_last_signal_date, delete_stock,
+                     get_cooldown, set_cooldown, delete_stock,
                      get_positions, get_position, update_position_field, create_position_from_trade,
                      get_recent_daily_reviews,
                      save_realized_pnl_snapshot)
@@ -2232,10 +2232,13 @@ def check_inactive_stocks():
 
 
 def check_removal_candidates():
-    """미보유 종목 중 장기 미신호(기본 30일) → 관심종목 자동 삭제."""
+    """미보유 종목 자동 삭제.
+    - 신규 등록: 7일 이내 매매 없으면 삭제
+    - 청산 후: 2일 이내 재진입 없으면 삭제
+    """
     _wm = _WORKER_CONFIG.get("watchlist_management", {})
-    INACTIVE_DAYS = int(_wm.get("inactive_days_removal", 30))
-    ALERT_INTERVAL_DAYS = int(_wm.get("alert_interval_days", 7))
+    NO_TRADE_DAYS = int(_wm.get("no_trade_days_removal", 7))
+    POST_LIQ_DAYS = int(_wm.get("no_trade_days_after_liquidation", 2))
 
     holdings = {str(h.get("stock_code", "")): h for h in get_portfolio()}
     stocks = [s for s in get_watchlist() if s.get("enabled")]
@@ -2248,41 +2251,34 @@ def check_removal_candidates():
         if code in holdings:
             continue
 
-        # ── 미보유 종목: 90일 미신호 → 삭제 ──────────────────────────
-        key = f"{code}:removal_check"
-        next_allowed_at = get_cooldown(key)
-        if next_allowed_at and _now_kst() < next_allowed_at:
+        # 청산 후 재감시 vs 신규 등록: 임계값 분기
+        is_post_liq = bool(stock.get("post_liquidation"))
+        threshold = POST_LIQ_DAYS if is_post_liq else NO_TRADE_DAYS
+
+        # 등록일(청산 후 리셋된 경우 청산일) 기준 경과일 계산
+        created_at = stock.get("created_at", "")
+        if not created_at:
+            continue
+        try:
+            created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
             continue
 
-        last_signal_dt = get_last_signal_date(code)
-        if last_signal_dt:
-            days_since = (_now_kst() - last_signal_dt).days
-        else:
-            # 신호 이력 없으면 등록일 기준 (등록일도 없으면 삭제 안 함)
-            created_at = stock.get("created_at", "")
-            if created_at:
-                try:
-                    created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-                    days_since = (_now_kst() - created_dt).days
-                except ValueError:
-                    continue
-            else:
-                continue
-
-        if days_since >= INACTIVE_DAYS:
+        days_since = (_now_kst() - created_dt).days
+        if days_since >= threshold:
+            reason = f"청산 후 {days_since}일 재진입 없음" if is_post_liq else f"등록 후 {days_since}일 매매 없음"
             delete_stock(code)
-            set_cooldown(key, cooldown_minutes=ALERT_INTERVAL_DAYS * 24 * 60)
             send_message(
                 f"🗑 *[자동 제거] {name}* ({code})\n"
-                f"미보유 상태로 {days_since}일간 신호 없음\n"
+                f"{reason}\n"
                 f"관심종목에서 삭제했습니다."
             )
             save_strategy_note(
                 "watchlist",
-                f"{name} 관심종목 자동 삭제 (미보유 {days_since}일 미신호)",
-                f"미보유 상태에서 {days_since}일간 신호 미발동으로 삭제",
+                f"{name} 관심종목 자동 삭제 ({reason})",
+                f"watchlist 삭제 기준: {'청산 후' if is_post_liq else '신규 등록 후'} {days_since}일 경과",
             )
-            logger.info(f"[자동 제거] {name}({code}) 미보유 {days_since}일 미신호 삭제")
+            logger.info(f"[자동 제거] {name}({code}) {reason}")
 
 
 def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:

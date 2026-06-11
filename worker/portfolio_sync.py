@@ -19,7 +19,7 @@ from data.db import (
     upsert_portfolio, upsert_trades, get_portfolio_updated_at,
     backfill_trades_from_executions, upsert_trades_from_executions,
     get_positions, get_position, create_position_from_trade,
-    update_position_field, delete_position,
+    update_position_field, delete_position, reset_watchlist_watch,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,6 +163,8 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
                 delete_position(old_code)
                 result["positions_removed"] += 1
                 logger.info(f"포지션 삭제 (미보유): {pos.get('stock_name', '')} ({old_code})")
+                reset_watchlist_watch(old_code)
+                logger.info(f"watchlist 감시 타이머 리셋 (청산): {pos.get('stock_name', '')} ({old_code})")
     except Exception as e:
         result["errors"].append(f"포지션 동기화: {e}")
         logger.error(f"포지션 동기화 실패: {e}")

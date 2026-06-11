@@ -465,6 +465,14 @@ def init_db():
             conn.execute("ALTER TABLE watchlist ADD COLUMN sector_code TEXT DEFAULT NULL")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN last_trade_at TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN post_liquidation INTEGER DEFAULT 0")
+        except Exception:
+            pass
         _migrate_watchlist_columns(conn)
         _repair_legacy_watchlist_conditions(conn)
         conn.execute("""
@@ -2579,6 +2587,29 @@ def get_last_signal_date(stock_code: str) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def touch_watchlist_trade(stock_code: str) -> None:
+    """매매 체결 시 watchlist.last_trade_at 갱신 + post_liquidation 해제."""
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE watchlist SET last_trade_at = ?, post_liquidation = 0 WHERE code = ?",
+            (now, stock_code),
+        )
+
+
+def reset_watchlist_watch(stock_code: str) -> None:
+    """청산 후 watchlist 감시 타이머 리셋.
+    created_at = 청산일, last_trade_at = NULL, post_liquidation = 1
+    → 청산일부터 2일 카운트 (신규 등록 7일과 구분).
+    """
+    now = _now_kst().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE watchlist SET created_at = ?, last_trade_at = NULL, post_liquidation = 1 WHERE code = ?",
+            (now, stock_code),
+        )
 
 
 def get_today_signals() -> list[dict]:
