@@ -19,7 +19,7 @@ from data.db import (
     upsert_portfolio, upsert_trades, get_portfolio_updated_at,
     backfill_trades_from_executions, upsert_trades_from_executions,
     get_positions, get_position, create_position_from_trade,
-    update_position_field, delete_position, reset_watchlist_watch,
+    update_position_field, delete_position, reset_watchlist_watch, touch_watchlist_trade,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,7 @@ def sync_all(client: KiwoomClient | None = None) -> dict:
                 if created:
                     result["positions_created"] += 1
                     logger.info(f"포지션 자동 생성: {h.get('stk_nm', '')} ({code})")
+                    touch_watchlist_trade(code)
             else:
                 # 기존 포지션 -> 평단가/수량 갱신
                 pos = existing_positions[code]
