@@ -13,7 +13,11 @@ scripts/__pycache__/
 scripts/.ipynb_checkpoints/
 logs/
 trading.db
+trading.db-shm
+trading.db-wal
 trading_real.db
+trading_real.db-shm
+trading_real.db-wal
 .claude/
 .dart_cache/
 data/faiss_index.bin
