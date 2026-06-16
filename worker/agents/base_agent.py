@@ -281,6 +281,7 @@ class BaseAgent:
                 max_tokens=self._max_tokens,
                 tools=self._tool_schemas,
                 messages=messages,
+                timeout=60.0,
             )
 
             choice = response.choices[0]
