@@ -2611,10 +2611,16 @@ def _auto_execute(
     # 하드캡: 매수 — 실질 매수 여력 초과 방지
     if order_type == "1" and signal.current_price > 0:
         budget = buy_budget if buy_budget > 0 else deposit
-        max_qty_cash = budget // signal.current_price
         max_qty_margin = None
         try:
-            margin_check_price = order_price if order_price > 0 else signal.current_price
+            # place_order()가 내부에서 실시간 현재가로 강제 교체하므로, 증거금 체크도 동일한 실시간 가격 사용
+            try:
+                live_price_data = kiwoom.get_current_price(signal.stock_code)
+                live_price = abs(int(str(live_price_data.get("cur_prc") or "0").replace(",", "")))
+            except Exception:
+                live_price = 0
+            margin_check_price = live_price if live_price > 0 else (order_price if order_price > 0 else signal.current_price)
+            max_qty_cash = budget // margin_check_price if margin_check_price > 0 else budget // signal.current_price
             margin_info = kiwoom.get_orderable_qty_by_margin(signal.stock_code, margin_check_price)
             margin_qty = int(margin_info.get("max_qty") or 0)
             max_qty_margin = margin_qty
@@ -2633,7 +2639,7 @@ def _auto_execute(
                 f"[{signal.stock_name}] 추천수량 {qty}주 → {max_qty}주로 조정 "
                 f"(현금기준 {max_qty_cash}주"
                 f"{f', 증거금기준 {max_qty_margin}주' if max_qty_margin is not None else ''} / "
-                f"매수여력 {budget:,}원 / 현재가 {signal.current_price:,}원)"
+                f"매수여력 {budget:,}원 / 실시간가 {margin_check_price:,}원)"
             )
             qty = max_qty
         if qty <= 0:
