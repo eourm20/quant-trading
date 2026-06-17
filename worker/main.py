@@ -90,7 +90,6 @@ logging.basicConfig(
             backupCount=1,
             encoding="utf-8",
         ),
-        logging.StreamHandler(),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -112,6 +111,7 @@ _post_buy_lock: dict[str, datetime] = {}
 _ai_judgment_cache: dict[str, tuple[datetime, str]] = {}
 _rag_pending_signal_ids: set[int] = set()
 _pending_weak_exit_confirm: dict[str, datetime] = {}
+_rc4025_cooldown: dict[str, datetime] = {}  # RC4025 실패 후 재시도 차단
 _shutdown_event = threading.Event()
 _daily_review_guardrail_context: dict = {}
 _daily_review_execution_events: list[dict] = []
@@ -2538,6 +2538,18 @@ def _auto_execute(
             )
             return
 
+        rc4025_cooldown_minutes = max(0, int(_WORKER_CONFIG.get("rc4025_cooldown_minutes", 60)))
+        rc4025_ts = _rc4025_cooldown.get(signal.stock_code)
+        if rc4025_ts and rc4025_cooldown_minutes > 0:
+            elapsed = (_now_kst() - rc4025_ts).total_seconds() / 60
+            if elapsed < rc4025_cooldown_minutes:
+                logger.info(
+                    f"[{signal.stock_name}] RC4025 쿨다운 중 ({elapsed:.0f}/{rc4025_cooldown_minutes}분) — 재시도 차단"
+                )
+                return
+            else:
+                _rc4025_cooldown.pop(signal.stock_code, None)
+
         signal_type = str(getattr(signal, "signal_type", "") or "")
         if signal.in_portfolio and signal_type != "add":
             logger.info(
@@ -2778,6 +2790,9 @@ def _auto_execute(
     except Exception as e:
         logger.error(f"[{signal.stock_name}] 자동 주문 실패: {e}")
         send_message(f"❌ 자동 주문 실패: *{signal.stock_name}* — `{e}`")
+        # RC4025(증거금 부족): 예수금 부족으로 인한 실패는 재시도 의미 없음 — 쿨다운 등록
+        if order_type == "1" and "RC4025" in str(e):
+            _rc4025_cooldown[signal.stock_code] = _now_kst()
 
 
 def check_market_dip():

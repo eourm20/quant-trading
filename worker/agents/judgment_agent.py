@@ -348,6 +348,9 @@ class JudgmentAgent:
         budget_ctx = pre_ctx.get("budget", {}) or {}
         order_available = int(budget_ctx.get("order_available") or 0)
         max_purchasable_qty = (order_available // signal.current_price) if signal.current_price > 0 else 0
+        max_order_amount = max_purchasable_qty * signal.current_price
+        cash_pct = (max_order_amount / order_available * 100) if order_available > 0 else 0
+
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})
 - 신호 유형: {signal_type_label}
@@ -361,7 +364,7 @@ class JudgmentAgent:
 
 ## 주문 예산 (확정값 — 이 수치 기준으로 추천수량 결정)
 - 주문가능금액: {order_available:,}원
-- 현재가({signal.current_price:,}원) 기준 최대 구매 수량: {max_purchasable_qty}주
+- 현재가({signal.current_price:,}원) 기준 최대 구매 수량: {max_purchasable_qty}주 (약 {max_order_amount:,}원, 예수금의 {cash_pct:.0f}% 소진)
 
 ## Preflight Context (validated)
 - position_context: {_brief(pre_ctx.get('position_context', {}))}
