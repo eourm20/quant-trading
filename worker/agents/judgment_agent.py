@@ -38,7 +38,7 @@ _SYSTEM_PROMPT = f"""당신은 개인 투자자의 퀀트 트레이딩 시스템
 - 약한 exit 신호(과매수 단독/거래량 미동반)는 전량매도 금지, 부분매도(30~50%) 또는 홀드 우선
 - 현금 비중 5% 미만이면 신규 매수 보류
 - 포트 전체 수익률 -10% 이하: [홀드] 우선
-- 추천수량은 실질 매수 여력(현금 - 물타기 예비금) 이내
+- 추천수량은 반드시 '최대 구매 가능 수량' 이내 (신호 정보 ## 주문 예산 참조)
 
 ## 판단 방식
 - 도구 사용 순서는 고정하지 말고 상황에 맞게 자율적으로 선택할 것
@@ -164,6 +164,7 @@ class JudgmentAgent:
         ctx["market_brief"] = _call("market_news_brief", max_items=self._news_limit)
         ctx["stock_news"] = _call("get_news", stock_name=signal.stock_name, max_items=self._news_limit)
         ctx["macro_brief"] = _call("rss_macro_brief", max_total=self._macro_limit)
+        ctx["budget"] = _call("get_deposit")
         policy_snapshot = get_policy_snapshot("judgment")
         self._policy_version = str(policy_snapshot.get("policy_version") or "judgment-v0")
         ctx["policy_snapshot"] = policy_snapshot
@@ -344,6 +345,9 @@ class JudgmentAgent:
         prev_transition = _extract_last_hold_transition_condition(getattr(signal, "stock_code", "") or "")
         transition_status, transition_hits, transition_gaps = _evaluate_transition_with_available_metrics(prev_transition)
 
+        budget_ctx = pre_ctx.get("budget", {}) or {}
+        order_available = int(budget_ctx.get("order_available") or 0)
+        max_purchasable_qty = (order_available // signal.current_price) if signal.current_price > 0 else 0
         initial_message = f"""## 신호 정보
 - 종목: {signal.stock_name} ({signal.stock_code})
 - 신호 유형: {signal_type_label}
@@ -354,6 +358,10 @@ class JudgmentAgent:
 - 거래량 배율: {f'{signal.volume_ratio}배' if signal.volume_ratio else 'N/A'}
 - 매매 기간(horizon): {horizon or '미설정'}
 - 보유 여부: {'보유 중' if is_holding else '미보유'}
+
+## 주문 예산 (확정값 — 이 수치 기준으로 추천수량 결정)
+- 주문가능금액: {order_available:,}원
+- 현재가({signal.current_price:,}원) 기준 최대 구매 수량: {max_purchasable_qty}주
 
 ## Preflight Context (validated)
 - position_context: {_brief(pre_ctx.get('position_context', {}))}
