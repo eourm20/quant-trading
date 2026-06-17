@@ -3451,24 +3451,27 @@ def run_check(check_mode: str = "all"):
 
             if claude_opinion:
                 if AUTO_TRADE:
-                    def _idx_rate(d):
-                        try:
-                            for k in ("flu_rt", "prdy_ctrt", "change_rate"):
-                                v = (d or {}).get(k)
-                                if v is not None and str(v).strip() != "":
-                                    return float(str(v).replace(",", "").strip())
-                        except Exception:
-                            pass
-                        return 0.0
-                    _auto_execute(
-                        signal,
-                        claude_opinion,
-                        signal_id,
-                        deposit=deposit,
-                        buy_budget=buy_budget,
-                        kospi_rate=_idx_rate(kospi),
-                        kosdaq_rate=_idx_rate(kosdaq),
-                    )
+                    if _low_confidence_suppress:
+                        logger.info(f"[{signal.stock_name}] 신뢰도 낮음 — 자동매매 스킵")
+                    else:
+                        def _idx_rate(d):
+                            try:
+                                for k in ("flu_rt", "prdy_ctrt", "change_rate"):
+                                    v = (d or {}).get(k)
+                                    if v is not None and str(v).strip() != "":
+                                        return float(str(v).replace(",", "").strip())
+                            except Exception:
+                                pass
+                            return 0.0
+                        _auto_execute(
+                            signal,
+                            claude_opinion,
+                            signal_id,
+                            deposit=deposit,
+                            buy_budget=buy_budget,
+                            kospi_rate=_idx_rate(kospi),
+                            kosdaq_rate=_idx_rate(kosdaq),
+                        )
                 else:
                     _paper_execute(signal, claude_opinion, signal_id)
 
