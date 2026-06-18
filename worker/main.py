@@ -23,12 +23,6 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-_KST = timezone(_td(hours=9))
-
-
-def _now_kst() -> datetime:
-    """UTC/로컬 관계없이 항상 KST 현재 시각 반환 (naive — 기존 코드 호환)."""
-    return datetime.now(_KST).replace(tzinfo=None)
 
 
 # --env 인자를 imports 전에 미리 파싱 (모듈 레벨 코드가 올바른 환경변수를 읽도록)
@@ -66,6 +60,26 @@ from worker.claude_judge import (
 from worker.cooldown import filter_new_conditions, mark_sent
 from worker.stock_analyzer import run_daily_screening, run_intraday_scan, run_daily_review, reassess_watchlist
 from worker.portfolio_sync import sync_all
+from worker.worker_utils import (
+    _KST, _now_kst, _SESSIONS,
+    _load_krx_holiday_dates, _is_krx_closed_day, _get_market_event_context,
+    _run_on_open_day, get_current_session,
+    _safe_int_price, _safe_float,
+    _extract_change_pct, _extract_trade_value, _extract_first_number,
+    _fmt_pct_or_na, _fmt_num_or_na,
+    _label_market_regime, _label_trend, _label_volatility, _label_aggressiveness,
+    _parse_hhmm, _parse_ymd, _parse_trade_dt,
+    _business_days_elapsed,
+)
+from worker.result_tracker import (
+    update_signal_results, update_paper_results,
+    update_trade_results, update_screening_results, sync_realized_pnl,
+)
+from worker.watchlist_manager import (
+    check_trailing_stops, check_inactive_stocks, check_removal_candidates,
+)
+import worker.result_tracker as _result_tracker
+import worker.watchlist_manager as _watchlist_manager
 from notifications.telegram import send_signal_alert, send_message
 from notifications.telegram_bot import start_bot_thread
 from data.db import (init_db, save_signal, get_portfolio, get_watchlist, reset_all_cooldowns,
@@ -161,80 +175,6 @@ def _extract_trade_action_guidance(review: dict | None, max_items: int = 8) -> l
 def _handle_shutdown_signal(signum, _frame):
     logger.info(f"[종료신호] signal={signum}")
     _shutdown_event.set()
-
-# KRX 거래 세션 (규정값)
-_SESSIONS: dict[str, tuple[dtime, dtime]] = {
-    "premarket":  (dtime(8, 30),  dtime(9, 0)),    # 장전 시간외 (trde_tp 61)
-    "main":       (dtime(9, 0),   dtime(15, 30)),   # 정규장 (trde_tp 0/3)
-    "aftermarket":(dtime(15, 40), dtime(16, 0)),    # 장후 시간외 (trde_tp 81)
-    "offhours":   (dtime(16, 0),  dtime(18, 0)),    # 시간외 단일가 (trde_tp 62)
-}
-
-_MARKET_CALENDAR_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "krx_holidays.yaml")
-_MARKET_CALENDAR_CACHE: tuple[float, set[str]] | None = None
-
-
-def _load_krx_holiday_dates() -> set[str]:
-    """Load KRX holiday dates (YYYY-MM-DD) from config file."""
-    global _MARKET_CALENDAR_CACHE
-    try:
-        mtime = os.path.getmtime(_MARKET_CALENDAR_PATH)
-    except Exception:
-        mtime = -1.0
-    if _MARKET_CALENDAR_CACHE and _MARKET_CALENDAR_CACHE[0] == mtime:
-        return _MARKET_CALENDAR_CACHE[1]
-
-    dates: set[str] = set()
-    try:
-        with open(_MARKET_CALENDAR_PATH, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        for item in (data.get("closed_dates") or []):
-            text = str(item or "").strip()
-            if text:
-                dates.add(text)
-    except Exception as e:
-        logger.warning(f"[market-calendar] KRX holiday config load failed: {e}")
-
-    _MARKET_CALENDAR_CACHE = (mtime, dates)
-    return dates
-
-
-def _is_krx_closed_day(dt: datetime) -> tuple[bool, str]:
-    """Return (closed, reason) for a KST date."""
-    if dt.weekday() >= 5:
-        return True, "weekend"
-    ymd = dt.strftime("%Y-%m-%d")
-    if ymd in _load_krx_holiday_dates():
-        return True, "holiday_calendar"
-    return False, "open_day"
-
-
-def _get_market_event_context(now_kst: datetime | None = None) -> dict:
-    """System-level market event flags used by execution and AI context."""
-    now_kst = now_kst or _now_kst()
-    tomorrow = now_kst + _td(days=1)
-    today_closed, today_reason = _is_krx_closed_day(now_kst)
-    tomorrow_closed, tomorrow_reason = _is_krx_closed_day(tomorrow)
-    return {
-        "today": now_kst.strftime("%Y-%m-%d"),
-        "tomorrow": tomorrow.strftime("%Y-%m-%d"),
-        "today_closed": today_closed,
-        "today_closed_reason": today_reason,
-        "tomorrow_closed": tomorrow_closed,
-        "tomorrow_closed_reason": tomorrow_reason,
-    }
-
-
-def _run_on_open_day(job_name: str, fn, *args, **kwargs):
-    """Run scheduled job only when today is an open KRX day."""
-    ctx = _get_market_event_context()
-    if ctx.get("today_closed"):
-        logger.info(
-            f"[market-event] today={ctx.get('today')} closed "
-            f"(reason={ctx.get('today_closed_reason')}) - {job_name} skip"
-        )
-        return None
-    return fn(*args, **kwargs)
 
 
 def _build_core3_from_daily_review(review: dict | None) -> list[str]:
@@ -377,196 +317,6 @@ def _save_daily_review_execution_checklist() -> int:
         logger.warning(f"[daily_review] execution checklist save failed: {e}")
         return 0
 
-
-def get_current_session() -> str | None:
-    """현재 거래 가능 세션 반환. 장외 시간이면 None."""
-    now = _now_kst()
-    if now.weekday() >= 5:
-        return None
-    t = now.time()
-    for session, (start, end) in _SESSIONS.items():
-        if start <= t <= end:
-            return session
-    return None
-
-
-def _safe_int_price(value) -> int:
-    try:
-        return abs(int(str(value or "0").replace(",", "").strip()))
-    except Exception:
-        return 0
-
-
-def _safe_float(value) -> float:
-    try:
-        return float(str(value or "").replace(",", "").strip())
-    except Exception:
-        return 0.0
-
-
-def _extract_change_pct(payload: dict | None) -> float:
-    if not payload:
-        return 0.0
-    for key in ("prdy_ctrt", "flu_rt", "change_rate", "chg_rt"):
-        if key in payload:
-            v = _safe_float(payload.get(key))
-            if v != 0.0:
-                return v
-    return 0.0
-
-
-def _extract_trade_value(payload: dict | None) -> float:
-    if not payload:
-        return 0.0
-    for key in ("acml_tr_pbmn", "acc_trdval", "tot_tr_amt"):
-        if key in payload:
-            v = _safe_float(payload.get(key))
-            if v > 0:
-                return v
-    return 0.0
-
-
-def _extract_first_number(payload: dict | None, keys: tuple[str, ...]) -> float:
-    if not payload:
-        return 0.0
-    for key in keys:
-        if key in payload:
-            v = _safe_float(payload.get(key))
-            if v != 0.0:
-                return v
-    return 0.0
-
-
-def _fmt_pct_or_na(value: float | None) -> str:
-    if value is None:
-        return "N/A"
-    try:
-        v = float(value)
-    except Exception:
-        return "N/A"
-    if abs(v) <= 1e-9:
-        return "N/A"
-    return f"{v:+.2f}%"
-
-
-def _fmt_num_or_na(value: float | int | None, digits: int = 0) -> str:
-    if value is None:
-        return "N/A"
-    try:
-        v = float(value)
-    except Exception:
-        return "N/A"
-    if abs(v) <= 1e-9:
-        return "N/A"
-    if digits <= 0:
-        return f"{v:,.0f}"
-    return f"{v:.{digits}f}"
-
-
-def _extract_decision_confidence(
-    claude_opinion: str | None,
-    trace: dict | None = None,
-) -> int | None:
-    """Extract confidence(0~100) from trace or opinion text."""
-    try:
-        tv = (trace or {}).get("confidence")
-        if tv is not None:
-            c = int(float(tv))
-            return max(0, min(100, c))
-    except Exception:
-        pass
-
-    if not claude_opinion:
-        return None
-    try:
-        import re
-        for line in str(claude_opinion).splitlines():
-            if "신뢰도" in line or "confidence" in line.lower():
-                m = re.search(r"(\d{1,3})\s*%?", line)
-                if m:
-                    c = int(m.group(1))
-                    return max(0, min(100, c))
-    except Exception:
-        pass
-    return None
-
-
-def _build_stock_feature_snapshot(
-    signal,
-    stock_meta: dict | None,
-    price_payload: dict | None,
-) -> str:
-    chart = getattr(signal, "chart", None)
-    snapshot = {
-        "captured_at": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
-        "stock_code": getattr(signal, "stock_code", None),
-        "stock_name": getattr(signal, "stock_name", None),
-        "current_price": getattr(signal, "current_price", None),
-        "change_pct": _extract_change_pct(price_payload),
-        "trade_value": _extract_trade_value(price_payload),
-        "trade_volume": _extract_first_number(price_payload, ("acml_vol", "acc_trdvol", "tot_tr_qty")),
-        "open_price": _extract_first_number(price_payload, ("open_pric", "stck_oprc", "opn_pric")),
-        "high_price": _extract_first_number(price_payload, ("high_pric", "stck_hgpr")),
-        "low_price": _extract_first_number(price_payload, ("lwst_pric", "low_pric", "stck_lwpr")),
-        "rsi": getattr(signal, "rsi", None),
-        "volume_ratio": getattr(signal, "volume_ratio", None),
-        "ma5": getattr(chart, "ma5", None) if chart else None,
-        "ma20": getattr(chart, "ma20", None) if chart else None,
-        "macd_line": getattr(chart, "macd_line", None) if chart else None,
-        "macd_signal": getattr(chart, "macd_signal", None) if chart else None,
-        "sector_code": (stock_meta or {}).get("sector_code"),
-        "signal_type": getattr(signal, "signal_type", None),
-        "triggered_conditions": list(getattr(signal, "triggered_conditions", []) or []),
-        "raw_price_payload": price_payload or {},
-    }
-    cleaned = {k: v for k, v in snapshot.items() if v not in (None, "", [])}
-    return json.dumps(cleaned, ensure_ascii=False)
-
-
-def _label_market_regime(avg_change_pct: float) -> str:
-    if avg_change_pct >= 0.8:
-        return "risk_on"
-    if avg_change_pct <= -0.8:
-        return "risk_off"
-    return "neutral"
-
-
-def _label_trend(avg_change_pct: float) -> str:
-    if avg_change_pct >= 0.4:
-        return "bullish"
-    if avg_change_pct <= -0.4:
-        return "bearish"
-    return "sideways"
-
-
-def _label_volatility(abs_moves: list[float]) -> str:
-    if not abs_moves:
-        return "medium"
-    m = sum(abs_moves) / len(abs_moves)
-    if m >= 1.5:
-        return "high"
-    if m <= 0.5:
-        return "low"
-    return "medium"
-
-
-def _label_aggressiveness(market_regime: str, volatility: str) -> str:
-    if market_regime == "risk_on" and volatility != "high":
-        return "high"
-    if market_regime == "risk_off" or volatility == "high":
-        return "low"
-    return "medium"
-
-
-def _parse_hhmm(value: str, default_h: int, default_m: int) -> tuple[int, int]:
-    s = str(value or "").strip()
-    if ":" not in s:
-        return default_h, default_m
-    hh, mm = s.split(":", 1)
-    try:
-        return max(0, min(23, int(hh))), max(0, min(59, int(mm)))
-    except Exception:
-        return default_h, default_m
 
 
 def run_premarket_report():
@@ -900,16 +650,6 @@ def _confirm_weak_exit_ready(stock_code: str) -> bool:
     return False
 
 
-def _parse_trade_dt(value: str) -> datetime | None:
-    s = str(value or "").strip()
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt)
-        except Exception:
-            pass
-    return None
 
 
 def _has_recent_buy_trade(stock_code: str, within_minutes: int) -> bool:
@@ -933,9 +673,6 @@ def _has_recent_buy_trade(stock_code: str, within_minutes: int) -> bool:
     return False
 
 
-def _parse_ymd(value: str) -> str:
-    s = str(value or "").replace("-", "").strip()
-    return s if len(s) == 8 and s.isdigit() else ""
 
 
 def _today_soft_avoid_hit(stock_code: str, stock_name: str) -> tuple[bool, str]:
@@ -957,56 +694,6 @@ def _today_soft_avoid_hit(stock_code: str, stock_name: str) -> tuple[bool, str]:
     except Exception:
         return False, ""
 
-
-def _business_days_elapsed(start_dt, end_dt) -> int:
-    """start_dt(당일 포함) 다음 거래일~end_dt까지의 평일 개수.
-    한국 휴일 캘린더는 미반영, 주말만 제외.
-    """
-    if not start_dt or not end_dt or end_dt <= start_dt:
-        return 0
-    days = 0
-    cur = start_dt + _td(days=1)
-    while cur <= end_dt:
-        if cur.weekday() < 5:
-            days += 1
-        cur += _td(days=1)
-    return days
-
-
-def _resolve_eval_price(stock_code: str, target_dt, today_dt):
-    """성과 평가 가격 결정.
-    - target이 오늘이고 정규장(main) 진행 중이면 현재가
-    - 그 외에는 target일(없으면 직전 영업일) 종가
-    """
-    target_ymd = target_dt.strftime("%Y%m%d")
-    today_ymd = today_dt.strftime("%Y%m%d")
-
-    if target_ymd == today_ymd and get_current_session() == "main":
-        pd = kiwoom.get_current_price(stock_code)
-        now_price = _safe_int_price(pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr"))
-        return now_price, "current"
-
-    daily = kiwoom.get_daily_ohlcv(stock_code, period=40) or []
-    candidate_price = 0
-    candidate_ymd = ""
-    for d in daily:
-        row_ymd = (
-            _parse_ymd(d.get("dt"))
-            or _parse_ymd(d.get("trde_dt"))
-            or _parse_ymd(d.get("stck_bsop_date"))
-            or _parse_ymd(d.get("bsop_date"))
-            or _parse_ymd(d.get("date"))
-        )
-        if not row_ymd or row_ymd > target_ymd:
-            continue
-        cp = _safe_int_price(d.get("cur_prc") or d.get("stck_clpr") or d.get("close"))
-        if cp <= 0:
-            continue
-        if not candidate_ymd or row_ymd > candidate_ymd:
-            candidate_ymd = row_ymd
-            candidate_price = cp
-
-    return candidate_price, (f"close:{candidate_ymd}" if candidate_ymd else "close:none")
 
 
 def _rag_index_signal(
@@ -1878,408 +1565,6 @@ def run_news_monitor():
             logger.error(f"[news_monitor] ai classification failed for {name}: {e}")
 
     logger.debug(f"[news_monitor] done: holdings={len(holdings)}, ai_calls={news_ai_calls}")
-def update_signal_results():
-    """신호 발생 후 1일/3일/5일/10일 결과 수익률 업데이트 (영업일 기준)."""
-    from datetime import datetime
-    from data.db import get_conn
-
-    periods = [
-        ("1d", 1, "result_1d"),
-        ("3d", 3, "result_pct"),
-        ("5d", 5, "result_5d"),
-        ("10d", 10, "result_10d"),
-    ]
-    today_kst = _now_kst().date()
-
-    for period_name, days_after, col_name in periods:
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, current_price, created_at FROM signals "
-                f"WHERE {col_name} IS NULL",
-            ).fetchall()
-
-        for row in rows:
-            try:
-                created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
-                if _business_days_elapsed(created_dt, today_kst) < days_after:
-                    continue
-                pd = kiwoom.get_current_price(row["stock_code"])
-                now_price = abs(int(str(
-                    pd.get("cur_prc") or pd.get("stk_prpr") or pd.get("prpr") or "0"
-                ).replace(",", "")))
-                if now_price and row["current_price"]:
-                    pct = (now_price - row["current_price"]) / row["current_price"] * 100
-                    update_signal_result(row["id"], round(pct, 2), period=period_name)
-                    logger.debug(f"[결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
-                    # 3d 결과 확정 시 FAISS 재인덱싱 (verdict + 수익률 포함)
-                    if period_name == "3d":
-                        try:
-                            from worker.agents.tools.rag_tools import index_signal as _idx
-                            import threading as _thr
-                            with get_conn() as _conn:
-                                _sig_row = _conn.execute(
-                                    "SELECT stock_name, signal_type, verdict, triggered_conditions, "
-                                    "dart_summary, news_summary, indicator_snapshot FROM signals WHERE id=?",
-                                    (row["id"],)
-                                ).fetchone()
-                            if _sig_row:
-                                _thr.Thread(
-                                    target=_idx,
-                                    kwargs={
-                                        "signal_id": row["id"],
-                                        "stock_name": _sig_row["stock_name"] or "",
-                                        "signal_type": _sig_row["signal_type"] or "",
-                                        "verdict": _sig_row["verdict"],
-                                        "result_3d": round(pct, 2),
-                                        "triggered_conditions": _sig_row["triggered_conditions"] or "",
-                                        "dart_summary": _sig_row["dart_summary"],
-                                        "news_summary": _sig_row["news_summary"],
-                                        "indicator_snapshot": _sig_row["indicator_snapshot"],
-                                    },
-                                    daemon=True,
-                                ).start()
-                        except Exception:
-                            pass
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"[결과 {period_name} 실패] {row['stock_name']}: {e}")
-
-
-def update_paper_results():
-    """Deprecated: paper_trades removed."""
-    return
-
-
-def update_trade_results():
-    """실거래 1일/3일/5일 성과 업데이트 (매수/매도 방향 반영).
-    기준가:
-    - 평가일이 오늘이고 장중(main)이면 현재가
-    - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
-    """
-    from datetime import timedelta
-    from data.db import get_conn, update_trade_result
-
-    periods = [("1d", 1, "result_1d"), ("3d", 3, "result_3d"), ("5d", 5, "result_5d")]
-    now_kst = _now_kst()
-    today_kst = now_kst.date()
-
-    for period_name, days_after, col_name in periods:
-        eligible_to = (today_kst - timedelta(days=days_after)).strftime("%Y-%m-%d")
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT trade_id, stock_code, stock_name, side, price, executed_at FROM trades "
-                f"WHERE {col_name} IS NULL AND price > 0 AND executed_at <= ?",
-                (eligible_to,),
-            ).fetchall()
-
-        for row in rows:
-            try:
-                base = int(row["price"] or 0)
-                if base <= 0:
-                    continue
-                executed_dt = datetime.strptime(str(row["executed_at"])[:10], "%Y-%m-%d").date()
-                if _business_days_elapsed(executed_dt, today_kst) < days_after:
-                    continue
-                target_dt = executed_dt + _td(days=days_after)
-
-                eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
-                if eval_price <= 0:
-                    continue
-
-                raw_pct = (eval_price - base) / base * 100
-                side = str(row["side"] or "")
-                signed_pct = -raw_pct if side in ("매도", "SELL", "sell") else raw_pct
-                update_trade_result(row["trade_id"], round(signed_pct, 2), period=period_name)
-                logger.debug(
-                    f"[실거래 결과 {period_name}] {row['stock_name']} {side}: "
-                    f"원시 {raw_pct:+.2f}% / 반영 {signed_pct:+.2f}% ({price_src})"
-                )
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"[실거래 결과 실패] {row['stock_name']}: {e}")
-
-
-def sync_realized_pnl():
-    """실현손익(당일/30일) 조회 후 스냅샷 저장."""
-    try:
-        today = kiwoom.get_realized_pnl_today()
-        if today.get("ok"):
-            sid = save_realized_pnl_snapshot(
-                scope="today",
-                source_api=today.get("api_id", ""),
-                realized_pnl=today.get("realized_pnl"),
-                fee=today.get("fee"),
-                tax=today.get("tax"),
-                raw=today.get("raw"),
-            )
-            logger.info(
-                f"[실현손익] today 저장 #{sid} api={today.get('api_id')} "
-                f"손익={today.get('realized_pnl')} fee={today.get('fee')} tax={today.get('tax')}"
-            )
-        else:
-            logger.warning(f"[실현손익] today 조회 실패: {today.get('error')} | attempts={today.get('attempt_errors')}")
-    except Exception as e:
-        logger.warning(f"[실현손익] today 저장 실패: {e}")
-
-    try:
-        period = kiwoom.get_realized_pnl_period(days=30)
-        if period.get("ok"):
-            sid = save_realized_pnl_snapshot(
-                scope="period",
-                source_api=period.get("api_id", ""),
-                start_dt=period.get("start_dt"),
-                end_dt=period.get("end_dt"),
-                realized_pnl=period.get("realized_pnl"),
-                fee=period.get("fee"),
-                tax=period.get("tax"),
-                raw=period.get("raw"),
-            )
-            logger.info(
-                f"[실현손익] 30d 저장 #{sid} api={period.get('api_id')} "
-                f"손익={period.get('realized_pnl')} fee={period.get('fee')} tax={period.get('tax')}"
-            )
-        else:
-            logger.warning(f"[실현손익] 30d 조회 실패: {period.get('error')} | attempts={period.get('attempt_errors')}")
-    except Exception as e:
-        logger.warning(f"[실현손익] 30d 저장 실패: {e}")
-
-
-def update_screening_results():
-    """스크리닝 종목의 7일/30일 후 수익률 자동 업데이트.
-    누락 방지:
-    - 기존 좁은 시간창(7~8일, 30~31일) 대신
-    - 기준일이 지난 NULL 레코드를 모두 보정
-    가격 기준:
-    - 평가일이 오늘이고 장중(main)이면 현재가
-    - 그 외에는 평가일 종가(없으면 직전 영업일 종가)
-    """
-    from datetime import timedelta
-    import json
-    from data.db import get_conn, update_screening_result
-
-    now_kst = _now_kst()
-    today_kst = now_kst.date()
-    periods = [("7d", 7, "result_7d"), ("30d", 30, "result_30d")]
-
-    for period_name, days_after, col in periods:
-        with get_conn() as conn:
-            rows = conn.execute(
-                f"SELECT id, stock_code, stock_name, current_price, created_at, ai_response, indicator_snapshot "
-                f"FROM screening_log "
-                f"WHERE {col} IS NULL"
-            ).fetchall()
-
-        for row in rows:
-            try:
-                base = int(row["current_price"] or 0)
-                # 하위호환: 과거 로그(current_price NULL)도 ai_response/indicator_snapshot에서 복구 시도
-                if base <= 0:
-                    for src_key in ("ai_response", "indicator_snapshot"):
-                        raw = row[src_key]
-                        if not raw:
-                            continue
-                        try:
-                            obj = json.loads(raw) if isinstance(raw, str) else raw
-                        except Exception:
-                            obj = None
-                        if isinstance(obj, dict):
-                            cand = (
-                                obj.get("current_price")
-                                or obj.get("cur_prc")
-                                or obj.get("stk_prpr")
-                                or obj.get("price")
-                            )
-                            try:
-                                cand_i = int(str(cand or "0").replace(",", "").strip())
-                            except Exception:
-                                cand_i = 0
-                            if cand_i > 0:
-                                base = cand_i
-                                break
-                if base <= 0:
-                    continue
-                created_dt = datetime.strptime(str(row["created_at"])[:10], "%Y-%m-%d").date()
-                if _business_days_elapsed(created_dt, today_kst) < days_after:
-                    continue
-                target_dt = created_dt + _td(days=days_after)
-
-                eval_price, price_src = _resolve_eval_price(row["stock_code"], target_dt, today_kst)
-                if eval_price <= 0:
-                    continue
-
-                pct = (eval_price - base) / base * 100
-                update_screening_result(row["id"], round(pct, 2), period=period_name)
-                # 복구한 기준가는 current_price에도 저장해 이후 계산/분석 일관성 확보
-                if int(row["current_price"] or 0) <= 0:
-                    try:
-                        with get_conn() as conn:
-                            conn.execute(
-                                "UPDATE screening_log SET current_price = COALESCE(current_price, ?) WHERE id = ?",
-                                (base, row["id"]),
-                            )
-                            conn.commit()
-                    except Exception:
-                        pass
-                logger.debug(
-                    f"[스크리닝 결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}% ({price_src})"
-                )
-                time.sleep(0.3)
-            except Exception as e:
-                logger.warning(f"[스크리닝 결과 {period_name} 실패] {row['stock_name']}: {e}")
-
-
-def check_trailing_stops():
-    """보유 종목 수익률 구간별 손절가 자동 상향 (트레일링 스탑).
-    +5%  → 손절가를 평단가(본전)로 상향
-    +10% → 손절가를 평단가 +5%로 상향
-    +15% → 손절가를 평단가 +10%로 상향
-    이미 설정된 손절가보다 낮으면 변경 안 함 (손절가는 항상 올리기만).
-    positions 테이블에서 손절가를 읽고 업데이트.
-    """
-    holdings = get_portfolio()
-    positions_map = {p["stock_code"]: p for p in get_positions()}
-
-    for h in holdings:
-        code = str(h.get("stock_code", ""))
-        pos = positions_map.get(code)
-        if not pos:
-            continue
-
-        avg_price = h.get("avg_price", 0)
-        current_price = h.get("current_price", 0)
-        if not avg_price or not current_price:
-            continue
-
-        current_sl = pos.get("stop_loss_price") or 0
-
-        profit_pct = (current_price - avg_price) / avg_price * 100
-
-        if profit_pct >= 15:
-            candidate = int(avg_price * 1.10)
-        elif profit_pct >= 10:
-            candidate = int(avg_price * 1.05)
-        elif profit_pct >= 5:
-            candidate = avg_price
-        else:
-            continue
-
-        if candidate <= current_sl:
-            continue
-
-        update_position_field(code, "stop_loss_price", candidate)
-        save_strategy_note(
-            "watchlist",
-            f"{pos['stock_name']} 손절가 트레일링 상향: {current_sl:,} → {candidate:,}원",
-            f"수익률 {profit_pct:+.1f}% 도달, 평단 {avg_price:,}원 기준 자동 상향",
-        )
-        send_message(
-            f"📈 *{pos['stock_name']}* 손절가 트레일링 상향\n"
-            f"수익률 *{profit_pct:+.1f}%* | {current_sl:,}원 → *{candidate:,}원*"
-        )
-        logger.info(f"[트레일링] {pos['stock_name']} 손절가 {current_sl:,} → {candidate:,}원 (수익률 {profit_pct:+.1f}%)")
-
-
-def check_inactive_stocks():
-    """30일 이상 신호 미발동 종목 주 1회 텔레그램 알림."""
-    from data.db import get_conn
-    _wm = _WORKER_CONFIG.get("watchlist_management", {})
-    INACTIVE_DAYS = int(_wm.get("inactive_days_alert", 30))
-    ALERT_INTERVAL_DAYS = int(_wm.get("alert_interval_days", 7))
-
-    stocks = [s for s in get_watchlist() if s.get("enabled")]
-    alerts = []
-
-    for stock in stocks:
-        code = stock["code"]
-        name = stock["name"]
-
-        # 주 1회 알림 쿨다운 체크
-        key = f"{code}:inactive_alert"
-        next_allowed_at = get_cooldown(key)
-        if next_allowed_at and _now_kst() < next_allowed_at:
-            continue
-
-        # 마지막 신호 날짜 조회
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT MAX(created_at) as last_signal FROM signals WHERE stock_code = ?",
-                (code,)
-            ).fetchone()
-
-        last_signal = row["last_signal"] if row and row["last_signal"] else None
-        if last_signal:
-            days_since = (_now_kst() - datetime.strptime(last_signal[:10], "%Y-%m-%d")).days
-        else:
-            # 신호 이력이 없으면 watchlist 등록일(created_at) 기준으로 계산
-            created_at = stock.get("created_at", "")
-            if created_at:
-                try:
-                    created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-                    days_since = (_now_kst() - created_dt).days
-                except ValueError:
-                    continue
-            else:
-                continue
-
-        if days_since >= INACTIVE_DAYS:
-            alerts.append((name, days_since))
-            set_cooldown(key, cooldown_minutes=ALERT_INTERVAL_DAYS * 24 * 60)
-
-    if alerts:
-        lines = "\n".join(f"  • {name}: {days}일째 신호 없음" for name, days in alerts)
-        send_message(f"⚠️ *장기 미발동 종목 알림*\n\n{lines}\n\n_조건 검토 또는 모니터링 해제 고려_")
-        logger.info(f"[미발동 알림] {len(alerts)}개 종목: {[n for n, _ in alerts]}")
-
-
-def check_removal_candidates():
-    """미보유 종목 자동 삭제.
-    - 신규 등록: 7일 이내 매매 없으면 삭제
-    - 청산 후: 2일 이내 재진입 없으면 삭제
-    """
-    _wm = _WORKER_CONFIG.get("watchlist_management", {})
-    NO_TRADE_DAYS = int(_wm.get("no_trade_days_removal", 7))
-    POST_LIQ_DAYS = int(_wm.get("no_trade_days_after_liquidation", 2))
-
-    holdings = {str(h.get("stock_code", "")): h for h in get_portfolio()}
-    stocks = [s for s in get_watchlist() if s.get("enabled")]
-
-    for stock in stocks:
-        code = stock["code"]
-        name = stock["name"]
-
-        # 보유 종목은 삭제 대상 아님
-        if code in holdings:
-            continue
-
-        # 청산 후 재감시 vs 신규 등록: 임계값 분기
-        is_post_liq = bool(stock.get("post_liquidation"))
-        threshold = POST_LIQ_DAYS if is_post_liq else NO_TRADE_DAYS
-
-        # 등록일(청산 후 리셋된 경우 청산일) 기준 경과일 계산
-        created_at = stock.get("created_at", "")
-        if not created_at:
-            continue
-        try:
-            created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            continue
-
-        days_since = (_now_kst() - created_dt).days
-        if days_since >= threshold:
-            reason = f"청산 후 {days_since}일 재진입 없음" if is_post_liq else f"등록 후 {days_since}일 매매 없음"
-            delete_stock(code)
-            send_message(
-                f"🗑 *[자동 제거] {name}* ({code})\n"
-                f"{reason}\n"
-                f"관심종목에서 삭제했습니다."
-            )
-            save_strategy_note(
-                "watchlist",
-                f"{name} 관심종목 자동 삭제 ({reason})",
-                f"watchlist 삭제 기준: {'청산 후' if is_post_liq else '신규 등록 후'} {days_since}일 경과",
-            )
-            logger.info(f"[자동 제거] {name}({code}) {reason}")
-
 
 def _paper_execute(signal, claude_opinion: str, signal_id: int | None) -> None:
     """AUTO_TRADE=false path: no mock table write; only signal action update."""
@@ -3483,6 +2768,10 @@ def main():
     entry_interval = int(_WORKER_CONFIG.get("entry_interval_seconds", interval))
     exit_interval = int(_WORKER_CONFIG.get("exit_interval_seconds", 60))
     init_db()
+
+    # 분리된 모듈에 공유 의존성 주입
+    _result_tracker.init(kiwoom)
+    _watchlist_manager.init(_WORKER_CONFIG)
 
     logger.info("포트폴리오 초기 동기화 중...")
     sync_all(kiwoom)

@@ -2060,7 +2060,7 @@ def run_daily_review():
 
     # 복기 직전 결과 스냅샷 최신화: 현재가/성과 계산을 먼저 갱신
     try:
-        from worker.main import update_signal_results, update_screening_results, update_trade_results
+        from worker.result_tracker import update_signal_results, update_screening_results, update_trade_results
         update_signal_results()
         update_screening_results()
         update_trade_results()
