@@ -3,7 +3,15 @@
 ## 프로젝트 개요
 AI 기반 개인용 퀀트 트레이딩 시스템.
 키움증권 MCP로 계좌조회/매매 가능.
-백그라운드 워커가 평일 장 시간(08:00~18:00) 자동 조건 감지 → 텔레그램 알림 → 텔레그램 봇으로 주문 실행.
+백그라운드 워커가 평일 정규장(09:00~15:30) 자동 조건 감지 → 텔레그램 알림 → 텔레그램 봇으로 주문 실행.
+
+**운영 모드**: `DB_PATH` 환경변수로 분기
+- 모의투자: `DB_PATH` 미설정 → `data/trading.db` (기본값)
+- 실전투자: `DB_PATH=data/trading_real.db`
+
+**자동화 모드**: `AUTO_TRADE` 환경변수로 제어
+- `AUTO_TRADE=false` (기본, 수동 모드): 스크리닝 결과 → 텔레그램 승인 버튼으로 선택 추가, 매매 수동 실행
+- `AUTO_TRADE=true` (자동 모드): 스크리닝 → watchlist 자동 추가, 신호 → 자동 매매 실행
 
 ---
 
@@ -271,13 +279,16 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 - MCP 서버: `kiwoom_mcp/kiwoom_mcp/server.py` — 모든 MCP 도구를 단일 서버(`kiwoom-mcp`)로 제공
 - 종목/조건 설정: DB (`data/trading_real.db`, SQLite) — MCP 도구로 실시간 반영
 - DB 모듈: `data/db.py` — 신호 로그, watchlist, positions, 전략 노트 등 DB CRUD
-  - watchlist: 신호 감지 조건 (RSI, MA, 볼린저 등) — 매수 전/후 공통
-  - positions: 포지션 관리 (목표가, 손절가, 추가매수가 등) — 매수 후 전용, 매수 체결 시 자동 생성
+  - watchlist: 신호 감지 조건 (RSI, MA, 볼린저 등) — 매수 전/후 공통. 추가 필드: `sector_code`, `last_trade_at`, `post_liquidation`, `created_at`
+  - positions: 포지션 관리 (목표가, 손절가, 추가매수가 등) — 매수 후 전용, 매수 체결 시 자동 생성. 추가 필드: `avg_price`, `quantity`
+  - screening_log: 자동 스크리닝 결과 이력 (종목별 추천/보류/부적합 판정 + 지표 스냅샷)
+  - strategy_reflection_logs / strategy_policy_state: AI 판단 품질 평가 및 정책 상태 추적 (워커 내부용)
 - 포트폴리오 동기화: `worker/portfolio_sync.py`
 - 리포트 조회: `worker/report.py`
 - 외부 API 클라이언트: `worker/clients/` (키움 경량, DART 경량, 뉴스) / `kiwoom_mcp/kiwoom_mcp/` (키움 풀, DART 풀)
 - 뉴스 검색: `worker/clients/news_client.py` — 네이버 뉴스 API, AI 판단에 뉴스 컨텍스트 제공
-- 자동 스크리닝: `worker/stock_analyzer.py` — 장 마감 후 유망 종목 자동 발굴 (워커 전용)
+- 자동 스크리닝: `worker/stock_analyzer.py` — 장중/마감 유망 종목 자동 발굴 (워커 전용)
+  - DB: `screening_log` 테이블에 결과 저장, `market_reports` 테이블에 시장 브리핑 저장
 - 텔레그램 알림: `notifications/telegram.py` (인라인 버튼 포함)
 - 텔레그램 봇 주문: `notifications/telegram_bot.py`
 
@@ -387,8 +398,11 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 5. 후보별 간단 분석 후 편입 적합성 평가 + 주문가능금액 기반 수량 제안 → 사용자에게 제안
 
 > **자동 모드 참고** (`worker/stock_analyzer.py`):
-> - 장중 10:00, 13:00 — 거래량 급증 종목 경량 스캔 → 텔레그램 알림만 (watchlist 추가 안 함)
-> - 장 마감 15:40 — 거래량 급증 + 눌림목 + 외인 순매수 → AI 풀 분석 → 적합 종목 watchlist 자동 추가 + 텔레그램 알림
+> - 장중 11:00, 13:00 — `run_intraday_scan()`: 거래량 급증 + HTS 조건검색 → 프리필터 → AI 풀 분석
+>   - `AUTO_TRADE=true` 시 watchlist 자동 추가, `AUTO_TRADE=false` 시 텔레그램 승인 버튼 발송
+>   - 프리필터: 시총 500억↑, 등락률 -10%~+7%, RSI ≤ 70, MA 역배열 배제 (시장 상황 동적 조정)
+>   - 하네스: mini 모델로 후보 랭킹 → 상위 5개만 풀 모델 AI 분석
+> - 장 마감 15:40 — `run_daily_screening()`: 더 넓은 후보군으로 풀 스크리닝 → watchlist 자동 추가
 
 ## 지표 계산 기준 (worker/indicators.py 기준)
 

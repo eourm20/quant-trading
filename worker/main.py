@@ -3552,6 +3552,9 @@ def main():
     scheduler.add_job(lambda: _run_on_open_day("run_intraday_scan", run_intraday_scan), "cron",
                       day_of_week="mon-fri", hour=11, minute=0,
                       id="intraday_scan")
+    scheduler.add_job(lambda: _run_on_open_day("run_intraday_scan", run_intraday_scan), "cron",
+                      day_of_week="mon-fri", hour=13, minute=0,
+                      id="intraday_scan_pm")
     scheduler.add_job(lambda: _run_on_open_day("run_daily_screening", run_daily_screening), "cron",
                       day_of_week="mon-fri", hour=15, minute=40,
                       id="daily_screening")
