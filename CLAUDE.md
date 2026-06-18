@@ -398,7 +398,7 @@ watchlist의 `horizon` 필드로 종목별 매매 기간을 관리한다.
 5. 후보별 간단 분석 후 편입 적합성 평가 + 주문가능금액 기반 수량 제안 → 사용자에게 제안
 
 > **자동 모드 참고** (`worker/stock_analyzer.py`):
-> - 장중 11:00, 13:00 — `run_intraday_scan()`: 거래량 급증 + HTS 조건검색 → 프리필터 → AI 풀 분석
+> - 장중 11:00 — `run_intraday_scan()`: 거래량 급증 + HTS 조건검색 → 프리필터 → AI 풀 분석
 >   - `AUTO_TRADE=true` 시 watchlist 자동 추가, `AUTO_TRADE=false` 시 텔레그램 승인 버튼 발송
 >   - 프리필터: 시총 500억↑, 등락률 -10%~+7%, RSI ≤ 70, MA 역배열 배제 (시장 상황 동적 조정)
 >   - 하네스: mini 모델로 후보 랭킹 → 상위 5개만 풀 모델 AI 분석
