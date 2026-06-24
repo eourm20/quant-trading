@@ -2291,8 +2291,9 @@ def _extract_decision_confidence(claude_opinion: str, trace: dict) -> int | None
     return None
 
 
-def _build_stock_feature_snapshot(signal, stock, price_payload: dict) -> dict | None:
-    """신호 시점 주요 지표를 dict로 요약 (RAG/학습용 저장)."""
+def _build_stock_feature_snapshot(signal, stock, price_payload: dict) -> str | None:
+    """신호 시점 주요 지표를 JSON 문자열로 요약 (RAG/학습용 저장)."""
+    import json as _json
     try:
         snap: dict = {}
         if price_payload:
@@ -2307,7 +2308,7 @@ def _build_stock_feature_snapshot(signal, stock, price_payload: dict) -> dict | 
         if signal:
             snap["stock_code"] = signal.stock_code
             snap["signal_type"] = signal.signal_type
-        return snap if snap else None
+        return _json.dumps(snap, ensure_ascii=False) if snap else None
     except Exception:
         return None
 
