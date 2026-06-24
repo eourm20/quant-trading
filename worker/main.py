@@ -2496,6 +2496,22 @@ def run_check(check_mode: str = "all"):
                 signal.stock_code, signal.triggered_ids, signal.triggered_conditions, conditions
             )
 
+            # 손절가 이탈 시 쿨다운과 무관하게 DIRECT_SELL 강제 (#124)
+            # 모든 exit 조건이 쿨다운 중이어도 stop_loss_price 돌파는 즉시 처리
+            _sl_price = signal.stop_loss_price or 0
+            if (
+                not new_conditions
+                and signal.in_portfolio
+                and _sl_price > 0
+                and signal.current_price <= _sl_price
+            ):
+                logger.warning(
+                    f"[{signal.stock_name}] 손절가 이탈 ({signal.current_price:,} ≤ {_sl_price:,}) "
+                    f"— 모든 조건 쿨다운 중이나 DIRECT_SELL 강제 직행"
+                )
+                new_conditions = [f"손절가 이탈 ({signal.current_price:,}원 ≤ {_sl_price:,}원)"]
+                new_ids = ["stop_loss_breach"]
+
             if not new_conditions:
                 logger.info(f"[{signal.stock_name}] 신호 감지됐으나 쿨다운 중 — 스킵")
                 continue
@@ -2653,6 +2669,16 @@ def run_check(check_mode: str = "all"):
             policy_version = str((trace or {}).get("policy_version") or "")
             decision_confidence = _extract_decision_confidence(claude_opinion, trace)
 
+            # 도구 활용 부족 시 신뢰도 강제 하향 — 참고용 경로로 처리 (#131)
+            _min_tool_count = 3
+            _unique_tools = len(set(tool_sequence))
+            if _unique_tools < _min_tool_count and decision_status == "normal":
+                logger.info(
+                    f"[{signal.stock_name}] tool_coverage 부족 ({_unique_tools}/{_min_tool_count}) "
+                    f"→ decision_confidence 강제 하향"
+                )
+                decision_confidence = min(decision_confidence or 0, 45)
+
             stock_feature_snapshot = None
             try:
                 price_payload = kiwoom.get_current_price(signal.stock_code) or {}
@@ -2726,10 +2752,14 @@ def run_check(check_mode: str = "all"):
                 except Exception as _ce:
                     logger.debug(f"[{signal.stock_name}] min_confidence 체크 실패: {_ce}")
 
-            if not _low_confidence_suppress:
-                send_signal_alert(signal, claude_opinion, holdings=holdings, signal_id=signal_id, auto_mode=AUTO_TRADE)
-                if agent_tools_summary:
-                    send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
+            send_signal_alert(
+                signal, claude_opinion,
+                holdings=holdings, signal_id=signal_id,
+                auto_mode=AUTO_TRADE,
+                low_confidence=_low_confidence_suppress,  # 참고용 발송, 버튼 없음 (#125)
+            )
+            if agent_tools_summary and not _low_confidence_suppress:
+                send_message(f"🔍 *분석 경로* ({signal.stock_name})\n{agent_tools_summary}")
 
             if claude_opinion:
                 _maybe_save_hold_conditions(signal, claude_opinion)

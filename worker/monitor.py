@@ -307,6 +307,14 @@ def check_stock(
 
         triggered_msgs = []
         triggered_ids = []
+
+        # 손절가 이탈 — 다른 조건 없어도 즉시 exit 신호 생성 (#124)
+        # 쿨다운 필터보다 앞에서 잡아야 하므로 conditions 루프 전에 체크
+        _sl_check = eval_cond.get("stop_loss_price") or 0
+        if in_portfolio and _sl_check > 0 and current_price <= _sl_check:
+            triggered_msgs.append(f"손절가 이탈 ({current_price:,}원 ≤ {_sl_check:,}원)")
+            triggered_ids.append("stop_loss_breach")
+
         for cond_def in conditions:
             if cond_def.get("signal_type", "both") not in allowed_types:
                 continue
@@ -327,11 +335,47 @@ def check_stock(
                 for c in conditions
                 if c["id"] in triggered_ids
             ]
+            # stop_loss_breach는 conditions 테이블에 없는 합성 ID — 항상 exit 처리
+            if "stop_loss_breach" in triggered_ids:
+                triggered_types.append("exit")
             rep_signal_type = min(triggered_types, key=lambda t: type_priority.get(t, 9), default="")
             add_signal_mode = _classify_add_signal(triggered_ids, current_price, avg_price) if rep_signal_type == "add" else ""
 
             if rep_signal_type == "add" and not add_signal_mode:
                 logger.info(f"[{name}] add 신호 감지됐으나 평단 조건 불일치로 스킵")
+                return None
+
+            # MA20 하향이탈 상태에서 물타기 차단 (#129, #130)
+            # exit 쿨다운 중 add만 단독 발화해도 MA20 아래면 억제
+            if rep_signal_type == "add" and chart and chart.above_ma20 is False:
+                logger.info(f"[{name}] add 신호 감지됐으나 MA20 하향이탈 중 — 물타기 금지")
+                return None
+
+            # 물타기(averaging_down) 최대 1회 원칙 하드 강제 (#120, #123)
+            # 현재 포지션 내 매수 횟수가 2회 이상이면 추가 물타기 차단
+            if rep_signal_type == "add" and add_signal_mode == "averaging_down":
+                from data.db import get_add_buy_count
+                _buy_cnt = get_add_buy_count(code)
+                if _buy_cnt >= 2:
+                    logger.info(
+                        f"[{name}] averaging_down 신호 감지됐으나 물타기 1회 한도 초과"
+                        f" (현재 포지션 내 매수 {_buy_cnt}회) — 스킵"
+                    )
+                    return None
+
+            # RSI 과매도 entry: 확인 캔들 요구 (#118)
+            # 전일 종가 대비 현재가가 회복 중일 때만 entry 허용 (낙하 중 매수 방지)
+            rsi_entry_ids = {"rsi_oversold", "rsi_lte_intraday"}
+            if (
+                rep_signal_type == "entry"
+                and any(cid in rsi_entry_ids for cid in triggered_ids)
+                and len(close_prices) >= 2
+                and current_price <= close_prices[0]
+            ):
+                logger.info(
+                    f"[{name}] RSI entry 신호 감지됐으나 확인 캔들 없음"
+                    f" (현재가 {current_price:,} ≤ 전일종가 {close_prices[0]:,}) — 스킵"
+                )
                 return None
 
             from data.db import get_recent_trades_for_stock

@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 class KiwoomClient:
+    # 인스턴스 간 공유 rate-limit 슬롯 (#128)
+    # claude_judge, portfolio_sync 등 별도 인스턴스도 동일 throttle 공유
+    _class_request_lock: threading.Lock = threading.Lock()
+    _class_last_request_ts: float = 0.0
+
     @staticmethod
     def _env_bool(value: str) -> bool | None:
         if value in {"1", "true", "yes", "y", "on"}:
@@ -41,8 +46,7 @@ class KiwoomClient:
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
         self._token_lock = threading.Lock()
-        self._request_lock = threading.Lock()
-        self._last_request_ts = 0.0
+        self._last_request_ts = 0.0  # kept for backwards compat but unused
         try:
             self._min_request_interval = max(
                 0.0,
@@ -70,12 +74,12 @@ class KiwoomClient:
         if self._min_request_interval <= 0:
             return
         wait = 0.0
-        with self._request_lock:
+        with KiwoomClient._class_request_lock:
             now = time.time()
-            elapsed = now - self._last_request_ts
+            elapsed = now - KiwoomClient._class_last_request_ts
             if elapsed < self._min_request_interval:
                 wait = self._min_request_interval - elapsed
-            self._last_request_ts = now + wait
+            KiwoomClient._class_last_request_ts = now + wait
         if wait > 0:
             logger.debug(f"[throttle] {api_name} {wait:.3f}s wait")
             time.sleep(wait)

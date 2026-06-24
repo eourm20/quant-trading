@@ -27,6 +27,11 @@ def filter_new_conditions(
     new_ids, new_msgs = [], []
 
     for cid, msg in zip(triggered_ids, triggered_conditions):
+        # 손절가 이탈 합성 신호는 쿨다운 없이 항상 통과 (#124)
+        if cid == "stop_loss_breach":
+            new_ids.append(cid)
+            new_msgs.append(msg)
+            continue
         cooldown_minutes = cooldown_map.get(cid, 60)
         key = f"{stock_code}:{cid}"
         next_allowed_at = get_cooldown(key)
@@ -43,5 +48,7 @@ def mark_sent(stock_code: str, triggered_ids: list[str]):
 
     cooldown_map = {c["id"]: int(c.get("cooldown_minutes", 60) or 60) for c in get_conditions()}
     for cid in triggered_ids:
+        if cid == "stop_loss_breach":
+            continue  # 합성 ID는 쿨다운 기록 불필요
         key = f"{stock_code}:{cid}"
         set_cooldown(key, cooldown_minutes=cooldown_map.get(cid, 60))

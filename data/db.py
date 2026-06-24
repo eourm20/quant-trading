@@ -1754,6 +1754,36 @@ def update_trade_result(trade_id: str, result_pct: float, period: str = "3d"):
         conn.commit()
 
 
+def get_add_buy_count(stock_code: str) -> int:
+    """현재 포지션 진입 이후 매수 횟수 반환 (첫 매수 포함).
+    가장 최근 전량 매도 이후의 매수 횟수를 세어 반환한다.
+    첫 매수=1, 물타기 1회 실행=2 이상.
+    """
+    with get_conn() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT side, quantity, executed_at FROM trades "
+                "WHERE stock_code = ? ORDER BY executed_at ASC",
+                (stock_code,),
+            ).fetchall()
+        except Exception:
+            return 0
+
+    buy_count = 0
+    running_qty = 0
+    for r in rows:
+        side = (r["side"] or "").strip()
+        qty = int(r["quantity"] or 0)
+        if side == "매수":
+            running_qty += qty
+            buy_count += 1
+        elif side == "매도":
+            running_qty = max(0, running_qty - qty)
+            if running_qty == 0:
+                buy_count = 0  # 전량 청산 → 포지션 리셋
+    return buy_count
+
+
 def get_recent_trades_for_stock(stock_code: str, days: int = 3) -> list[dict]:
     """특정 종목의 최근 N일 매매 이력 조회 (최신순)"""
     from datetime import timedelta

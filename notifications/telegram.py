@@ -203,7 +203,7 @@ def _parse_qty_rec(claude_opinion: str) -> int | None:
     return None
 
 
-def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list | None = None, signal_id: int | None = None, auto_mode: bool = False) -> bool:
+def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list | None = None, signal_id: int | None = None, auto_mode: bool = False, low_confidence: bool = False) -> bool:
     conditions_text = "\n".join(f"  • {c}" for c in signal.triggered_conditions)
     signal_type = str(getattr(signal, "signal_type", "") or "").strip().lower()
     add_mode = str(getattr(signal, "add_signal_mode", "") or "").strip().lower()
@@ -245,8 +245,10 @@ def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list 
 
     qty_rec_line = f"🎯 AI 추천 수량: *{rec_qty:,}주*\n" if rec_qty else ""
 
+    icon = "📎" if low_confidence else "🚨"
+    lc_prefix = " [참고용 — 신뢰도 낮음]" if low_confidence else ""
     signal_text = (
-        f"🚨 *{name}* ({code}) {signal_kind}\n\n"
+        f"{icon} *{name}* ({code}) {signal_kind}{lc_prefix}\n\n"
         f"💰 현재가: *{signal.current_price:,}원*\n"
         f"{holding_line}"
         f"📊 RSI: {signal.rsi if signal.rsi else 'N/A'}\n"
@@ -254,7 +256,7 @@ def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list 
         f"⚡ 트리거된 조건:\n{conditions_text}"
         f"{order_rec_line}"
         f"{qty_rec_line}\n"
-        f"어떻게 하시겠습니까?"
+        f"{'(AI 신뢰도 부족 — 참고만 하세요)' if low_confidence else '어떻게 하시겠습니까?'}"
     )
 
     # callback_data는 64바이트 제한이 있으므로 code/signal_id 중심으로 짧게 유지
@@ -289,6 +291,22 @@ def send_signal_alert(signal, claude_opinion: str | None = None, holdings: list 
             ],
         ]
     }
+    # 신뢰도 낮음: 버튼 없이 참고용 텍스트만 발송 (#125)
+    if low_confidence:
+        ok = _post(signal_text, parse_mode="Markdown")
+        if claude_opinion:
+            opinion_body = "\n".join(
+                l for l in claude_opinion.splitlines()
+                if not l.strip().startswith("[주문방식]")
+                and not l.strip().startswith("[추천수량]")
+            ).strip()
+            if opinion_body:
+                opinion_text = f"🤖 AI 판단 (신뢰도 낮음):\n\n{opinion_body}"
+                if len(opinion_text) > TELEGRAM_MAX_LEN:
+                    opinion_text = opinion_text[:TELEGRAM_MAX_LEN] + "\n\n...(이하 생략)"
+                _post(opinion_text, parse_mode=None)
+        return ok
+
     # 자동 모드: 버튼 없이 신호 + AI 판단만 발송
     if auto_mode:
         ok = _post(signal_text, parse_mode="Markdown")

@@ -2655,11 +2655,13 @@ def _calculate_adjustments(regime: dict, stock: dict) -> dict:
     if cur is not None and trend != "sideways":
         base_floor = {"단기": 38, "장기": 42}.get(horizon, 40)  # 종목 유형별 하한
         if trend == "downtrend":
-            ideal = min(45, cur + 3)  # 상한 45
+            target = min(45, cur + 3)
         else:  # uptrend
-            ideal = max(base_floor, cur - 3)  # 하한: horizon 기본값
-        if abs(ideal - cur) >= 3:
-            adjustments["rsi_oversold"] = ideal
+            target = max(base_floor, cur - 3)
+        # 1회 최대 ±2pt 조정 (#132)
+        step = max(-2, min(2, target - cur))
+        if step != 0:
+            adjustments["rsi_oversold"] = cur + step
 
     # ── RSI 과매수 ──
     cur = stock.get("rsi_overbought")
@@ -2674,9 +2676,11 @@ def _calculate_adjustments(regime: dict, stock: dict) -> dict:
             adj += 2
         elif volatility == "low":
             adj -= 2
-        ideal = max(55, min(80, base + adj))
-        if abs(ideal - cur) >= 3:
-            adjustments["rsi_overbought"] = ideal
+        target = max(55, min(80, base + adj))
+        # 1회 최대 ±2pt 조정 (#132)
+        step = max(-2, min(2, target - cur))
+        if step != 0:
+            adjustments["rsi_overbought"] = cur + step
 
     # ── CCI 과매도 ──
     cur = stock.get("cci_oversold")
