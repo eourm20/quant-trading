@@ -2274,6 +2274,44 @@ def check_market_dip():
     send_message(f"📊 *급락 스캔 완료* ({bought}종목 매수)\n" + "\n".join(results))
 
 
+def _extract_decision_confidence(claude_opinion: str, trace: dict) -> int | None:
+    """AI 판단 텍스트/trace에서 신뢰도(0~100)를 추출. 없으면 None 반환."""
+    import re as _re
+    if trace:
+        conf = trace.get("decision_confidence")
+        if conf is not None:
+            try:
+                return max(0, min(100, int(conf)))
+            except (TypeError, ValueError):
+                pass
+    if claude_opinion:
+        m = _re.search(r'신뢰도\s*[:\-]\s*(\d+)', str(claude_opinion))
+        if m:
+            return max(0, min(100, int(m.group(1))))
+    return None
+
+
+def _build_stock_feature_snapshot(signal, stock, price_payload: dict) -> dict | None:
+    """신호 시점 주요 지표를 dict로 요약 (RAG/학습용 저장)."""
+    try:
+        snap: dict = {}
+        if price_payload:
+            snap["current_price"] = price_payload.get("stck_prpr") or price_payload.get("cur_prc")
+        chart = getattr(stock, "chart", None)
+        if chart:
+            snap["rsi"] = getattr(chart, "rsi", None)
+            snap["ma5"] = getattr(chart, "ma5", None)
+            snap["ma20"] = getattr(chart, "ma20", None)
+            snap["above_ma20"] = getattr(chart, "above_ma20", None)
+            snap["volume_ratio"] = getattr(chart, "volume_ratio", None)
+        if signal:
+            snap["stock_code"] = signal.stock_code
+            snap["signal_type"] = signal.signal_type
+        return snap if snap else None
+    except Exception:
+        return None
+
+
 def _set_position_by_ai(stock_code: str, stock_name: str, current_price: int, qty: int):
     """매수 체결 후 AI가 포지션 관리값 판단 → positions 테이블 업데이트 + 텔레그램 알림."""
     try:
