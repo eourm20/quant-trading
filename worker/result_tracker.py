@@ -106,6 +106,13 @@ def update_signal_results():
                 ).replace(",", "")))
                 if now_price and row["current_price"]:
                     pct = (now_price - row["current_price"]) / row["current_price"] * 100
+                    # 이상값 감지: ±200% 초과는 로그 경고 (기록은 하되 통계 분석 시 제외 고려)
+                    if abs(pct) > 200:
+                        logger.warning(
+                            f"[결과 {period_name} 이상값] {row['stock_name']} #{row['id']}: "
+                            f"{pct:+.2f}% (base={row['current_price']:,}, now={now_price:,}) "
+                            f"— 주식분할/병합 또는 현재가 오류 가능성"
+                        )
                     update_signal_result(row["id"], round(pct, 2), period=period_name)
                     logger.debug(f"[결과 {period_name}] {row['stock_name']} #{row['id']}: {pct:+.2f}%")
                     # 3d 결과 확정 시 FAISS 재인덱싱 (verdict + 수익률 포함)
@@ -291,6 +298,13 @@ def update_screening_results():
                     continue
 
                 pct = (eval_price - base) / base * 100
+                # 이상값 감지: ±200% 초과는 데이터 품질 문제 가능성
+                if abs(pct) > 200:
+                    logger.warning(
+                        f"[스크리닝 결과 {period_name} 이상값] {row['stock_name']} #{row['id']}: "
+                        f"{pct:+.2f}% (base={base:,}, eval={eval_price:,}, src={price_src}) "
+                        f"— 저가주/주식분할/current_price 오류 가능성"
+                    )
                 update_screening_result(row["id"], round(pct, 2), period=period_name)
                 if int(row["current_price"] or 0) <= 0:
                     try:

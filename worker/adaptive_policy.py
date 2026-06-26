@@ -97,6 +97,7 @@ def _fetch_similar_signal_stats(signal_type: str, days: int = 180) -> tuple[int,
             WHERE created_at >= ?
               AND {where}
               AND result_pct IS NOT NULL
+              AND ABS(result_pct) <= 200
             """,
             params,
         ).fetchone()
