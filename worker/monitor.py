@@ -378,6 +378,29 @@ def check_stock(
                 )
                 return None
 
+            # entry 기준 강화: 연속형 조건만으로 발동 시 MA20 하락 과도 구간 차단 (#139)
+            # 전환형(골든크로스·볼린저·MACD·일목 등) 없이 연속형(RSI/CCI/거래량)만 트리거된 경우
+            # MA20 대비 -5% 이상 하락 중이면 추가 하락 초입 진입 방지
+            _transition_ids = {
+                "golden_cross", "macd_golden_cross", "bollinger_lower_break",
+                "ichimoku_golden_cross", "ichimoku_cloud_breakout",
+                "stochastic_golden_cross", "ma5_recovery", "new_high_20d",
+            }
+            if (
+                rep_signal_type == "entry"
+                and not in_portfolio
+                and triggered_ids
+                and not any(cid in _transition_ids for cid in triggered_ids)
+                and chart is not None
+                and getattr(chart, "ma20", None)
+                and current_price < chart.ma20 * 0.95
+            ):
+                logger.info(
+                    f"[{name}] entry 연속형 단독 + MA20 하락 과도 "
+                    f"({current_price:,} < MA20 {int(chart.ma20):,} × 0.95) — 스킵"
+                )
+                return None
+
             from data.db import get_recent_trades_for_stock
             recent_trades = get_recent_trades_for_stock(code, days=3)
 

@@ -2536,6 +2536,17 @@ def run_check(check_mode: str = "all"):
             signal_type = str(getattr(signal, "signal_type", "") or "").strip().lower()
             in_portfolio = bool(getattr(signal, "in_portfolio", False))
 
+            # both 신호는 보유 여부에 따라 exit/entry로 동적 분기 (#143)
+            # both로 유지하면 adaptive_policy에서 score-1 패널티 + 방향 불명확으로 성과 저조
+            if signal_type == "both":
+                resolved_type = "exit" if in_portfolio else "entry"
+                signal.signal_type = resolved_type
+                signal_type = resolved_type
+                logger.debug(
+                    f"[{signal.stock_name}] both 신호 → {resolved_type} 전환 "
+                    f"(in_portfolio={in_portfolio})"
+                )
+
             if check_mode == "exit_only":
                 # 1분 루프에서도 보유 종목 add(추가매수) 타이밍을 즉시 반영한다.
                 if (not in_portfolio) or (signal_type not in {"exit", "both", "add"}):
