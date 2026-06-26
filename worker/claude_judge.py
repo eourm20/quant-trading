@@ -501,9 +501,12 @@ def harness_check(signal, holdings: list) -> str:
         except Exception:
             pass
 
+    _sig_type = str(getattr(signal, "signal_type", "") or "")
+
     # ── SKIP: 당일 홀드 1회 이상 + RSI 완화 범위(42~58) + 거래량 보통 이하 ──
-    # 이미 오늘 홀드가 나온 종목은 조건 문턱을 낮춰 AI 호출 전 차단
+    # exit/add 신호는 보유 종목 관리이므로 홀드 횟수 게이트 제외
     if (_today_hold_cnt >= 1
+            and _sig_type not in ("exit", "add")
             and rsi is not None and 42 <= rsi <= 58
             and volume_ratio is not None and volume_ratio < 0.8
             and not any(k in triggered_text for k in strong_kw)):
@@ -514,9 +517,11 @@ def harness_check(signal, holdings: list) -> str:
         return HARNESS_SKIP
 
     # ── SKIP: 당일 홀드 3회 이상 + 강한 전환 신호 없음 → 당일 스킵 (다음날 09:00 쿨다운 리셋으로 자동 해제) ──
-    if _today_hold_cnt >= 3:
+    # exit/add 신호는 보유 포지션 청산/추가매수 판단이므로 홀드 3회 게이트 제외
+    if _today_hold_cnt >= 3 and _sig_type not in ("exit", "add"):
         logger.info(
-            f"[하네스] {signal.stock_name}: 당일 홀드 {_today_hold_cnt}회 → SKIP"
+            f"[하네스] {signal.stock_name}: 당일 홀드 {_today_hold_cnt}회 → SKIP "
+            f"(signal_type={_sig_type!r})"
         )
         return HARNESS_SKIP
 
