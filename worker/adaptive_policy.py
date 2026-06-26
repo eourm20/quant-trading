@@ -77,11 +77,14 @@ def _fetch_similar_signal_stats(signal_type: str, days: int = 180) -> tuple[int,
         avg_sql = "AVG(result_pct) AS avg3"
         basis = "add_buy_actions"
     elif st == "entry":
-        where = "signal_type = ? AND verdict = '매수'"
+        # verdict 무관하게 entry 신호 전체의 가격 결과로 평가
+        # verdict='매수'만 보면 gate 차단 시 샘플이 쌓이지 않는 순환 트랩 발생
+        # "entry 신호 타이밍이 좋았나?" = 신호 발동 후 3일 가격 상승 여부
+        where = "signal_type = ? AND verdict IS NOT NULL"
         params = (since, st)
         hit_sql = "SUM(CASE WHEN result_pct > 0 THEN 1 ELSE 0 END) AS wins"
         avg_sql = "AVG(result_pct) AS avg3"
-        basis = "entry_buy_signals"
+        basis = "entry_all_signals"
     else:
         # Mixed/unknown signal types do not have a stable directional meaning.
         return 0, None, None, "mixed_or_unknown"

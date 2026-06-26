@@ -1860,6 +1860,17 @@ def _auto_execute(
                     f"[{signal.stock_name}] adaptive gate: 신규진입 차단 "
                     f"(stance={adaptive.stance}, reason={adaptive.reason})"
                 )
+                # 차단된 신호도 DB 저장 — result_pct가 3일 후 자동 기록되어
+                # adaptive 통계가 실제 시장 결과로 계속 갱신됨 (순환 트랩 방지)
+                try:
+                    save_signal(
+                        signal,
+                        claude_opinion=f"[차단] adaptive gate 차단 ({adaptive.reason})",
+                        in_portfolio=bool(getattr(signal, "in_portfolio", False)),
+                        source="adaptive_gate_block",
+                    )
+                except Exception as _save_e:
+                    logger.debug(f"[{signal.stock_name}] adaptive gate 차단 신호 저장 실패: {_save_e}")
                 return
             old_qty = qty
             qty = max(1, int(round(qty * float(adaptive.qty_multiplier or 1.0))))
