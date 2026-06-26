@@ -191,6 +191,13 @@ def get_judgment_adaptive_policy(
             allow_new_entry=(st == "add" or (trigger_count >= 3 and regime != "risk_off")),
             reason=f"score={score}, regime={regime}, basis={basis}, loss_streak={loss_streak}, samples={samples}",
         )
+    # Gate: score<0 + 부진한 hit_rate → 충분한 샘플에서 실력 미달이므로 신규 진입 차단
+    _neg_gate = (
+        score < 0
+        and samples >= 10
+        and hit is not None
+        and hit < 45.0
+    )
     return AdaptivePolicy(
         stance="balanced",
         score=score,
@@ -198,8 +205,8 @@ def get_judgment_adaptive_policy(
         hit_rate_3d=hit,
         avg_3d=avg3,
         qty_multiplier=1.0,
-        allow_new_entry=True,
-        reason=f"score={score}, regime={regime}, basis={basis}, samples={samples}",
+        allow_new_entry=not _neg_gate,
+        reason=f"score={score}, regime={regime}, basis={basis}, samples={samples}, neg_gate={_neg_gate}",
     )
 
 
