@@ -138,7 +138,7 @@ def get_judgment_adaptive_policy(
     trigger_count: int = 0,
 ) -> AdaptivePolicy:
     st = signal_type or ""
-    samples, hit, avg3, basis = _fetch_similar_signal_stats(signal_type=st, days=180)
+    samples, hit, avg3, basis = _fetch_similar_signal_stats(signal_type=st, days=90)
     loss_streak = _fetch_recent_buy_loss_streak(limit=5)
     regime = _market_regime_label(kospi_rate, kosdaq_rate)
 
@@ -193,9 +193,10 @@ def get_judgment_adaptive_policy(
             reason=f"score={score}, regime={regime}, basis={basis}, loss_streak={loss_streak}, samples={samples}",
         )
     # Gate: score<0 + 부진한 hit_rate → 충분한 샘플에서 실력 미달이므로 신규 진입 차단
+    # samples >= 15: 샘플 부족 시 gate 조기 해제 (90일 창 + 15건 = 약 2~3개월 소진 시 자동 해제)
     _neg_gate = (
         score < 0
-        and samples >= 10
+        and samples >= 15
         and hit is not None
         and hit < 45.0
     )
