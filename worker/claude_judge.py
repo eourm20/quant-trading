@@ -1946,21 +1946,26 @@ def judge_position_values(
 - 손절가: 평단가 대비 -5% ~ -10%. 직전 지지선 아래에 설정. 진입 후 변경 금지 원칙이므로 신중하게.
 - 목표가: R/R 비율 최소 2:1 이상. 피보나치 확장 127~161% 또는 직전 저항선 근처.
 - 추가매수가: 평단가 대비 -8% 근처. 지지선 부근. 물타기 1회 원칙.
+- horizon 판단 기준:
+  · 단기(1~2주): 거래량 급증 + 단기 모멘텀 기반 진입, 변동성 크고 빠른 추세
+  · 중기(1~3개월): 기술적 조정 + 지지선 눌림목, 안정적 추세 지속
+  · 장기(3개월+): 펀더멘털 기반 + 외인 축적, 장기 우상향 구조
 - horizon에 따라 목표/손절 폭 조절:
-  · 단기(1~2주): 목표가 +5~10%, 손절 -3~5%
-  · 중기(1~3개월): 목표가 +10~20%, 손절 -5~8%
-  · 장기(3개월+): 목표가 +20% 이상, 손절 -8~10%
+  · 단기: 목표가 +5~10%, 손절 -3~5%
+  · 중기: 목표가 +10~20%, 손절 -5~8%
+  · 장기: 목표가 +20% 이상, 손절 -8~10%
+- 현재 watchlist에 설정된 horizon이 부적절하다고 판단되면 horizon 필드를 재설정하세요.
 - 해당 기간 내에 목표가 도달 가능성이 낮은 종목은 추천수량을 줄이거나 홀드 권고.
 
 ## 출력 형식 (JSON만, 설명 없이)
-{"target_price": 정수, "target_reason": "근거 한 줄", "stop_loss_price": 정수, "stop_loss_reason": "근거 한 줄", "add_buy_price": 정수, "add_buy_reason": "근거 한 줄"}"""
+{"target_price": 정수, "target_reason": "근거 한 줄", "stop_loss_price": 정수, "stop_loss_reason": "근거 한 줄", "add_buy_price": 정수, "add_buy_reason": "근거 한 줄", "horizon": "단기|중기|장기", "horizon_reason": "horizon 판단 근거 한 줄"}"""
 
         user_prompt = f"""## 매수 체결 정보
 - 종목: {stock_name} ({stock_code})
 - 평단가: {avg_price:,}원
 - 수량: {quantity}주
 - 현재가: {current_price:,}원
-- horizon: {horizon}
+- 현재 watchlist horizon: {horizon or '미설정(기본값 중기)'}
 
 ## 차트 지표
 {chart_text or '데이터 부족'}
@@ -1969,7 +1974,7 @@ def judge_position_values(
 - 최고가: {max(high_prices[:20]):,}원 (20일)
 - 최저가: {min(low_prices[:20]):,}원 (20일)
 
-JSON으로 목표가, 손절가, 추가매수가를 출력하세요."""
+JSON으로 목표가, 손절가, 추가매수가, horizon을 출력하세요."""
 
         if _BACKEND == "anthropic":
             response = _client.messages.create(

@@ -2357,6 +2357,22 @@ def _set_position_by_ai(stock_code: str, stock_name: str, current_price: int, qt
         if ab:
             update_position_field(stock_code, "add_buy_price", ab)
 
+        # AI가 horizon을 재판단한 경우 watchlist 업데이트
+        ai_horizon = result.get("horizon", "")
+        if ai_horizon in ("단기", "중기", "장기"):
+            try:
+                from data.db import update_stock_field, get_watchlist
+                _wl = next((s for s in get_watchlist() if s["code"] == stock_code), None)
+                _cur_horizon = (_wl or {}).get("horizon", "")
+                if _cur_horizon != ai_horizon:
+                    update_stock_field(stock_code, "horizon", ai_horizon)
+                    logger.info(
+                        f"[{stock_name}] horizon 재설정: {_cur_horizon!r} → {ai_horizon!r} "
+                        f"({result.get('horizon_reason', '')})"
+                    )
+            except Exception as _hz_e:
+                logger.warning(f"[{stock_name}] horizon 업데이트 실패: {_hz_e}")
+
         # 전략 노트 기록
         detail_parts = []
         if tp:
