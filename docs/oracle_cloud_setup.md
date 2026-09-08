@@ -207,6 +207,58 @@ sudo systemctl stop quant-worker
 sudo journalctl -u quant-worker -f
 ```
 
+### 실제 운영 서버(`quant-worker`) 기준 차이
+
+위 예시는 Oracle Linux / `opc` 유저 기준입니다. 현재 운영 중인 VM은 Ubuntu / `ubuntu` 유저이며, 등록된 unit이 예시와 다음과 같이 다릅니다.
+
+| 항목 | 문서 예시 | 실제 `/etc/systemd/system/quant-worker.service` |
+|---|---|---|
+| `User` | `opc` | `ubuntu` |
+| `WorkingDirectory` | `/home/opc/quant_trading` | `/home/ubuntu/quant-trading` (밑줄이 아니라 하이픈) |
+| `ExecStart` | `.venv/bin/python -m worker.main` | `/home/ubuntu/quant-trading/.venv/bin/python worker/main.py` |
+| `Restart` | `always` / `RestartSec=10` | `on-failure` / `RestartSec=15` |
+| `EnvironmentFile` | `.env` 지정 | 미사용 (워커가 직접 `.env` 로드) |
+| 기타 | — | `KillMode=control-group`, `TimeoutStopSec=30` |
+
+로그 경로도 실제로는 `/home/ubuntu/quant-trading/logs/worker.log`입니다. 이 문서의 `~/quant_trading/...` 경로 예시를 그대로 복사하지 마십시오.
+
+같은 VM에서 `stock-coach` 백엔드/프론트엔드가 PM2(`pm2-ubuntu.service` -> `stockcoach-api`, `stockcoach-web`)로 함께 운영됩니다. 상세는 `stock-coach` 저장소 README의 운영 실행 섹션을 참고하십시오.
+
+### 현재 자동실행 상태: 비활성 (2026-09-08 기준)
+
+외부 API 키 만료로 정상 동작이 불가능해 워커 자동실행을 중단했습니다.
+
+```bash
+sudo systemctl disable --now quant-worker.service   # 부팅 자동실행 해제 + 즉시 중단
+```
+
+같은 시점에 stock-coach 쪽 `pm2-ubuntu.service`도 함께 비활성화했습니다.
+
+#### 재개 절차
+
+1. `.env`의 만료된 키를 먼저 갱신합니다. 키움(`KIWOOM_*`)은 공통 필수이고, AI 키는 아래 브랜치별 필요 키를 확인하십시오.
+2. 주문 안전장치(`AUTO_TRADE`)가 의도한 값인지 확인합니다.
+3. 그 다음 서비스를 다시 켭니다.
+
+```bash
+sudo systemctl enable --now quant-worker.service
+sudo systemctl status quant-worker.service
+tail -f /home/ubuntu/quant-trading/logs/worker.log
+```
+
+`Restart=on-failure`이므로 키가 만료된 상태로 enable 하면 15초 간격으로 재시작을 반복하며 로그만 쌓입니다. 키 갱신 전에는 enable 하지 마십시오.
+
+#### 브랜치별 필요 키 (주의)
+
+이 저장소는 판단 엔진이 다른 두 브랜치를 유지합니다. 브랜치를 전환해 운용할 경우 **필요한 AI 키가 달라진다는 점**에 주의하십시오.
+
+| 브랜치 | 판단 설정 (`config/worker.yaml`) | 필수 AI 키 |
+|---|---|---|
+| `main` (일반) | `use_claude_api: true`, `claude_model` | `ANTHROPIC_API_KEY` |
+| `feature/agent-mode` (에이전트) | `use_agent_mode: true`, `judgment_agent_model` / `research_agent_model` | `OPENAI_API_KEY` (OpenAI 호환 API) |
+
+현재 서버에 체크아웃된 브랜치는 `feature/agent-mode`이고 `use_agent_mode: true`이므로, 재개하려면 `OPENAI_API_KEY` 갱신이 필수입니다. `use_agent_mode: false`로 내리면 레거시 경로(`ANTHROPIC_API_KEY`가 있으면 Claude, 없으면 OpenAI 폴백)로 동작합니다.
+
 ---
 
 ## 7단계: 코드 업데이트 방법
