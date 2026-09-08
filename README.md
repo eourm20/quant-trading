@@ -3,6 +3,11 @@
 키움 REST API + AI 판단(Claude/OpenAI) 기반의 자동 트레이딩 워커입니다.  
 이 문서는 `main` 브랜치 코드를 기준으로, 실행 구조/데이터 저장/운영 흐름을 정리합니다.
 
+> **브랜치 정책** — 이 저장소는 두 버전을 의도적으로 병행 유지합니다.
+> `main`은 에이전트를 쓰지 않는 일반 버전이고, `feature/agent-mode`는 Agent + RAG 버전입니다.
+> 어느 쪽도 다른 쪽의 구버전이 아니며 병합 예정도 없습니다. 필요한 AI 키가 서로 다릅니다
+> (`main` → `ANTHROPIC_API_KEY`, `feature/agent-mode` → `OPENAI_API_KEY`).
+
 ## 1. 핵심 스택
 
 - Python
@@ -235,16 +240,9 @@ quant-trading/
 | `prefilter` | 스크리닝 1차 필터(`market_cap_min`, `change_upper/lower`, `rsi_max`, `ma_ratio`, `volume_ratio_min/max`, `consecutive_candles`) |
 | | 레짐 보정(`market_bull_threshold`, `market_bear_threshold`, `bull_*`, `bear_*`), 후보 수 `max_ai_candidates` |
 
-## 8.3 브랜치 주의: `use_agent_mode`는 이 브랜치에서 동작하지 않습니다
+## 8.3 브랜치 주의: 에이전트 판단은 이 브랜치에 없습니다
 
-`worker/claude_judge.py::get_trade_opinion()`에는 `worker.yaml`의 `use_agent_mode`를 읽어
-`worker.agents.judgment_agent`를 호출하는 분기가 남아 있습니다. 그러나 **이 브랜치에는 `worker/agents/`가 없습니다.**
-
-- `main`의 `worker.yaml`에는 `use_agent_mode` 키 자체가 없어 기본값 `False` → 레거시 경로로 동작합니다.
-- 임의로 `use_agent_mode: true`를 넣으면 import가 실패하고 경고 로그(`[Agent모드] 실패, 레거시로 폴백`)를 남긴 뒤
-  레거시 경로로 폴백합니다. 즉 켜도 효과가 없습니다.
-
-에이전트 판단이 필요하면 `feature/agent-mode` 브랜치를 쓰십시오. 그 브랜치는 `OPENAI_API_KEY`가 필수입니다.
+이 브랜치에는 `worker/agents/`가 없고 `use_agent_mode` 설정도 인식하지 않습니다. 에이전트 판단이 필요하면 `feature/agent-mode` 브랜치를 쓰십시오(그 브랜치는 `OPENAI_API_KEY`가 필수).
 
 ## 9. 실행 방법
 
