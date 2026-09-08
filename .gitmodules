@@ -1,0 +1,4 @@
+[submodule "kiwoom_mcp"]
+	path = kiwoom_mcp
+	url = https://github.com/eourm20/kiwoom-api-mcp-server.git
+	branch = quant_trading
