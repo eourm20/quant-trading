@@ -66,7 +66,7 @@ quant-trading/
       dart_client.py           # DART 공시/재무
       news_client.py           # 네이버 뉴스 + RSS
       global_market.py         # 글로벌 지수/거시 지표
-  kiwoom_mcp/                  # MCP 확장 (별도 README)
+  kiwoom_mcp/                  # 서브모듈 -> kiwoom-api-mcp-server (quant_trading 브랜치)
   docs/
     oracle_cloud_setup.md      # 서버 배포 + systemd 자동실행 가이드
   scripts/                     # 일회성 점검 스크립트 (gitignore)
@@ -76,6 +76,16 @@ quant-trading/
   requirements.txt
   README.md
 ```
+
+`kiwoom_mcp`은 이 저장소에 포함된 파일이 아니라 **서브모듈**입니다.
+[eourm20/kiwoom-api-mcp-server](https://github.com/eourm20/kiwoom-api-mcp-server)의 `quant_trading` 브랜치를 가리킵니다.
+clone 직후에는 빈 디렉터리이므로 아래로 채웁니다.
+
+```bash
+git submodule update --init kiwoom_mcp
+```
+
+워커 코드는 `kiwoom_mcp`를 import하지 않으므로, 채우지 않아도 워커 실행에는 영향이 없습니다.
 
 ## 4. 실행 흐름
 
